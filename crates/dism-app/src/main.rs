@@ -5,12 +5,22 @@ use dism_core::cleaner::{
     execute_cleanup, is_deferred_system_task_proc, scan_all, scan_custom_proc_name, scan_rule,
     CleanupScanResult,
 };
-use dism_core::diskmap::{analyze_path, get_presets, recycle_path};
+use dism_core::diskmap::{
+    analyze_path, find_duplicate_files, find_orphaned_app_dirs, get_presets, recycle_path,
+};
 use dism_core::drivers::{default_backup_dir, delete_driver, export_drivers, list_drivers};
 use dism_core::evaluator::eval_condition;
 use dism_core::features::{list_optional_features, set_feature_enabled};
-use dism_core::optimizer::{apply_optimization, evaluate_all_groups, ApplyValue, ScopeName};
-use dism_core::startup::{list_startup_items, set_startup_enabled};
+use dism_core::lockcheck::{find_locking_processes, terminate_locking_process};
+use dism_core::optimizer::{
+    apply_optimization, apply_optimization_batch, evaluate_all_groups, export_optimization_profile,
+    get_optimization_presets, ApplyValue, OptimizationProfileEntry, ScopeName,
+};
+use dism_core::rescue::{create_restore_point, list_restore_points, run_rescue_action};
+use dism_core::startup::{
+    list_scheduled_tasks, list_startup_items, list_third_party_services,
+    set_scheduled_task_enabled, set_service_start_mode, set_startup_enabled,
+};
 use dism_core::sysinfo::relaunch_as_admin;
 use dism_core::systasks::{get_system_task_status, run_system_task};
 use dism_core::{Catalog, SnapshotManager, SystemInfo};
@@ -106,6 +116,44 @@ struct FeatureToggleReq {
 #[derive(Deserialize)]
 struct SysTaskRunReq {
     task_id: String,
+}
+
+#[derive(Deserialize)]
+struct TerminatePidReq {
+    pid: u32,
+}
+
+#[derive(Deserialize)]
+struct ServiceModeReq {
+    name: String,
+    start_mode: String,
+}
+
+#[derive(Deserialize)]
+struct TaskToggleReq {
+    path: String,
+    enabled: bool,
+}
+
+#[derive(Deserialize)]
+struct OptBatchReq {
+    entries: Vec<OptimizationProfileEntry>,
+}
+
+#[derive(Deserialize)]
+struct CreateRestorePointReq {
+    description: String,
+}
+
+#[derive(Deserialize)]
+struct RescueRunReq {
+    action_id: String,
+}
+
+#[derive(Deserialize)]
+struct DuplicatesReq {
+    path: String,
+    min_size_bytes: Option<u64>,
 }
 
 #[derive(Serialize)]
@@ -552,6 +600,84 @@ fn dispatch_api(
                 "outcome": outcome,
                 "system": updated_sys,
             }))
+        }
+        (&Method::Post, "/api/lockcheck/inspect") => {
+            let payload: RevealReq = read_json_body(req)?;
+            let processes = find_locking_processes(Path::new(payload.path.trim()));
+            Ok(serde_json::json!({ "processes": processes }))
+        }
+        (&Method::Post, "/api/lockcheck/terminate") => {
+            let payload: TerminatePidReq = read_json_body(req)?;
+            let message = terminate_locking_process(payload.pid)?;
+            Ok(serde_json::json!({ "ok": true, "message": message }))
+        }
+        (&Method::Get, "/api/startup/services") => {
+            let services = list_third_party_services();
+            Ok(serde_json::json!({ "services": services }))
+        }
+        (&Method::Post, "/api/startup/services/mode") => {
+            let payload: ServiceModeReq = read_json_body(req)?;
+            let service = set_service_start_mode(&payload.name, &payload.start_mode)?;
+            let services = list_third_party_services();
+            Ok(serde_json::json!({ "service": service, "services": services }))
+        }
+        (&Method::Get, "/api/startup/tasks") => {
+            let tasks = list_scheduled_tasks();
+            Ok(serde_json::json!({ "tasks": tasks }))
+        }
+        (&Method::Post, "/api/startup/tasks/toggle") => {
+            let payload: TaskToggleReq = read_json_body(req)?;
+            set_scheduled_task_enabled(&payload.path, payload.enabled)?;
+            let tasks = list_scheduled_tasks();
+            Ok(serde_json::json!({ "tasks": tasks }))
+        }
+        (&Method::Get, "/api/optimizer/presets") => {
+            let presets = get_optimization_presets();
+            Ok(serde_json::json!({ "presets": presets }))
+        }
+        (&Method::Post, "/api/optimizer/batch") => {
+            let payload: OptBatchReq = read_json_body(req)?;
+            let outcome = apply_optimization_batch(
+                &state.catalog.optimization_groups,
+                &payload.entries,
+                &state.snap_mgr,
+            )?;
+            let groups = evaluate_all_groups(&state.catalog.optimization_groups, &sys);
+            Ok(serde_json::json!({
+                "outcome": outcome,
+                "groups": groups,
+            }))
+        }
+        (&Method::Get, "/api/optimizer/profile/export") => {
+            let profile = export_optimization_profile(&state.catalog.optimization_groups, &sys);
+            Ok(serde_json::to_value(profile)?)
+        }
+        (&Method::Get, "/api/rescue/restore-points") => {
+            let points = list_restore_points();
+            Ok(serde_json::json!({ "points": points }))
+        }
+        (&Method::Post, "/api/rescue/restore-points/create") => {
+            let payload: CreateRestorePointReq = read_json_body(req)?;
+            let message = create_restore_point(&payload.description)?;
+            let points = list_restore_points();
+            Ok(serde_json::json!({ "message": message, "points": points }))
+        }
+        (&Method::Post, "/api/rescue/run") => {
+            let payload: RescueRunReq = read_json_body(req)?;
+            let outcome = run_rescue_action(&payload.action_id)?;
+            Ok(serde_json::to_value(outcome)?)
+        }
+        (&Method::Post, "/api/diskmap/duplicates") => {
+            let payload: DuplicatesReq = read_json_body(req)?;
+            let report = find_duplicate_files(
+                Path::new(payload.path.trim()),
+                payload.min_size_bytes.unwrap_or(512 * 1024),
+            )?;
+            Ok(serde_json::to_value(report)?)
+        }
+        (&Method::Get, "/api/diskmap/orphans") => {
+            let orphans = find_orphaned_app_dirs();
+            Ok(serde_json::json!({ "orphans": orphans }))
         }
         _ => Err(anyhow::anyhow!("Unknown API endpoint: {}", path)),
     }

@@ -21,6 +21,7 @@ import {
   Rocket24Regular,
   Settings24Regular,
   ShieldCheckmark24Regular,
+  ToolboxRegular,
   WeatherMoon24Regular,
   WeatherSunny24Regular,
 } from '@fluentui/react-icons';
@@ -42,6 +43,7 @@ import { StartupView } from './views/StartupView';
 import { AppxView } from './views/AppxView';
 import { DriverView } from './views/DriverView';
 import { FeaturesView } from './views/FeaturesView';
+import { RescueView } from './views/RescueView';
 
 type NavTab = DashboardTargetTab;
 
@@ -292,6 +294,14 @@ const AppShell: React.FC<{
             </Button>
             <Button
               className={styles.navBtn}
+              appearance={tab === 'rescue' ? 'primary' : 'subtle'}
+              icon={<ToolboxRegular style={{ fontSize: 22 }} />}
+              onClick={() => setTab('rescue')}
+            >
+              {lang === 'zh' ? '系统急救箱' : 'Rescue Center'}
+            </Button>
+            <Button
+              className={styles.navBtn}
               appearance={tab === 'snapshots' ? 'primary' : 'subtle'}
               icon={<History24Regular />}
               onClick={() => setTab('snapshots')}
@@ -458,11 +468,16 @@ const AppShell: React.FC<{
             <StartupView lang={lang} isAdmin={Boolean(sysPayload?.system.is_admin)} />
           ) : tab === 'appx' ? (
             <AppxView lang={lang} />
+          ) : tab === 'rescue' ? (
+            <RescueView lang={lang} isAdmin={Boolean(sysPayload?.system.is_admin)} />
           ) : tab === 'optimize' ? (
             <OptimizationView
               lang={lang}
               groups={optGroups}
-              onGroupsUpdated={setOptGroups}
+              onGroupsUpdated={(next) => {
+                setOptGroups(next);
+                void refreshSnapshots();
+              }}
               onSnapshotCreated={(snap) => setSnapshots((prev) => [snap, ...prev])}
               onJumpToSnapshots={() => setTab('snapshots')}
             />

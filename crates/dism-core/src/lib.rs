@@ -5,7 +5,9 @@ pub mod diskmap;
 pub mod drivers;
 pub mod evaluator;
 pub mod features;
+pub mod lockcheck;
 pub mod optimizer;
+pub mod rescue;
 pub mod snapshot;
 pub mod startup;
 pub mod sysinfo;
@@ -18,7 +20,9 @@ pub use cleaner::{
     CleanupExecutionReport, CleanupScanResult, FileStatus, PreviewFile,
 };
 pub use diskmap::{
-    analyze_path, get_presets, recycle_path, DiskAnalysisReport, DiskPreset, DiskTreeNode,
+    analyze_path, find_duplicate_files, find_orphaned_app_dirs, get_presets, recycle_path,
+    DiskAnalysisReport, DiskPreset, DiskTreeNode, DuplicateFileEntry, DuplicateGroup,
+    DuplicateScanReport, OrphanDirEntry,
 };
 pub use drivers::{
     default_backup_dir, delete_driver, export_drivers, list_drivers, DriverBackupReport,
@@ -28,12 +32,23 @@ pub use features::{
     list_optional_features, set_feature_enabled, FeatureCategory, FeatureToggleOutcome,
     WindowsFeatureInfo,
 };
+pub use lockcheck::{find_locking_processes, terminate_locking_process, LockingProcessInfo};
 pub use optimizer::{
-    apply_optimization, evaluate_all_groups, ApplyOutcome, ApplyValue, OptimizationGroupStatus,
-    OptimizationItemStatus, ScopeName, ScopeStatus,
+    apply_optimization, apply_optimization_batch, evaluate_all_groups,
+    export_optimization_profile, get_optimization_presets, ApplyOutcome, ApplyValue,
+    BatchApplyOutcome, OptimizationGroupStatus, OptimizationItemStatus, OptimizationPreset,
+    OptimizationProfile, OptimizationProfileEntry, ScopeName, ScopeStatus,
+};
+pub use rescue::{
+    create_restore_point, list_restore_points, run_rescue_action, RescueActionOutcome,
+    RestorePointInfo,
 };
 pub use snapshot::{snapshot_summary, RegistrySnapshot, SnapshotManager, SnapshotSummary};
-pub use startup::{list_startup_items, set_startup_enabled, StartupItem, StartupScope};
+pub use startup::{
+    list_scheduled_tasks, list_startup_items, list_third_party_services,
+    set_scheduled_task_enabled, set_service_start_mode, set_startup_enabled, ScheduledTaskItem,
+    StartupItem, StartupScope, ThirdPartyServiceItem,
+};
 pub use sysinfo::SystemInfo;
 pub use systasks::{
     get_system_task_status, query_compact_os, run_system_task, SystemTaskExecOutcome,

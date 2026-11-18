@@ -35,7 +35,10 @@ import {
   DiskAnalysisReport,
   DiskPreset,
   DiskTreeNode,
+  DuplicateGroup,
+  DuplicateScanReport,
   Lang,
+  OrphanDirEntry,
   SystemInfo,
   api,
   formatBytes,
@@ -478,12 +481,20 @@ export const DiskAnalyzerView: React.FC<Props> = ({ lang, onSystemUpdated }) => 
   const [loadingDirs, setLoadingDirs] = useState<Set<string>>(new Set());
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
   const [zoomStack, setZoomStack] = useState<string[]>([]);
-  const [leftTab, setLeftTab] = useState<'tree' | 'files'>('tree');
+  const [leftTab, setLeftTab] = useState<'tree' | 'files' | 'duplicates' | 'orphans'>('tree');
+  const [dupReport, setDupReport] = useState<DuplicateScanReport | null>(null);
+  const [dupLoading, setDupLoading] = useState(false);
+  const [orphanDirs, setOrphanDirs] = useState<OrphanDirEntry[] | null>(null);
+  const [orphanLoading, setOrphanLoading] = useState(false);
   const [activeExt, setActiveExt] = useState<string | null>(null);
   const [hoveredLeaf, setHoveredLeaf] = useState<PaintedLeaf | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [recycleNotice, setRecycleNotice] = useState<string | null>(null);
-  const [recycleConfirmTarget, setRecycleConfirmTarget] = useState<{ path: string; size_bytes: number } | null>(null);
+  const [recycleConfirmTarget, setRecycleConfirmTarget] = useState<{
+    paths: string[];
+    size_bytes: number;
+    label: string;
+  } | null>(null);
   const [recycling, setRecycling] = useState(false);
   const [topHeightPct, setTopHeightPct] = useState(54);
   const [copiedNotice, setCopiedNotice] = useState(false);
@@ -535,10 +546,47 @@ export const DiskAnalyzerView: React.FC<Props> = ({ lang, onSystemUpdated }) => 
       setExpandedPaths(new Set([res.tree.path]));
       setSelectedPath(res.tree.path);
       setZoomStack([res.tree.path]);
+      setDupReport(null);
     } catch (e) {
       setErrorMsg(String(e));
     } finally {
       setLoading(false);
+    }
+  };
+
+  const runDupScan = async (rootPath: string) => {
+    setDupLoading(true);
+    setErrorMsg(null);
+    try {
+      const res = await api.findDuplicates(rootPath, 512 * 1024);
+      setDupReport(res);
+    } catch (e) {
+      setErrorMsg(String(e));
+    } finally {
+      setDupLoading(false);
+    }
+  };
+
+  const runOrphanScan = async () => {
+    setOrphanLoading(true);
+    setErrorMsg(null);
+    try {
+      const res = await api.getOrphanDirs();
+      setOrphanDirs(res.orphans);
+    } catch (e) {
+      setErrorMsg(String(e));
+    } finally {
+      setOrphanLoading(false);
+    }
+  };
+
+  const handleSelectLeftTab = (next: 'tree' | 'files' | 'duplicates' | 'orphans') => {
+    setLeftTab(next);
+    if (next === 'duplicates' && report && (!dupReport || dupReport.root_path !== report.root_path) && !dupLoading) {
+      void runDupScan(report.root_path);
+    }
+    if (next === 'orphans' && orphanDirs === null && !orphanLoading) {
+      void runOrphanScan();
     }
   };
 
@@ -814,37 +862,79 @@ export const DiskAnalyzerView: React.FC<Props> = ({ lang, onSystemUpdated }) => 
 
   const confirmRecycle = async () => {
     if (!recycleConfirmTarget || !report) return;
-    const target = recycleConfirmTarget.path;
+    const targets = recycleConfirmTarget.paths;
     setRecycling(true);
     setErrorMsg(null);
     setRecycleNotice(null);
     try {
-      const res = await api.recyclePath(target);
-      onSystemUpdated?.(res.system);
-      const { updated, removedBytes, removedFiles, removedDirs } = removeNodeFromTree(report.tree, target);
-      const deltaBytes = removedBytes > 0 ? removedBytes : res.freed_bytes;
-      const prefix = `${target.toLowerCase()}\\`;
-      const nextLargest = report.largest_files.filter(
-        (f) => f.path.toLowerCase() !== target.toLowerCase() && !f.path.toLowerCase().startsWith(prefix)
-      );
+      let totalFreed = 0;
+      let nextTree = report.tree;
+      let nextTotalBytes = report.total_bytes;
+      let nextTotalFiles = report.total_files;
+      let nextTotalDirs = report.total_dirs;
+      let nextLargest = report.largest_files;
+
+      for (const target of targets) {
+        const res = await api.recyclePath(target);
+        totalFreed += res.freed_bytes;
+        onSystemUpdated?.(res.system);
+        const { updated, removedBytes, removedFiles, removedDirs } = removeNodeFromTree(
+          nextTree,
+          target
+        );
+        nextTree = updated;
+        const deltaBytes = removedBytes > 0 ? removedBytes : res.freed_bytes;
+        nextTotalBytes = Math.max(0, nextTotalBytes - deltaBytes);
+        nextTotalFiles = Math.max(0, nextTotalFiles - removedFiles);
+        nextTotalDirs = Math.max(0, nextTotalDirs - removedDirs);
+        const prefix = `${target.toLowerCase()}\\`;
+        nextLargest = nextLargest.filter(
+          (f) => f.path.toLowerCase() !== target.toLowerCase() && !f.path.toLowerCase().startsWith(prefix)
+        );
+      }
+
       setReport({
         ...report,
-        total_bytes: Math.max(0, report.total_bytes - deltaBytes),
-        total_files: Math.max(0, report.total_files - removedFiles),
-        total_dirs: Math.max(0, report.total_dirs - removedDirs),
-        tree: updated,
+        total_bytes: nextTotalBytes,
+        total_files: nextTotalFiles,
+        total_dirs: nextTotalDirs,
+        tree: nextTree,
         largest_files: nextLargest,
       });
-      if (selectedPath === target || selectedPath?.toLowerCase().startsWith(prefix)) {
-        setSelectedPath(updated.path);
-      }
+
+      const recycledLower = new Set(targets.map((t) => t.toLowerCase()));
+      setDupReport((prev) => {
+        if (!prev) return prev;
+        const nextGroups = prev.groups
+          .map((g) => {
+            const keptFiles = g.files.filter((f) => !recycledLower.has(f.path.toLowerCase()));
+            return {
+              ...g,
+              files: keptFiles,
+              wasted_bytes:
+                keptFiles.length > 1 ? g.size_bytes * (keptFiles.length - 1) : 0,
+            };
+          })
+          .filter((g) => g.files.length >= 2);
+        return {
+          ...prev,
+          groups: nextGroups,
+          total_groups: nextGroups.length,
+          total_wasted_bytes: nextGroups.reduce((a, g) => a + g.wasted_bytes, 0),
+        };
+      });
+      setOrphanDirs((prev) =>
+        prev ? prev.filter((o) => !recycledLower.has(o.path.toLowerCase())) : prev
+      );
+
+      setSelectedPath(nextTree.path);
       setZoomStack((prev) =>
-        prev.filter((p) => p.toLowerCase() !== target.toLowerCase() && !p.toLowerCase().startsWith(prefix))
+        prev.filter((p) => !targets.some((t) => p.toLowerCase() === t.toLowerCase() || p.toLowerCase().startsWith(`${t.toLowerCase()}\\`)))
       );
       setRecycleNotice(
         lang === 'zh'
-          ? `已安全移入系统回收站（释放 ${formatBytes(res.freed_bytes)}）：${target}`
-          : `Moved to Recycle Bin (${formatBytes(res.freed_bytes)}): ${target}`
+          ? `已安全移入系统回收站（${targets.length} 项，释放 ${formatBytes(totalFreed)}）`
+          : `Moved ${targets.length} item(s) to Recycle Bin (${formatBytes(totalFreed)})`
       );
       setRecycleConfirmTarget(null);
     } catch (e) {
@@ -1113,7 +1203,7 @@ export const DiskAnalyzerView: React.FC<Props> = ({ lang, onSystemUpdated }) => 
                       })}
                     </div>
                   </>
-                ) : (
+                ) : leftTab === 'files' ? (
                   <>
                     <div className={`${styles.tableHeader} ${styles.largeFileCols}`}>
                       <span>{lang === 'zh' ? '文件路径' : 'File Path'}</span>
@@ -1165,7 +1255,11 @@ export const DiskAnalyzerView: React.FC<Props> = ({ lang, onSystemUpdated }) => 
                               title={lang === 'zh' ? '移入回收站' : 'Move to Recycle Bin'}
                               onClick={(e) => {
                                 e.stopPropagation();
-                                setRecycleConfirmTarget({ path: lf.path, size_bytes: lf.size_bytes });
+                                setRecycleConfirmTarget({
+                                  paths: [lf.path],
+                                  size_bytes: lf.size_bytes,
+                                  label: lf.path,
+                                });
                               }}
                             />
                           </div>
@@ -1173,24 +1267,259 @@ export const DiskAnalyzerView: React.FC<Props> = ({ lang, onSystemUpdated }) => 
                       ))}
                     </div>
                   </>
+                ) : leftTab === 'duplicates' ? (
+                  <div className={styles.scrollBody} style={{ padding: 10 }}>
+                    <div
+                      style={{
+                        display: 'flex',
+                        justifyContent: 'space-between',
+                        alignItems: 'center',
+                        marginBottom: 8,
+                        gap: 8,
+                      }}
+                    >
+                      <Text size={200} weight="semibold">
+                        {dupReport
+                          ? lang === 'zh'
+                            ? `扫描耗时 ${dupReport.elapsed_ms}ms · ${dupReport.total_groups} 组重复文件 · 可节省 ${formatBytes(dupReport.total_wasted_bytes)}`
+                            : `${dupReport.total_groups} duplicate groups · ${formatBytes(dupReport.total_wasted_bytes)} wasted (${dupReport.elapsed_ms}ms)`
+                          : lang === 'zh'
+                          ? '正在准备重复文件扫描...'
+                          : 'Preparing duplicate scan...'}
+                      </Text>
+                      <Button
+                        size="small"
+                        appearance="outline"
+                        disabled={dupLoading}
+                        onClick={() => void runDupScan(report.root_path)}
+                      >
+                        {dupLoading ? <Spinner size="tiny" /> : lang === 'zh' ? '重新查重' : 'Rescan'}
+                      </Button>
+                    </div>
+                    {dupLoading ? (
+                      <div style={{ display: 'flex', justifyContent: 'center', padding: 30 }}>
+                        <Spinner label={lang === 'zh' ? '三阶哈希查重中 (大小 -> 首尾采样 -> 全文)...' : 'Hashing duplicates...'} />
+                      </div>
+                    ) : !dupReport || dupReport.groups.length === 0 ? (
+                      <Text size={200} style={{ color: tokens.colorNeutralForeground3 }}>
+                        {lang === 'zh' ? '该目录下未发现大于 512 KB 的重复文件。' : 'No duplicate files (>512 KB) found.'}
+                      </Text>
+                    ) : (
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                        {dupReport.groups.map((g: DuplicateGroup) => (
+                          <div
+                            key={g.hash_hex}
+                            style={{
+                              padding: 8,
+                              borderRadius: tokens.borderRadiusMedium,
+                              backgroundColor: tokens.colorNeutralBackground1,
+                              border: `1px solid ${tokens.colorNeutralStroke2}`,
+                              display: 'flex',
+                              flexDirection: 'column',
+                              gap: 4,
+                            }}
+                          >
+                            <div
+                              style={{
+                                display: 'flex',
+                                justifyContent: 'space-between',
+                                alignItems: 'center',
+                                gap: 8,
+                              }}
+                            >
+                              <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                                <Badge size="small" appearance="tint" color="warning">
+                                  {g.files.length}x
+                                </Badge>
+                                <Text size={200} weight="semibold">
+                                  {g.files[0]?.name} · {formatBytes(g.size_bytes)} (
+                                  {lang === 'zh' ? '可省' : 'wasted'} {formatBytes(g.wasted_bytes)})
+                                </Text>
+                              </div>
+                              <Button
+                                size="small"
+                                appearance="primary"
+                                icon={<Delete16Regular />}
+                                onClick={() => {
+                                  const toRecycle = g.files.slice(1).map((f) => f.path);
+                                  if (toRecycle.length === 0) return;
+                                  setRecycleConfirmTarget({
+                                    paths: toRecycle,
+                                    size_bytes: g.wasted_bytes,
+                                    label:
+                                      lang === 'zh'
+                                        ? `保留最新 (${g.files[0].path})，其余 ${toRecycle.length} 个副本移入回收站`
+                                        : `Keep newest (${g.files[0].path}), recycle ${toRecycle.length} older copies`,
+                                  });
+                                }}
+                              >
+                                {lang === 'zh' ? '保留最新，清理副本' : 'Keep Newest'}
+                              </Button>
+                            </div>
+                            {g.files.map((f, idx) => (
+                              <div
+                                key={f.path}
+                                style={{
+                                  display: 'flex',
+                                  justifyContent: 'space-between',
+                                  alignItems: 'center',
+                                  gap: 8,
+                                  fontSize: 11,
+                                  color: tokens.colorNeutralForeground2,
+                                }}
+                              >
+                                <span
+                                  style={{
+                                    overflow: 'hidden',
+                                    textOverflow: 'ellipsis',
+                                    whiteSpace: 'nowrap',
+                                    fontFamily: 'Consolas, monospace',
+                                  }}
+                                  title={f.path}
+                                >
+                                  {idx === 0 ? '★ ' : '• '}
+                                  {f.path}
+                                </span>
+                                <span style={{ flexShrink: 0 }}>{f.modified_date}</span>
+                              </div>
+                            ))}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                  <div className={styles.scrollBody} style={{ padding: 10 }}>
+                    <div
+                      style={{
+                        display: 'flex',
+                        justifyContent: 'space-between',
+                        alignItems: 'center',
+                        marginBottom: 8,
+                        gap: 8,
+                      }}
+                    >
+                      <Text size={200} weight="semibold">
+                        {orphanDirs
+                          ? lang === 'zh'
+                            ? `识别到 ${orphanDirs.length} 个未匹配本机已安装程序的 AppData / ProgramData 较大目录（删除前请核实是否为绿色免安装软件）`
+                            : `${orphanDirs.length} unmatched AppData / ProgramData directories (>1 MB)`
+                          : lang === 'zh'
+                          ? '正在比对本机软件清单...'
+                          : 'Matching installed apps...'}
+                      </Text>
+                      <Button
+                        size="small"
+                        appearance="outline"
+                        disabled={orphanLoading}
+                        onClick={() => void runOrphanScan()}
+                      >
+                        {orphanLoading ? <Spinner size="tiny" /> : lang === 'zh' ? '重新检测' : 'Rescan'}
+                      </Button>
+                    </div>
+                    {orphanLoading ? (
+                      <div style={{ display: 'flex', justifyContent: 'center', padding: 30 }}>
+                        <Spinner label={lang === 'zh' ? '正在交叉比对 Uninstall 与 AppX 清单...' : 'Cross-checking installed software...'} />
+                      </div>
+                    ) : !orphanDirs || orphanDirs.length === 0 ? (
+                      <Text size={200} style={{ color: tokens.colorNeutralForeground3 }}>
+                        {lang === 'zh' ? '未发现明显的疑似卸载残留大目录。' : 'No suspected orphaned directories found.'}
+                      </Text>
+                    ) : (
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                        {orphanDirs.map((od) => (
+                          <div
+                            key={od.path}
+                            style={{
+                              display: 'flex',
+                              justifyContent: 'space-between',
+                              alignItems: 'center',
+                              gap: 10,
+                              padding: 8,
+                              borderRadius: tokens.borderRadiusMedium,
+                              backgroundColor: tokens.colorNeutralBackground1,
+                              border: `1px solid ${tokens.colorNeutralStroke2}`,
+                            }}
+                          >
+                            <div style={{ minWidth: 0, flex: 1 }}>
+                              <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                                <Text size={200} weight="semibold">
+                                  {od.name}
+                                </Text>
+                                <Badge size="small" appearance="outline">
+                                  {od.scope_label}
+                                </Badge>
+                                <Badge size="small" appearance="tint" color="warning">
+                                  {formatBytes(od.size_bytes)}
+                                </Badge>
+                              </div>
+                              <Text
+                                size={100}
+                                truncate
+                                block
+                                title={od.path}
+                                style={{
+                                  fontFamily: 'Consolas, monospace',
+                                  color: tokens.colorNeutralForeground3,
+                                }}
+                              >
+                                {od.path} ({od.file_count} files · {od.modified_date})
+                              </Text>
+                            </div>
+                            <div style={{ display: 'flex', gap: 4, flexShrink: 0 }}>
+                              <Button
+                                size="small"
+                                appearance="subtle"
+                                icon={<FolderOpen16Regular />}
+                                onClick={() => api.revealInExplorer(od.path)}
+                              />
+                              <Button
+                                size="small"
+                                appearance="outline"
+                                icon={<Delete16Regular />}
+                                onClick={() =>
+                                  setRecycleConfirmTarget({
+                                    paths: [od.path],
+                                    size_bytes: od.size_bytes,
+                                    label: od.path,
+                                  })
+                                }
+                              >
+                                {lang === 'zh' ? '回收站' : 'Recycle'}
+                              </Button>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
                 )}
 
                 <div className={styles.leftPaneFooter}>
                   <TabList
                     size="small"
                     selectedValue={leftTab}
-                    onTabSelect={(_, d) => setLeftTab(d.value as 'tree' | 'files')}
+                    onTabSelect={(_, d) =>
+                      handleSelectLeftTab(d.value as 'tree' | 'files' | 'duplicates' | 'orphans')
+                    }
                   >
                     <Tab value="tree">{lang === 'zh' ? '所有文件' : 'All Files'}</Tab>
                     <Tab value="files">
                       {lang === 'zh'
                         ? `最大文件 (${report.largest_files.length})`
-                        : `Largest Files (${report.largest_files.length})`}
+                        : `Largest (${report.largest_files.length})`}
+                    </Tab>
+                    <Tab value="duplicates">
+                      {lang === 'zh'
+                        ? `重复大文件${dupReport ? ` (${dupReport.total_groups})` : ''}`
+                        : `Duplicates${dupReport ? ` (${dupReport.total_groups})` : ''}`}
+                    </Tab>
+                    <Tab value="orphans">
+                      {lang === 'zh'
+                        ? `卸载残留${orphanDirs ? ` (${orphanDirs.length})` : ''}`
+                        : `Orphans${orphanDirs ? ` (${orphanDirs.length})` : ''}`}
                     </Tab>
                   </TabList>
-                  <Text size={100} style={{ color: tokens.colorNeutralForeground3 }}>
-                    {lang === 'zh' ? '双击目录展开 / 懒加载深层子项' : 'Double-click dir to expand'}
-                  </Text>
                 </div>
               </div>
 
@@ -1420,8 +1749,9 @@ export const DiskAnalyzerView: React.FC<Props> = ({ lang, onSystemUpdated }) => 
                   disabled={selectedNode.path === report.tree.path}
                   onClick={() =>
                     setRecycleConfirmTarget({
-                      path: selectedNode.path,
+                      paths: [selectedNode.path],
                       size_bytes: selectedNode.size_bytes,
+                      label: selectedNode.path,
                     })
                   }
                 >
@@ -1451,17 +1781,29 @@ export const DiskAnalyzerView: React.FC<Props> = ({ lang, onSystemUpdated }) => 
                   : 'The following item will be safely moved to the Windows Recycle Bin:'}
               </Text>
               {recycleConfirmTarget && (
-                <Text
-                  block
-                  style={{
-                    marginTop: 8,
-                    fontFamily: 'Consolas, monospace',
-                    wordBreak: 'break-all',
-                    fontWeight: 600,
-                  }}
-                >
-                  {recycleConfirmTarget.path} ({formatBytes(recycleConfirmTarget.size_bytes)})
-                </Text>
+                <div style={{ marginTop: 8, display: 'flex', flexDirection: 'column', gap: 4 }}>
+                  <Text
+                    block
+                    style={{
+                      fontFamily: 'Consolas, monospace',
+                      wordBreak: 'break-all',
+                      fontWeight: 600,
+                    }}
+                  >
+                    {recycleConfirmTarget.label} ({formatBytes(recycleConfirmTarget.size_bytes)})
+                  </Text>
+                  {recycleConfirmTarget.paths.length > 1 &&
+                    recycleConfirmTarget.paths.slice(0, 5).map((p) => (
+                      <Text
+                        key={p}
+                        size={100}
+                        block
+                        style={{ fontFamily: 'Consolas, monospace', color: tokens.colorNeutralForeground3 }}
+                      >
+                        • {p}
+                      </Text>
+                    ))}
+                </div>
               )}
             </DialogContent>
             <DialogActions>

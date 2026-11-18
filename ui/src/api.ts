@@ -40,11 +40,20 @@ export interface SysInfoPayload {
 
 export type FileStatus = 'Ready' | 'Locked' | 'Protected';
 
+export interface LockingProcessInfo {
+  pid: number;
+  app_name: string;
+  service_name: string | null;
+  app_type: string;
+  is_critical: boolean;
+}
+
 export interface PreviewFile {
   path: string;
   size_bytes: number;
   status: FileStatus;
   reason: string | null;
+  locking_processes?: LockingProcessInfo[];
 }
 
 export interface CleanupScanResult {
@@ -330,6 +339,95 @@ export interface SystemTaskExecOutcome {
   status: SystemTaskStatus;
 }
 
+export interface ThirdPartyServiceItem {
+  name: string;
+  display_name: string;
+  description: string;
+  image_path: string;
+  target_path: string | null;
+  start_mode: 'auto' | 'manual' | 'disabled' | string;
+  delayed_auto: boolean;
+  target_exists: boolean;
+}
+
+export interface ScheduledTaskItem {
+  path: string;
+  name: string;
+  command: string;
+  enabled: boolean;
+  state: string;
+}
+
+export interface OptimizationProfileEntry {
+  item_id: string;
+  scope: ScopeName;
+  value: boolean | number;
+}
+
+export interface OptimizationPreset {
+  id: string;
+  name: LocalizedText;
+  description: LocalizedText;
+  entries: OptimizationProfileEntry[];
+}
+
+export interface OptimizationProfile {
+  name: string;
+  created_at: string;
+  entries: OptimizationProfileEntry[];
+}
+
+export interface BatchApplyOutcome {
+  applied_count: number;
+  snapshots_created: number;
+  warnings: string[];
+}
+
+export interface RestorePointInfo {
+  sequence_number: number;
+  description: string;
+  creation_time: string;
+  event_type: string;
+}
+
+export interface RescueActionOutcome {
+  action_id: string;
+  success: boolean;
+  requires_restart: boolean;
+  output: string;
+}
+
+export interface DuplicateFileEntry {
+  path: string;
+  name: string;
+  modified_date: string;
+  modified_unix: number;
+}
+
+export interface DuplicateGroup {
+  hash_hex: string;
+  size_bytes: number;
+  wasted_bytes: number;
+  files: DuplicateFileEntry[];
+}
+
+export interface DuplicateScanReport {
+  root_path: string;
+  elapsed_ms: number;
+  total_groups: number;
+  total_wasted_bytes: number;
+  groups: DuplicateGroup[];
+}
+
+export interface OrphanDirEntry {
+  name: string;
+  path: string;
+  scope_label: string;
+  size_bytes: number;
+  file_count: number;
+  modified_date: string;
+}
+
 export const api = {
   getSysInfo: () => reqJson<SysInfoPayload>('/api/sysinfo'),
   elevate: () =>
@@ -417,4 +515,59 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ task_id }),
     }),
+  inspectFileLocks: (path: string) =>
+    reqJson<{ processes: LockingProcessInfo[] }>('/api/lockcheck/inspect', {
+      method: 'POST',
+      body: JSON.stringify({ path }),
+    }),
+  terminateLockingProcess: (pid: number) =>
+    reqJson<{ ok: boolean; message: string }>('/api/lockcheck/terminate', {
+      method: 'POST',
+      body: JSON.stringify({ pid }),
+    }),
+  getServices: () => reqJson<{ services: ThirdPartyServiceItem[] }>('/api/startup/services'),
+  setServiceMode: (name: string, start_mode: string) =>
+    reqJson<{ service: ThirdPartyServiceItem; services: ThirdPartyServiceItem[] }>(
+      '/api/startup/services/mode',
+      {
+        method: 'POST',
+        body: JSON.stringify({ name, start_mode }),
+      }
+    ),
+  getScheduledTasks: () => reqJson<{ tasks: ScheduledTaskItem[] }>('/api/startup/tasks'),
+  toggleScheduledTask: (path: string, enabled: boolean) =>
+    reqJson<{ tasks: ScheduledTaskItem[] }>('/api/startup/tasks/toggle', {
+      method: 'POST',
+      body: JSON.stringify({ path, enabled }),
+    }),
+  getOptPresets: () => reqJson<{ presets: OptimizationPreset[] }>('/api/optimizer/presets'),
+  applyOptBatch: (entries: OptimizationProfileEntry[]) =>
+    reqJson<{ outcome: BatchApplyOutcome; groups: OptimizationGroupStatus[] }>(
+      '/api/optimizer/batch',
+      {
+        method: 'POST',
+        body: JSON.stringify({ entries }),
+      }
+    ),
+  exportOptProfile: () => reqJson<OptimizationProfile>('/api/optimizer/profile/export'),
+  getRestorePoints: () => reqJson<{ points: RestorePointInfo[] }>('/api/rescue/restore-points'),
+  createRestorePoint: (description: string) =>
+    reqJson<{ message: string; points: RestorePointInfo[] }>(
+      '/api/rescue/restore-points/create',
+      {
+        method: 'POST',
+        body: JSON.stringify({ description }),
+      }
+    ),
+  runRescueAction: (action_id: string) =>
+    reqJson<RescueActionOutcome>('/api/rescue/run', {
+      method: 'POST',
+      body: JSON.stringify({ action_id }),
+    }),
+  findDuplicates: (path: string, min_size_bytes = 524288) =>
+    reqJson<DuplicateScanReport>('/api/diskmap/duplicates', {
+      method: 'POST',
+      body: JSON.stringify({ path, min_size_bytes }),
+    }),
+  getOrphanDirs: () => reqJson<{ orphans: OrphanDirEntry[] }>('/api/diskmap/orphans'),
 };

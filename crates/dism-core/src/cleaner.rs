@@ -35,6 +35,8 @@ pub struct PreviewFile {
     pub size_bytes: u64,
     pub status: FileStatus,
     pub reason: Option<String>,
+    #[serde(default)]
+    pub locking_processes: Vec<crate::lockcheck::LockingProcessInfo>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -177,6 +179,24 @@ pub fn scan_rule(rule: &CleanupRule, sys: &SystemInfo) -> CleanupScanResult {
     let mut preview_files = collected.files;
     preview_files.sort_by(|a, b| b.size_bytes.cmp(&a.size_bytes));
     preview_files.truncate(MAX_PREVIEW_FILES);
+
+    // Enrich up to the top 12 locked files with Restart Manager process info
+    let mut inspected_locks = 0usize;
+    for f in &mut preview_files {
+        if f.status == FileStatus::Locked && inspected_locks < 12 {
+            inspected_locks += 1;
+            let procs = crate::lockcheck::find_locking_processes(Path::new(&f.path));
+            if !procs.is_empty() {
+                let summary: Vec<String> = procs
+                    .iter()
+                    .take(3)
+                    .map(|p| format!("{} (PID {})", p.app_name, p.pid))
+                    .collect();
+                f.reason = Some(format!("被进程占用: {}", summary.join(", ")));
+                f.locking_processes = procs;
+            }
+        }
+    }
 
     CleanupScanResult {
         id: rule.id.clone(),
@@ -670,6 +690,7 @@ fn handle_custom_proc(
                             "已被更新版本 {} 取代，将通过 pnputil 安全移除 ({})",
                             newer, d.published_name
                         )),
+                        locking_processes: Vec::new(),
                     });
                     driver_targets.push((d.published_name.clone(), d.size_bytes));
                 }
@@ -807,6 +828,7 @@ fn record_file(path: &Path, files: &mut Vec<PreviewFile>, seen_paths: &mut HashS
         size_bytes,
         status,
         reason,
+        locking_processes: Vec::new(),
     });
 }
 

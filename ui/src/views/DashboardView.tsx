@@ -52,6 +52,7 @@ export type DashboardTargetTab =
   | 'optimize'
   | 'startup'
   | 'appx'
+  | 'rescue'
   | 'snapshots';
 
 interface Props {
@@ -509,14 +510,20 @@ export const DashboardView: React.FC<Props> = ({
               )}
             </div>
           </div>
-          <Button
-            appearance="outline"
-            icon={taskRunning ? <Spinner size="tiny" /> : <PlayRegular />}
-            disabled={taskRunning}
-            onClick={() => setConfirmCleanupOpen(true)}
-          >
-            {lang === 'zh' ? '执行 WinSxS 组件深度清理' : 'Run DISM /StartComponentCleanup'}
-          </Button>
+          <div style={{ display: 'flex', gap: 8 }}>
+            <Button
+              style={{ flex: 1 }}
+              appearance="outline"
+              icon={taskRunning ? <Spinner size="tiny" /> : <PlayRegular />}
+              disabled={taskRunning}
+              onClick={() => setConfirmCleanupOpen(true)}
+            >
+              {lang === 'zh' ? 'WinSxS 清理' : 'WinSxS Cleanup'}
+            </Button>
+            <Button style={{ flex: 1 }} appearance="outline" onClick={() => onNavigate('rescue')}>
+              {lang === 'zh' ? '系统急救箱' : 'Rescue Center'}
+            </Button>
+          </div>
         </div>
 
         {/* Card 6: Optimization & Snapshot Rollback */}

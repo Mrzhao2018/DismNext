@@ -1,12 +1,19 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Badge,
   Button,
+  Dialog,
+  DialogActions,
+  DialogBody,
+  DialogContent,
+  DialogSurface,
+  DialogTitle,
   Dropdown,
   Input,
   MessageBar,
   MessageBarBody,
   Option,
+  Spinner,
   Switch,
   Tab,
   TabList,
@@ -15,10 +22,13 @@ import {
   makeStyles,
   tokens,
 } from '@fluentui/react-components';
-import { Search20Regular, Warning16Regular } from '@fluentui/react-icons';
+import { ArrowDownloadRegular, Search20Regular, Warning16Regular } from '@fluentui/react-icons';
 import {
   Lang,
   OptimizationGroupStatus,
+  OptimizationPreset,
+  OptimizationProfile,
+  OptimizationProfileEntry,
   RegistrySnapshot,
   ScopeName,
   ScopeStatus,
@@ -109,8 +119,23 @@ export const OptimizationView: React.FC<Props> = ({
   const [search, setSearch] = useState('');
   const [onlyEnabled, setOnlyEnabled] = useState(false);
   const [busyId, setBusyId] = useState<string | null>(null);
+  const [presets, setPresets] = useState<OptimizationPreset[]>([]);
+  const [pendingBatch, setPendingBatch] = useState<{
+    title: string;
+    description: string;
+    entries: OptimizationProfileEntry[];
+  } | null>(null);
+  const [batchApplying, setBatchApplying] = useState(false);
   const [notice, setNotice] = useState<{ snap?: RegistrySnapshot; text: string } | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+
+  useEffect(() => {
+    api
+      .getOptPresets()
+      .then((res) => setPresets(res.presets))
+      .catch(() => {});
+  }, []);
 
   const visibleItems = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -161,6 +186,135 @@ export const OptimizationView: React.FC<Props> = ({
     }
   };
 
+  const itemLookup = useMemo(() => {
+    const map = new Map<string, OptimizationGroupStatus['items'][number]>();
+    for (const g of groups) {
+      for (const it of g.items) {
+        map.set(it.id, it);
+      }
+    }
+    return map;
+  }, [groups]);
+
+  const diffPreviewRows = useMemo(() => {
+    if (!pendingBatch) return [];
+    return pendingBatch.entries
+      .map((entry) => {
+        const it = itemLookup.get(entry.item_id);
+        if (!it) return null;
+        const sc = it[entry.scope];
+        if (!sc) return null;
+        let currentLabel = '—';
+        let targetLabel = String(entry.value);
+        let changed = true;
+
+        if (sc.kind === 'checkbox' && typeof entry.value === 'boolean') {
+          currentLabel = sc.enabled
+            ? lang === 'zh'
+              ? '已开启'
+              : 'ON'
+            : lang === 'zh'
+            ? '未启用'
+            : 'OFF';
+          targetLabel = entry.value
+            ? lang === 'zh'
+              ? '开启'
+              : 'ON'
+            : lang === 'zh'
+            ? '关闭'
+            : 'OFF';
+          changed = sc.enabled !== entry.value;
+        } else if (sc.kind === 'combo' && typeof entry.value === 'number') {
+          const curOpt =
+            sc.selected_index !== null ? sc.options[sc.selected_index] : undefined;
+          const nxtOpt = sc.options[entry.value];
+          currentLabel = curOpt ? pickText(curOpt.name, lang) : 'Custom';
+          targetLabel = nxtOpt ? pickText(nxtOpt.name, lang) : `#${entry.value}`;
+          changed = sc.selected_index !== entry.value;
+        }
+
+        return {
+          entry,
+          name: pickText(it.name, lang),
+          currentLabel,
+          targetLabel,
+          changed,
+        };
+      })
+      .filter((r): r is NonNullable<typeof r> => r !== null);
+  }, [pendingBatch, itemLookup, lang]);
+
+  const handleConfirmBatch = async () => {
+    if (!pendingBatch) return;
+    setBatchApplying(true);
+    setErrorMsg(null);
+    try {
+      const changedEntries = diffPreviewRows.filter((r) => r.changed).map((r) => r.entry);
+      const toApply = changedEntries.length > 0 ? changedEntries : pendingBatch.entries;
+      const res = await api.applyOptBatch(toApply);
+      onGroupsUpdated(res.groups);
+      setNotice({
+        text:
+          lang === 'zh'
+            ? `批量方案已执行：成功应用 ${res.outcome.applied_count} 项设置，自动创建 ${res.outcome.snapshots_created} 份注册表快照。`
+            : `Batch applied: ${res.outcome.applied_count} items, ${res.outcome.snapshots_created} snapshots created.`,
+      });
+      if (res.outcome.warnings.length > 0) {
+        setErrorMsg(res.outcome.warnings.join('; '));
+      }
+      setPendingBatch(null);
+    } catch (e) {
+      setErrorMsg(String(e));
+    } finally {
+      setBatchApplying(false);
+    }
+  };
+
+  const handleExportProfile = async () => {
+    setErrorMsg(null);
+    try {
+      const profile = await api.exportOptProfile();
+      const blob = new Blob([JSON.stringify(profile, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `dismnext_profile_${new Date().toISOString().slice(0, 10)}.json`;
+      a.click();
+      URL.revokeObjectURL(url);
+      setNotice({
+        text:
+          lang === 'zh'
+            ? `已导出当前 ${profile.entries.length} 项启用配置到 JSON 配方文件。`
+            : `Exported ${profile.entries.length} active optimization settings.`,
+      });
+    } catch (e) {
+      setErrorMsg(String(e));
+    }
+  };
+
+  const handleImportProfileFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file) return;
+    try {
+      const text = await file.text();
+      const parsed = JSON.parse(text) as OptimizationProfile;
+      if (!Array.isArray(parsed.entries)) {
+        throw new Error(lang === 'zh' ? '无效的配方 JSON 格式' : 'Invalid profile JSON');
+      }
+      setPendingBatch({
+        title: lang === 'zh' ? `导入配方：${file.name}` : `Import Profile: ${file.name}`,
+        description:
+          lang === 'zh'
+            ? `包含 ${parsed.entries.length} 项配置，应用前将为每项自动生成可回滚快照。`
+            : `Contains ${parsed.entries.length} entries; snapshots will be created before applying.`,
+        entries: parsed.entries,
+      });
+    } catch (err) {
+      setErrorMsg(String(err));
+    }
+  };
+
   return (
     <div className={styles.root}>
       {errorMsg && (
@@ -206,10 +360,57 @@ export const OptimizationView: React.FC<Props> = ({
           />
           <Input
             contentBefore={<Search20Regular />}
-            placeholder={lang === 'zh' ? '搜索 167 项系统优化...' : 'Search optimizations...'}
+            placeholder={lang === 'zh' ? '搜索 175 项系统优化...' : 'Search optimizations...'}
             value={search}
             onChange={(_, d) => setSearch(d.value)}
             style={{ width: 240 }}
+          />
+        </div>
+      </div>
+
+      {/* Presets & Profile Bar */}
+      <div
+        className={styles.toolbar}
+        style={{ padding: '8px 14px', justifyContent: 'space-between', flexShrink: 0 }}
+      >
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+          <Text size={200} weight="semibold" style={{ color: tokens.colorNeutralForeground2 }}>
+            {lang === 'zh' ? '场景一键预设：' : 'Presets:'}
+          </Text>
+          {presets.map((p) => (
+            <Button
+              key={p.id}
+              size="small"
+              appearance={p.id === 'windows_default' ? 'subtle' : 'outline'}
+              onClick={() =>
+                setPendingBatch({
+                  title: pickText(p.name, lang),
+                  description: pickText(p.description, lang),
+                  entries: p.entries,
+                })
+              }
+            >
+              {pickText(p.name, lang)}
+            </Button>
+          ))}
+        </div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <Button size="small" icon={<ArrowDownloadRegular />} onClick={handleExportProfile}>
+            {lang === 'zh' ? '导出配方 (.json)' : 'Export Profile'}
+          </Button>
+          <Button
+            size="small"
+            appearance="outline"
+            onClick={() => fileInputRef.current?.click()}
+          >
+            {lang === 'zh' ? '导入配方' : 'Import Profile'}
+          </Button>
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept=".json,application/json"
+            style={{ display: 'none' }}
+            onChange={handleImportProfileFile}
           />
         </div>
       </div>
@@ -316,6 +517,79 @@ export const OptimizationView: React.FC<Props> = ({
           )}
         </div>
       </div>
+
+      <Dialog
+        open={Boolean(pendingBatch)}
+        onOpenChange={(_, d) => {
+          if (!d.open && !batchApplying) setPendingBatch(null);
+        }}
+      >
+        <DialogSurface style={{ maxWidth: 640 }}>
+          <DialogBody>
+            <DialogTitle>{pendingBatch?.title}</DialogTitle>
+            <DialogContent>
+              <Text block style={{ marginBottom: 10 }}>
+                {pendingBatch?.description}
+              </Text>
+              <div
+                style={{
+                  maxHeight: 280,
+                  overflowY: 'auto',
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: 6,
+                  padding: 8,
+                  borderRadius: tokens.borderRadiusMedium,
+                  backgroundColor: tokens.colorNeutralBackground3,
+                }}
+              >
+                {diffPreviewRows.map((row) => (
+                  <div
+                    key={`${row.entry.item_id}-${row.entry.scope}`}
+                    style={{
+                      display: 'flex',
+                      justifyContent: 'space-between',
+                      alignItems: 'center',
+                      gap: 10,
+                      fontSize: 12,
+                    }}
+                  >
+                    <Text size={200} style={{ flex: 1 }}>
+                      {row.name}
+                    </Text>
+                    <Badge size="small" appearance="tint" color={row.changed ? 'brand' : 'subtle'}>
+                      {row.currentLabel} → {row.targetLabel}
+                    </Badge>
+                  </div>
+                ))}
+              </div>
+              <Text size={100} block style={{ marginTop: 8, color: tokens.colorNeutralForeground3 }}>
+                {lang === 'zh'
+                  ? `共 ${diffPreviewRows.filter((r) => r.changed).length} 项待变更，应用前将自动生成注册表回滚快照。`
+                  : `${diffPreviewRows.filter((r) => r.changed).length} item(s) will change with automatic rollback snapshots.`}
+              </Text>
+            </DialogContent>
+            <DialogActions>
+              <Button
+                appearance="secondary"
+                disabled={batchApplying}
+                onClick={() => setPendingBatch(null)}
+              >
+                {lang === 'zh' ? '取消' : 'Cancel'}
+              </Button>
+              <Button appearance="primary" disabled={batchApplying} onClick={handleConfirmBatch}>
+                {batchApplying ? (
+                  <Spinner size="tiny" />
+                ) : lang === 'zh' ? (
+                  '确认并批量应用'
+                ) : (
+                  'Apply Batch'
+                )}
+              </Button>
+            </DialogActions>
+          </DialogBody>
+        </DialogSurface>
+      </Dialog>
     </div>
   );
 };

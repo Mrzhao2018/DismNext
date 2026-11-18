@@ -1,14 +1,22 @@
 use crate::catalog::LocalizedText;
 use crate::sysinfo::SystemInfo;
 use anyhow::{anyhow, Result};
+use chrono::DateTime;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::OsStr;
+use std::fs::File;
+use std::io::{Read, Seek, SeekFrom};
 use std::os::windows::ffi::OsStrExt;
 use std::os::windows::fs::MetadataExt;
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::time::{Instant, UNIX_EPOCH};
+use walkdir::WalkDir;
+use winreg::enums::{
+    HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ, KEY_WOW64_32KEY, KEY_WOW64_64KEY,
+};
+use winreg::RegKey;
 use windows_sys::Win32::UI::Shell::{
     SHFileOperationW, FOF_ALLOWUNDO, FOF_NOCONFIRMATION, FOF_NOERRORUI, FOF_SILENT, FO_DELETE,
     SHFILEOPSTRUCTW,
@@ -571,6 +579,448 @@ fn measure_path_bytes(path: &Path) -> u64 {
         .sum()
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DuplicateFileEntry {
+    pub path: String,
+    pub name: String,
+    pub modified_date: String,
+    pub modified_unix: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DuplicateGroup {
+    pub hash_hex: String,
+    pub size_bytes: u64,
+    pub wasted_bytes: u64,
+    pub files: Vec<DuplicateFileEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DuplicateScanReport {
+    pub root_path: String,
+    pub elapsed_ms: u64,
+    pub total_groups: usize,
+    pub total_wasted_bytes: u64,
+    pub groups: Vec<DuplicateGroup>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OrphanDirEntry {
+    pub name: String,
+    pub path: String,
+    pub scope_label: String,
+    pub size_bytes: u64,
+    pub file_count: usize,
+    pub modified_date: String,
+}
+
+/// Three-stage parallel duplicate file finder (`size -> 4KB head/tail sample -> 128-bit full hash`).
+pub fn find_duplicate_files(root: &Path, min_size_bytes: u64) -> Result<DuplicateScanReport> {
+    if !root.exists() {
+        return Err(anyhow!("Path does not exist: {}", root.display()));
+    }
+    let started = Instant::now();
+    let threshold = min_size_bytes.max(64 * 1024);
+    let sys_root = std::env::var("SystemRoot")
+        .unwrap_or_else(|_| r"C:\Windows".to_string())
+        .to_ascii_lowercase();
+    let winsxs_prefix = format!(r"{}\winsxs", sys_root);
+    let driverstore_prefix = format!(r"{}\system32\driverstore", sys_root);
+
+    let mut by_size: HashMap<u64, Vec<(PathBuf, u64)>> = HashMap::new();
+    for entry in WalkDir::new(root)
+        .follow_links(false)
+        .into_iter()
+        .filter_entry(|e| {
+            let p_str = e.path().to_string_lossy().to_ascii_lowercase();
+            if p_str.starts_with(&winsxs_prefix) || p_str.starts_with(&driverstore_prefix) {
+                return false;
+            }
+            if e.path() == root {
+                return true;
+            }
+            std::fs::symlink_metadata(e.path())
+                .map(|m| (m.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT) == 0)
+                .unwrap_or(false)
+        })
+        .flatten()
+    {
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let Ok(meta) = entry.metadata() else {
+            continue;
+        };
+        let sz = meta.len();
+        if sz < threshold {
+            continue;
+        }
+        let mod_unix = meta
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        by_size.entry(sz).or_default().push((entry.into_path(), mod_unix));
+    }
+
+    let size_candidates: Vec<(u64, PathBuf, u64)> = by_size
+        .into_iter()
+        .filter(|(_, list)| list.len() >= 2)
+        .flat_map(|(sz, list)| list.into_iter().map(move |(p, m)| (sz, p, m)))
+        .collect();
+
+    let sampled: Vec<(u64, u64, PathBuf, u64)> = size_candidates
+        .into_par_iter()
+        .filter_map(|(sz, path, mod_unix)| {
+            let sample = sample_hash_file(&path, sz)?;
+            Some((sz, sample, path, mod_unix))
+        })
+        .collect();
+
+    let mut by_sample: HashMap<(u64, u64), Vec<(PathBuf, u64)>> = HashMap::new();
+    for (sz, sample, path, mod_unix) in sampled {
+        by_sample.entry((sz, sample)).or_default().push((path, mod_unix));
+    }
+
+    let full_candidates: Vec<(u64, PathBuf, u64)> = by_sample
+        .into_iter()
+        .filter(|(_, list)| list.len() >= 2)
+        .flat_map(|((sz, _), list)| list.into_iter().map(move |(p, m)| (sz, p, m)))
+        .collect();
+
+    let hashed: Vec<(u64, u128, PathBuf, u64)> = full_candidates
+        .into_par_iter()
+        .filter_map(|(sz, path, mod_unix)| {
+            let h = full_hash_128(&path)?;
+            Some((sz, h, path, mod_unix))
+        })
+        .collect();
+
+    let mut by_full: HashMap<(u64, u128), Vec<DuplicateFileEntry>> = HashMap::new();
+    for (sz, h, path, mod_unix) in hashed {
+        let name = path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("")
+            .to_string();
+        let modified_date = DateTime::from_timestamp(mod_unix as i64, 0)
+            .map(|dt| dt.format("%Y-%m-%d").to_string())
+            .unwrap_or_default();
+        by_full.entry((sz, h)).or_default().push(DuplicateFileEntry {
+            path: path.to_string_lossy().into_owned(),
+            name,
+            modified_date,
+            modified_unix: mod_unix,
+        });
+    }
+
+    let mut groups = Vec::new();
+    for ((sz, h), mut files) in by_full {
+        if files.len() < 2 {
+            continue;
+        }
+        files.sort_by(|a, b| b.modified_unix.cmp(&a.modified_unix));
+        let wasted_bytes = sz.saturating_mul((files.len() - 1) as u64);
+        groups.push(DuplicateGroup {
+            hash_hex: format!("{:032x}", h),
+            size_bytes: sz,
+            wasted_bytes,
+            files,
+        });
+    }
+
+    groups.sort_by(|a, b| b.wasted_bytes.cmp(&a.wasted_bytes));
+    let total_groups = groups.len();
+    let total_wasted_bytes: u64 = groups.iter().map(|g| g.wasted_bytes).sum();
+    groups.truncate(100);
+
+    Ok(DuplicateScanReport {
+        root_path: root.to_string_lossy().into_owned(),
+        elapsed_ms: started.elapsed().as_millis() as u64,
+        total_groups,
+        total_wasted_bytes,
+        groups,
+    })
+}
+
+fn sample_hash_file(path: &Path, size: u64) -> Option<u64> {
+    let mut f = File::open(path).ok()?;
+    let mut h: u64 = 0xcbf29ce484222325 ^ size;
+    let mut buf = [0u8; 4096];
+    let n1 = f.read(&mut buf).ok()?;
+    for &b in &buf[..n1] {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    if size > 4096 {
+        let tail_pos = size.saturating_sub(4096);
+        f.seek(SeekFrom::Start(tail_pos)).ok()?;
+        let n2 = f.read(&mut buf).ok()?;
+        for &b in &buf[..n2] {
+            h ^= b as u64;
+            h = h.wrapping_mul(0x100000001b3);
+        }
+    }
+    Some(h)
+}
+
+fn full_hash_128(path: &Path) -> Option<u128> {
+    let mut f = File::open(path).ok()?;
+    let mut h1: u64 = 0xcbf29ce484222325;
+    let mut h2: u64 = 0x9e3779b97f4a7c15;
+    let mut buf = [0u8; 65536];
+    loop {
+        let n = f.read(&mut buf).ok()?;
+        if n == 0 {
+            break;
+        }
+        for (i, &b) in buf[..n].iter().enumerate() {
+            h1 ^= b as u64;
+            h1 = h1.wrapping_mul(0x100000001b3);
+            h2 = h2.wrapping_add((b as u64).wrapping_mul((i as u64).wrapping_add(1)));
+            h2 = h2.rotate_left(13).wrapping_mul(0xff51afd7ed558ccd);
+        }
+    }
+    Some(((h1 as u128) << 64) | (h2 as u128))
+}
+
+/// Scans top-level AppData / ProgramData directories and flags large folders not matched
+/// against active Uninstall keys, installed AppX apps, or known Windows/vendor safelists.
+pub fn find_orphaned_app_dirs() -> Vec<OrphanDirEntry> {
+    let (installed_tokens, installed_dirs) = collect_installed_app_tokens();
+    let mut safelist: HashSet<&'static str> = [
+        "microsoft",
+        "windows",
+        "package cache",
+        "packages",
+        "temp",
+        "d3dscache",
+        "connecteddevicesplatform",
+        "crashdumps",
+        "comms",
+        "publishers",
+        "virtualstore",
+        "cef",
+        "squirreltemp",
+        "fontcache",
+        "usoshared",
+        "ssh",
+        "git",
+        "npm",
+        "npm-cache",
+        "pip",
+        "uv",
+        "pnpm",
+        "yarn",
+        "cargo",
+        "rustup",
+        "go-build",
+        "nuget",
+        "jetbrains",
+        "vscode",
+        "code",
+        "google",
+        "mozilla",
+        "nvidia",
+        "nvidia corporation",
+        "intel",
+        "amd",
+        "realtek",
+        "dolby",
+        "lenovo",
+        "apple",
+        "apple computer",
+        "steam",
+        "epicgameslauncher",
+        "unity",
+        "unrealengine",
+        "solidworks",
+        "ansys",
+        "codesys",
+        "codemeter",
+        "bonjour",
+        "coremail",
+        "baidunetdisk",
+        "iconcache",
+        "elevateddiagnostics",
+        "low",
+        "programs",
+        "peernetworking",
+        "application data",
+        "history",
+        "local",
+        "roaming",
+    ]
+    .into_iter()
+    .collect();
+    let _ = &mut safelist;
+
+    let mut candidates: Vec<(String, PathBuf, String)> = Vec::new();
+    for (env_var, label) in [
+        ("LOCALAPPDATA", "AppData\\Local"),
+        ("APPDATA", "AppData\\Roaming"),
+        ("ProgramData", "ProgramData"),
+    ] {
+        let Ok(base_str) = std::env::var(env_var) else {
+            continue;
+        };
+        let Ok(rd) = std::fs::read_dir(&base_str) else {
+            continue;
+        };
+        for entry in rd.flatten() {
+            let p = entry.path();
+            let Ok(meta) = std::fs::symlink_metadata(&p) else {
+                continue;
+            };
+            if !meta.is_dir() || (meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT) != 0 {
+                continue;
+            }
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name.starts_with('.') || name.starts_with('$') {
+                continue;
+            }
+            let lower_name = name.trim().to_ascii_lowercase();
+            let lower_path = p.to_string_lossy().to_ascii_lowercase();
+
+            if safelist.contains(lower_name.as_str())
+                || installed_dirs.iter().any(|id_path| lower_path.starts_with(id_path) || id_path.starts_with(&lower_path))
+                || matches_app_tokens(&lower_name, &installed_tokens, &safelist)
+            {
+                continue;
+            }
+            let mod_date = meta
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                .and_then(|d| DateTime::from_timestamp(d.as_secs() as i64, 0))
+                .map(|dt| dt.format("%Y-%m-%d").to_string())
+                .unwrap_or_default();
+            candidates.push((name, p, format!("{}|{}", label, mod_date)));
+        }
+    }
+
+    let mut results: Vec<OrphanDirEntry> = candidates
+        .into_par_iter()
+        .filter_map(|(name, path, meta_tag)| {
+            let (size_bytes, file_count) = measure_dir_stats(&path);
+            if size_bytes < 1_048_576 {
+                return None;
+            }
+            let (scope_label, modified_date) = meta_tag.split_once('|').unwrap_or(("", ""));
+            Some(OrphanDirEntry {
+                name,
+                path: path.to_string_lossy().into_owned(),
+                scope_label: scope_label.to_string(),
+                size_bytes,
+                file_count,
+                modified_date: modified_date.to_string(),
+            })
+        })
+        .collect();
+
+    results.sort_by(|a, b| b.size_bytes.cmp(&a.size_bytes));
+    results
+}
+
+fn measure_dir_stats(dir: &Path) -> (u64, usize) {
+    let mut size = 0u64;
+    let mut files = 0usize;
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(cur) = stack.pop() {
+        let Ok(rd) = std::fs::read_dir(&cur) else {
+            continue;
+        };
+        for entry in rd.flatten() {
+            let p = entry.path();
+            let Ok(meta) = std::fs::symlink_metadata(&p) else {
+                continue;
+            };
+            if (meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT) != 0 {
+                continue;
+            }
+            if meta.is_dir() {
+                stack.push(p);
+            } else if meta.is_file() {
+                size = size.saturating_add(meta.len());
+                files += 1;
+            }
+        }
+    }
+    (size, files)
+}
+
+fn collect_installed_app_tokens() -> (HashSet<String>, Vec<String>) {
+    let mut tokens = HashSet::new();
+    let mut dirs = Vec::new();
+
+    let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
+    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+    let targets = [
+        (&hklm, r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall", KEY_READ | KEY_WOW64_64KEY),
+        (&hklm, r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall", KEY_READ | KEY_WOW64_32KEY),
+        (&hkcu, r"Software\Microsoft\Windows\CurrentVersion\Uninstall", KEY_READ),
+    ];
+
+    for (root, sub, sam) in targets {
+        if let Ok(uninst) = root.open_subkey_with_flags(sub, sam) {
+            for k in uninst.enum_keys().flatten() {
+                let Ok(sk) = uninst.open_subkey_with_flags(&k, sam) else {
+                    continue;
+                };
+                for val_name in ["DisplayName", "Publisher"] {
+                    if let Ok(s) = sk.get_value::<String, _>(val_name) {
+                        add_tokens(&s, &mut tokens);
+                    }
+                }
+                if let Ok(loc) = sk.get_value::<String, _>("InstallLocation") {
+                    let norm = loc.trim().trim_end_matches('\\').to_ascii_lowercase();
+                    if norm.len() >= 4 {
+                        dirs.push(norm);
+                    }
+                }
+            }
+        }
+    }
+
+    for pkg in crate::appx::list_appx_packages() {
+        add_tokens(&pkg.name, &mut tokens);
+        add_tokens(&pkg.display_name.zh, &mut tokens);
+        add_tokens(&pkg.display_name.en, &mut tokens);
+    }
+
+    (tokens, dirs)
+}
+
+fn add_tokens(s: &str, tokens: &mut HashSet<String>) {
+    let full = s.trim().to_ascii_lowercase();
+    if full.len() >= 3 {
+        tokens.insert(full);
+    }
+    for part in s.split(|c: char| !c.is_ascii_alphanumeric()) {
+        let lp = part.to_ascii_lowercase();
+        if lp.len() >= 3 {
+            tokens.insert(lp);
+        }
+    }
+}
+
+fn matches_app_tokens(
+    dir_lower: &str,
+    tokens: &HashSet<String>,
+    safelist: &HashSet<&'static str>,
+) -> bool {
+    if tokens.contains(dir_lower) {
+        return true;
+    }
+    for part in dir_lower.split(|c: char| !c.is_ascii_alphanumeric()) {
+        if part.len() >= 4 && (tokens.contains(part) || safelist.contains(part)) {
+            return true;
+        }
+    }
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -627,5 +1077,26 @@ mod tests {
         let freed = recycle_path(&sample).unwrap();
         assert_eq!(freed, 10);
         assert!(!sample.exists());
+    }
+
+    #[test]
+    fn test_find_duplicate_files_sandbox() {
+        let base = std::env::temp_dir().join(format!("dismnext_dups_test_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(base.join("a")).unwrap();
+        fs::create_dir_all(base.join("b")).unwrap();
+
+        let same_payload = vec![0x5Au8; 70 * 1024];
+        let diff_payload = vec![0x7Bu8; 70 * 1024];
+        File::create(base.join("a\\dup1.bin")).unwrap().write_all(&same_payload).unwrap();
+        File::create(base.join("b\\dup2.bin")).unwrap().write_all(&same_payload).unwrap();
+        File::create(base.join("b\\unique.bin")).unwrap().write_all(&diff_payload).unwrap();
+
+        let report = find_duplicate_files(&base, 64 * 1024).unwrap();
+        assert_eq!(report.total_groups, 1);
+        assert_eq!(report.total_wasted_bytes, 70 * 1024);
+        assert_eq!(report.groups[0].files.len(), 2);
+
+        let _ = fs::remove_dir_all(&base);
     }
 }

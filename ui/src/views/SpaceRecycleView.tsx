@@ -219,6 +219,7 @@ export const SpaceRecycleView: React.FC<Props> = ({
   const [taskRunning, setTaskRunning] = useState<string | null>(null);
   const [pendingSysTask, setPendingSysTask] = useState<string | null>(null);
   const [taskNotice, setTaskNotice] = useState<string | null>(null);
+  const [lockBusyKey, setLockBusyKey] = useState<string | null>(null);
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [lastReport, setLastReport] = useState<CleanupExecutionReport | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
@@ -350,6 +351,61 @@ export const SpaceRecycleView: React.FC<Props> = ({
       setErrorMsg(String(e));
     } finally {
       setTaskRunning(null);
+    }
+  };
+
+  const handleInspectLocks = async (filePath: string) => {
+    setLockBusyKey(filePath);
+    setErrorMsg(null);
+    try {
+      const { processes } = await api.inspectFileLocks(filePath);
+      setPreviewItem((prev) => {
+        if (!prev) return prev;
+        return {
+          ...prev,
+          preview_files: prev.preview_files.map((pf) =>
+            pf.path === filePath
+              ? {
+                  ...pf,
+                  locking_processes: processes,
+                  reason:
+                    processes.length > 0
+                      ? `被进程占用: ${processes
+                          .map((p) => `${p.app_name} (PID ${p.pid})`)
+                          .join(', ')}`
+                      : lang === 'zh'
+                      ? '未检测到用户态句柄锁定（可能由内核或短期句柄占用）'
+                      : pf.reason,
+                }
+              : pf
+          ),
+        };
+      });
+    } catch (e) {
+      setErrorMsg(String(e));
+    } finally {
+      setLockBusyKey(null);
+    }
+  };
+
+  const handleKillLockPid = async (pid: number, appName: string) => {
+    setLockBusyKey(`pid:${pid}`);
+    setErrorMsg(null);
+    try {
+      await api.terminateLockingProcess(pid);
+      setTaskNotice(
+        lang === 'zh'
+          ? `已结束占用进程 ${appName} (PID ${pid})，正在刷新文件状态...`
+          : `Terminated ${appName} (PID ${pid}), refreshing file preview...`
+      );
+      if (activeId) {
+        const refreshed = await api.previewCleanup(activeId);
+        setPreviewItem(refreshed);
+      }
+    } catch (e) {
+      setErrorMsg(String(e));
+    } finally {
+      setLockBusyKey(null);
     }
   };
 
@@ -774,6 +830,58 @@ export const SpaceRecycleView: React.FC<Props> = ({
                         <Text size={100} style={{ color: tokens.colorPaletteDarkOrangeForeground2 }}>
                           {f.reason}
                         </Text>
+                      )}
+                      {f.status === 'Locked' && (
+                        <div
+                          style={{
+                            display: 'flex',
+                            alignItems: 'center',
+                            gap: '6px',
+                            flexWrap: 'wrap',
+                            marginTop: '3px',
+                          }}
+                        >
+                          {(!f.locking_processes || f.locking_processes.length === 0) && (
+                            <Button
+                              size="small"
+                              appearance="subtle"
+                              disabled={lockBusyKey === f.path}
+                              onClick={() => void handleInspectLocks(f.path)}
+                            >
+                              {lockBusyKey === f.path
+                                ? lang === 'zh'
+                                  ? '检测占用中...'
+                                  : 'Inspecting...'
+                                : lang === 'zh'
+                                ? '溯源占用进程'
+                                : 'Inspect Lock PID'}
+                            </Button>
+                          )}
+                          {f.locking_processes?.map((lp) => (
+                            <div
+                              key={lp.pid}
+                              style={{ display: 'flex', alignItems: 'center', gap: 4 }}
+                            >
+                              <Badge size="small" appearance="tint" color={lp.is_critical ? 'warning' : 'brand'}>
+                                {lp.app_name} (PID {lp.pid})
+                              </Badge>
+                              {!lp.is_critical && (
+                                <Button
+                                  size="small"
+                                  appearance="outline"
+                                  disabled={lockBusyKey === `pid:${lp.pid}`}
+                                  onClick={() => void handleKillLockPid(lp.pid, lp.app_name)}
+                                >
+                                  {lockBusyKey === `pid:${lp.pid}`
+                                    ? '...'
+                                    : lang === 'zh'
+                                    ? '结束进程'
+                                    : 'Kill'}
+                                </Button>
+                              )}
+                            </div>
+                          ))}
+                        </div>
                       )}
                     </div>
                   ))

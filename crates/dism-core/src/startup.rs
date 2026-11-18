@@ -2,8 +2,13 @@ use crate::evaluator::{expand_env_vars, reg_value_to_string};
 use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
+
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+const SERVICES_KEY: &str = r"SYSTEM\CurrentControlSet\Services";
 use winreg::enums::{
     RegType, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_ALL_ACCESS, KEY_READ, KEY_WOW64_32KEY,
     KEY_WOW64_64KEY,
@@ -300,6 +305,293 @@ pub fn extract_target_path(command: &str) -> Option<String> {
         None
     } else {
         Some(expanded)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ThirdPartyServiceItem {
+    pub name: String,
+    pub display_name: String,
+    pub description: String,
+    pub image_path: String,
+    pub target_path: Option<String>,
+    pub start_mode: String,
+    pub delayed_auto: bool,
+    pub target_exists: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScheduledTaskItem {
+    pub path: String,
+    pub name: String,
+    pub command: String,
+    pub enabled: bool,
+    pub state: String,
+}
+
+/// Lists non-system Win32 background services from `HKLM\SYSTEM\CurrentControlSet\Services`.
+pub fn list_third_party_services() -> Vec<ThirdPartyServiceItem> {
+    let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
+    let Ok(root) = hklm.open_subkey_with_flags(SERVICES_KEY, KEY_READ) else {
+        return Vec::new();
+    };
+
+    let mut out = Vec::new();
+    for svc_name in root.enum_keys().flatten() {
+        let Ok(sk) = root.open_subkey_with_flags(&svc_name, KEY_READ) else {
+            continue;
+        };
+        let svc_type: u32 = sk.get_value("Type").unwrap_or(0);
+        // Only Win32 services (Own=0x10, Share=0x20, Interactive=0x100)
+        if !matches!(svc_type, 0x10 | 0x20 | 0x110 | 0x120) {
+            continue;
+        }
+        let start_val: u32 = sk.get_value("Start").unwrap_or(3);
+        let start_mode = match start_val {
+            2 => "auto",
+            3 => "manual",
+            4 => "disabled",
+            _ => continue,
+        }
+        .to_string();
+
+        let image_path = sk
+            .get_raw_value("ImagePath")
+            .ok()
+            .map(|rv| reg_value_to_string(&rv).trim().to_string())
+            .unwrap_or_default();
+        if image_path.is_empty() || is_core_windows_service(&svc_name, &image_path) {
+            continue;
+        }
+
+        let target_path = extract_target_path(&image_path);
+        let target_exists = target_path
+            .as_deref()
+            .map(|p| Path::new(p).exists())
+            .unwrap_or(false);
+
+        let raw_disp = sk
+            .get_raw_value("DisplayName")
+            .ok()
+            .map(|rv| reg_value_to_string(&rv).trim().to_string())
+            .unwrap_or_default();
+        let display_name = if raw_disp.is_empty() || raw_disp.starts_with('@') {
+            svc_name.clone()
+        } else {
+            raw_disp
+        };
+
+        let raw_desc = sk
+            .get_raw_value("Description")
+            .ok()
+            .map(|rv| reg_value_to_string(&rv).trim().to_string())
+            .unwrap_or_default();
+        let description = if raw_desc.starts_with('@') {
+            String::new()
+        } else {
+            raw_desc
+        };
+
+        let delayed_auto = sk.get_value::<u32, _>("DelayedAutostart").unwrap_or(0) != 0;
+
+        out.push(ThirdPartyServiceItem {
+            name: svc_name,
+            display_name,
+            description,
+            image_path,
+            target_path,
+            start_mode,
+            delayed_auto,
+            target_exists,
+        });
+    }
+
+    out.sort_by(|a, b| {
+        mode_rank(&a.start_mode)
+            .cmp(&mode_rank(&b.start_mode))
+            .then_with(|| {
+                a.display_name
+                    .to_ascii_lowercase()
+                    .cmp(&b.display_name.to_ascii_lowercase())
+            })
+    });
+    out
+}
+
+/// Changes a third-party service startup mode (`auto`, `manual`, `disabled`) via `sc.exe config`.
+pub fn set_service_start_mode(service_name: &str, start_mode: &str) -> Result<ThirdPartyServiceItem> {
+    let trimmed = service_name.trim();
+    if trimmed.is_empty() || trimmed.contains(['\\', '/', '"']) {
+        return Err(anyhow!("Invalid service name '{}'", trimmed));
+    }
+
+    if !crate::sysinfo::SystemInfo::collect().is_admin {
+        return Err(anyhow!(
+            "Changing Windows service startup mode requires Administrator privileges. Please click '一键提权为管理员' first."
+        ));
+    }
+
+    let sc_mode = match start_mode.trim().to_ascii_lowercase().as_str() {
+        "auto" => "auto",
+        "manual" | "demand" => "demand",
+        "disabled" => "disabled",
+        other => return Err(anyhow!("Unsupported service start mode '{}'", other)),
+    };
+
+    let output = Command::new("sc.exe")
+        .creation_flags(CREATE_NO_WINDOW)
+        .args(["config", trimmed, "start=", sc_mode])
+        .output()
+        .context("Failed to execute sc.exe")?;
+
+    let stdout = crate::systasks::decode_cmd_output(&output.stdout);
+    let stderr = crate::systasks::decode_cmd_output(&output.stderr);
+    let combined = format!("{}\n{}", stdout.trim(), stderr.trim()).trim().to_string();
+    if !output.status.success() {
+        return Err(anyhow!("sc.exe config failed: {}", combined));
+    }
+
+    list_third_party_services()
+        .into_iter()
+        .find(|s| s.name.eq_ignore_ascii_case(trimmed))
+        .ok_or_else(|| anyhow!("Service '{}' not found after update", trimmed))
+}
+
+/// Enumerates non-Windows Scheduled Tasks outside `\Microsoft\Windows` via `Schedule.Service` COM (~350ms).
+pub fn list_scheduled_tasks() -> Vec<ScheduledTaskItem> {
+    let ps_script = r#"
+$svc = New-Object -ComObject Schedule.Service
+$svc.Connect()
+function Walk-Tasks($folder) {
+  foreach ($t in $folder.GetTasks(1)) {
+    try {
+      $xml = [xml]$t.Xml
+      $exec = $xml.Task.Actions.Exec | Select-Object -First 1
+      $cmd = if ($exec) { ($exec.Command + ' ' + $exec.Arguments).Trim() } else { '' }
+    } catch { $cmd = '' }
+    $st = switch ($t.State) { 1 {'Disabled'} 2 {'Queued'} 3 {'Ready'} 4 {'Running'} default {'Unknown'} }
+    [PSCustomObject]@{ path=$t.Path; name=$t.Name; enabled=[bool]$t.Enabled; state=$st; command=$cmd }
+  }
+  foreach ($sub in $folder.GetFolders(0)) {
+    if ($sub.Path -ne '\Microsoft\Windows') { Walk-Tasks $sub }
+  }
+}
+$items = @(Walk-Tasks ($svc.GetFolder('\')))
+$items | ConvertTo-Json -Compress
+"#;
+
+    let Ok(output) = Command::new("powershell.exe")
+        .creation_flags(CREATE_NO_WINDOW)
+        .args(["-NoProfile", "-NonInteractive", "-Command", ps_script])
+        .output()
+    else {
+        return Vec::new();
+    };
+
+    if !output.status.success() {
+        return Vec::new();
+    }
+    let raw = crate::systasks::decode_cmd_output(&output.stdout)
+        .trim()
+        .to_string();
+    if raw.is_empty() || raw == "null" {
+        return Vec::new();
+    }
+
+    let Ok(val) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return Vec::new();
+    };
+    let arr = match val {
+        serde_json::Value::Array(a) => a,
+        obj @ serde_json::Value::Object(_) => vec![obj],
+        _ => return Vec::new(),
+    };
+
+    let mut items = Vec::new();
+    for v in arr {
+        let path = v.get("path").and_then(|x| x.as_str()).unwrap_or("").to_string();
+        let name = v.get("name").and_then(|x| x.as_str()).unwrap_or("").to_string();
+        let command = v.get("command").and_then(|x| x.as_str()).unwrap_or("").to_string();
+        let enabled = v.get("enabled").and_then(|x| x.as_bool()).unwrap_or(false);
+        let state = v
+            .get("state")
+            .and_then(|x| x.as_str())
+            .unwrap_or("Unknown")
+            .to_string();
+        if !path.is_empty() {
+            items.push(ScheduledTaskItem {
+                path,
+                name,
+                command,
+                enabled,
+                state,
+            });
+        }
+    }
+
+    items.sort_by(|a, b| {
+        b.enabled
+            .cmp(&a.enabled)
+            .then_with(|| a.name.to_ascii_lowercase().cmp(&b.name.to_ascii_lowercase()))
+    });
+    items
+}
+
+/// Enables or disables a third-party scheduled task via `schtasks.exe /Change`.
+pub fn set_scheduled_task_enabled(task_path: &str, enabled: bool) -> Result<()> {
+    let trimmed = task_path.trim();
+    if !trimmed.starts_with('\\')
+        || trimmed.contains("..")
+        || trimmed
+            .to_ascii_lowercase()
+            .starts_with(r"\microsoft\windows\")
+    {
+        return Err(anyhow!(
+            "Refusing to modify invalid or core Windows scheduled task: '{}'",
+            trimmed
+        ));
+    }
+
+    let flag = if enabled { "/ENABLE" } else { "/DISABLE" };
+    let output = Command::new("schtasks.exe")
+        .creation_flags(CREATE_NO_WINDOW)
+        .args(["/Change", "/TN", trimmed, flag])
+        .output()
+        .context("Failed to execute schtasks.exe")?;
+
+    let stdout = crate::systasks::decode_cmd_output(&output.stdout);
+    let stderr = crate::systasks::decode_cmd_output(&output.stderr);
+    let combined = format!("{}\n{}", stdout.trim(), stderr.trim()).trim().to_string();
+    if !output.status.success() {
+        return Err(anyhow!("schtasks /Change failed: {}", combined));
+    }
+    Ok(())
+}
+
+fn is_core_windows_service(name: &str, image_path: &str) -> bool {
+    let lower_path = image_path.trim().to_ascii_lowercase().replace('/', "\\");
+    if lower_path.contains(r"\windows\system32\")
+        || lower_path.contains(r"\windows\syswow64\")
+        || lower_path.contains(r"\windows\servicing\")
+        || lower_path.contains(r"\windows\microsoft.net\")
+        || lower_path.contains("svchost.exe")
+        || lower_path.contains("msmpeng.exe")
+        || lower_path.contains("nissrv.exe")
+        || lower_path.contains("securityhealthservice.exe")
+    {
+        return true;
+    }
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "wscsvc" | "trustedinstaller" | "wuauserv" | "bits" | "spooler" | "defender"
+    )
+}
+
+fn mode_rank(mode: &str) -> u8 {
+    match mode {
+        "auto" => 0,
+        "manual" => 1,
+        _ => 2,
     }
 }
 

@@ -20,12 +20,20 @@ import {
   Search20Regular,
   Warning16Regular,
 } from '@fluentui/react-icons';
-import { Lang, StartupItem, api } from '../api';
+import {
+  Lang,
+  ScheduledTaskItem,
+  StartupItem,
+  ThirdPartyServiceItem,
+  api,
+} from '../api';
 
 interface Props {
   lang: Lang;
   isAdmin: boolean;
 }
+
+type StartupMode = 'run' | 'services' | 'tasks';
 
 const useStyles = makeStyles({
   root: {
@@ -72,16 +80,30 @@ const useStyles = makeStyles({
 
 export const StartupView: React.FC<Props> = ({ lang, isAdmin }) => {
   const styles = useStyles();
+  const [mode, setMode] = useState<StartupMode>('run');
+
+  // Run entries
   const [items, setItems] = useState<StartupItem[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [loadingRun, setLoadingRun] = useState(true);
   const [scopeFilter, setScopeFilter] = useState<'all' | 'user' | 'system'>('all');
   const [onlyEnabled, setOnlyEnabled] = useState(false);
+
+  // Services
+  const [services, setServices] = useState<ThirdPartyServiceItem[]>([]);
+  const [loadingServices, setLoadingServices] = useState(false);
+  const [servicesLoaded, setServicesLoaded] = useState(false);
+
+  // Scheduled tasks
+  const [tasks, setTasks] = useState<ScheduledTaskItem[]>([]);
+  const [loadingTasks, setLoadingTasks] = useState(false);
+  const [tasksLoaded, setTasksLoaded] = useState(false);
+
   const [search, setSearch] = useState('');
   const [busyId, setBusyId] = useState<string | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
-  const load = async () => {
-    setLoading(true);
+  const loadRun = async () => {
+    setLoadingRun(true);
     setErrorMsg(null);
     try {
       const res = await api.getStartupItems();
@@ -89,15 +111,51 @@ export const StartupView: React.FC<Props> = ({ lang, isAdmin }) => {
     } catch (e) {
       setErrorMsg(String(e));
     } finally {
-      setLoading(false);
+      setLoadingRun(false);
+    }
+  };
+
+  const loadServices = async () => {
+    setLoadingServices(true);
+    setErrorMsg(null);
+    try {
+      const res = await api.getServices();
+      setServices(res.services);
+      setServicesLoaded(true);
+    } catch (e) {
+      setErrorMsg(String(e));
+    } finally {
+      setLoadingServices(false);
+    }
+  };
+
+  const loadTasks = async () => {
+    setLoadingTasks(true);
+    setErrorMsg(null);
+    try {
+      const res = await api.getScheduledTasks();
+      setTasks(res.tasks);
+      setTasksLoaded(true);
+    } catch (e) {
+      setErrorMsg(String(e));
+    } finally {
+      setLoadingTasks(false);
     }
   };
 
   useEffect(() => {
-    load();
+    void loadRun();
   }, []);
 
-  const filtered = useMemo(() => {
+  useEffect(() => {
+    if (mode === 'services' && !servicesLoaded) {
+      void loadServices();
+    } else if (mode === 'tasks' && !tasksLoaded) {
+      void loadTasks();
+    }
+  }, [mode, servicesLoaded, tasksLoaded]);
+
+  const filteredRun = useMemo(() => {
     const q = search.trim().toLowerCase();
     return items.filter((it) => {
       if (scopeFilter !== 'all' && it.scope !== scopeFilter) return false;
@@ -111,9 +169,40 @@ export const StartupView: React.FC<Props> = ({ lang, isAdmin }) => {
     });
   }, [items, scopeFilter, onlyEnabled, search]);
 
-  const enabledCount = useMemo(() => items.filter((i) => i.enabled).length, [items]);
+  const filteredServices = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    return services.filter((s) => {
+      if (onlyEnabled && s.start_mode !== 'auto') return false;
+      if (!q) return true;
+      return (
+        s.name.toLowerCase().includes(q) ||
+        s.display_name.toLowerCase().includes(q) ||
+        s.image_path.toLowerCase().includes(q)
+      );
+    });
+  }, [services, onlyEnabled, search]);
 
-  const handleToggle = async (it: StartupItem, nextEnabled: boolean) => {
+  const filteredTasks = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    return tasks.filter((t) => {
+      if (onlyEnabled && !t.enabled) return false;
+      if (!q) return true;
+      return (
+        t.name.toLowerCase().includes(q) ||
+        t.path.toLowerCase().includes(q) ||
+        t.command.toLowerCase().includes(q)
+      );
+    });
+  }, [tasks, onlyEnabled, search]);
+
+  const enabledRunCount = useMemo(() => items.filter((i) => i.enabled).length, [items]);
+  const autoServiceCount = useMemo(
+    () => services.filter((s) => s.start_mode === 'auto').length,
+    [services]
+  );
+  const enabledTaskCount = useMemo(() => tasks.filter((t) => t.enabled).length, [tasks]);
+
+  const handleToggleRun = async (it: StartupItem, nextEnabled: boolean) => {
     setBusyId(it.id);
     setErrorMsg(null);
     try {
@@ -126,6 +215,38 @@ export const StartupView: React.FC<Props> = ({ lang, isAdmin }) => {
     }
   };
 
+  const handleServiceMode = async (svcName: string, nextMode: 'auto' | 'manual' | 'disabled') => {
+    setBusyId(svcName);
+    setErrorMsg(null);
+    try {
+      const res = await api.setServiceMode(svcName, nextMode);
+      setServices(res.services);
+    } catch (e) {
+      setErrorMsg(String(e));
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  const handleToggleTask = async (taskPath: string, nextEnabled: boolean) => {
+    setBusyId(taskPath);
+    setErrorMsg(null);
+    try {
+      const res = await api.toggleScheduledTask(taskPath, nextEnabled);
+      setTasks(res.tasks);
+    } catch (e) {
+      setErrorMsg(String(e));
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  const refreshCurrent = () => {
+    if (mode === 'run') void loadRun();
+    else if (mode === 'services') void loadServices();
+    else void loadTasks();
+  };
+
   return (
     <div className={styles.root}>
       {errorMsg && (
@@ -134,119 +255,318 @@ export const StartupView: React.FC<Props> = ({ lang, isAdmin }) => {
         </MessageBar>
       )}
 
+      {!isAdmin && mode !== 'run' && (
+        <MessageBar intent="warning">
+          <MessageBarBody>
+            <Warning16Regular style={{ verticalAlign: 'middle', marginRight: 6 }} />
+            {lang === 'zh'
+              ? '当前为标准用户模式，可查看第三方服务与计划任务；修改服务启动类型或禁系统级任务请先点击顶部“一键提权为管理员”。'
+              : 'Modifying Win32 service startup modes or machine scheduled tasks requires Administrator privileges.'}
+          </MessageBarBody>
+        </MessageBar>
+      )}
+
       <div className={styles.toolbar}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
           <Rocket24Regular style={{ color: tokens.colorBrandForeground1 }} />
           <TabList
             size="small"
-            selectedValue={scopeFilter}
-            onTabSelect={(_, d) => setScopeFilter(d.value as 'all' | 'user' | 'system')}
+            selectedValue={mode}
+            onTabSelect={(_, d) => setMode(d.value as StartupMode)}
           >
-            <Tab value="all">
-              {lang === 'zh' ? `全部 (${items.length})` : `All (${items.length})`}
+            <Tab value="run">
+              {lang === 'zh' ? `常规自启 (${items.length})` : `Startup Run (${items.length})`}
             </Tab>
-            <Tab value="user">
+            <Tab value="services">
               {lang === 'zh'
-                ? `当前用户 (${items.filter((i) => i.scope === 'user').length})`
-                : `User (${items.filter((i) => i.scope === 'user').length})`}
+                ? `第三方服务${servicesLoaded ? ` (${services.length})` : ''}`
+                : `3rd-Party Services${servicesLoaded ? ` (${services.length})` : ''}`}
             </Tab>
-            <Tab value="system">
+            <Tab value="tasks">
               {lang === 'zh'
-                ? `系统全局 (${items.filter((i) => i.scope === 'system').length})`
-                : `System (${items.filter((i) => i.scope === 'system').length})`}
+                ? `计划任务${tasksLoaded ? ` (${tasks.length})` : ''}`
+                : `Scheduled Tasks${tasksLoaded ? ` (${tasks.length})` : ''}`}
             </Tab>
           </TabList>
-          <Badge appearance="tint" color="success">
-            {lang === 'zh' ? `已启用 ${enabledCount}` : `${enabledCount} Enabled`}
-          </Badge>
+
+          {mode === 'run' && (
+            <>
+              <TabList
+                size="small"
+                selectedValue={scopeFilter}
+                onTabSelect={(_, d) => setScopeFilter(d.value as 'all' | 'user' | 'system')}
+              >
+                <Tab value="all">{lang === 'zh' ? '全部' : 'All'}</Tab>
+                <Tab value="user">{lang === 'zh' ? '用户' : 'User'}</Tab>
+                <Tab value="system">{lang === 'zh' ? '全局' : 'System'}</Tab>
+              </TabList>
+              <Badge appearance="tint" color="success">
+                {lang === 'zh' ? `已启用 ${enabledRunCount}` : `${enabledRunCount} Enabled`}
+              </Badge>
+            </>
+          )}
+          {mode === 'services' && servicesLoaded && (
+            <Badge appearance="tint" color="warning">
+              {lang === 'zh' ? `自启中 ${autoServiceCount}` : `${autoServiceCount} Auto`}
+            </Badge>
+          )}
+          {mode === 'tasks' && tasksLoaded && (
+            <Badge appearance="tint" color="success">
+              {lang === 'zh' ? `已启用 ${enabledTaskCount}` : `${enabledTaskCount} Enabled`}
+            </Badge>
+          )}
         </div>
 
         <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
           <Switch
             checked={onlyEnabled}
             onChange={(_, d) => setOnlyEnabled(d.checked)}
-            label={lang === 'zh' ? '仅看已启用' : 'Enabled only'}
+            label={
+              mode === 'services'
+                ? lang === 'zh'
+                  ? '仅看开机自启'
+                  : 'Auto only'
+                : lang === 'zh'
+                ? '仅看已启用'
+                : 'Enabled only'
+            }
           />
           <Input
             size="small"
             contentBefore={<Search20Regular />}
-            placeholder={lang === 'zh' ? '搜索启动项或命令...' : 'Search startup items...'}
+            placeholder={lang === 'zh' ? '搜索名称、路径或命令...' : 'Search name, path, command...'}
             value={search}
             onChange={(_, d) => setSearch(d.value)}
             style={{ width: 210 }}
           />
-          <Button size="small" icon={<ArrowClockwise20Regular />} onClick={load}>
+          <Button size="small" icon={<ArrowClockwise20Regular />} onClick={refreshCurrent}>
             {lang === 'zh' ? '刷新' : 'Refresh'}
           </Button>
         </div>
       </div>
 
       <div className={styles.listCard}>
-        {loading ? (
-          <div style={{ padding: 40, display: 'flex', justifyContent: 'center' }}>
-            <Spinner label={lang === 'zh' ? '正在枚举开机启动项...' : 'Loading startup items...'} />
-          </div>
-        ) : filtered.length === 0 ? (
-          <Text style={{ padding: 20, color: tokens.colorNeutralForeground3 }}>
-            {lang === 'zh' ? '当前筛选下没有启动项。' : 'No matching startup items found.'}
-          </Text>
-        ) : (
-          filtered.map((it) => {
-            const lockedByPriv = it.scope === 'system' && !isAdmin;
-            return (
-              <div key={it.id} className={styles.row}>
+        {mode === 'run' &&
+          (loadingRun ? (
+            <div style={{ padding: 40, display: 'flex', justifyContent: 'center' }}>
+              <Spinner label={lang === 'zh' ? '正在枚举开机启动项...' : 'Loading startup items...'} />
+            </div>
+          ) : filteredRun.length === 0 ? (
+            <Text style={{ padding: 20, color: tokens.colorNeutralForeground3 }}>
+              {lang === 'zh' ? '当前筛选下没有启动项。' : 'No matching startup items found.'}
+            </Text>
+          ) : (
+            filteredRun.map((it) => {
+              const lockedByPriv = it.scope === 'system' && !isAdmin;
+              return (
+                <div key={it.id} className={styles.row}>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 3, minWidth: 0, flex: 1 }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                      <Text weight="semibold">{it.name}</Text>
+                      <Badge size="small" appearance="tint" color={it.scope === 'system' ? 'warning' : 'brand'}>
+                        {it.location}
+                      </Badge>
+                      {!it.target_exists && (
+                        <Badge size="small" appearance="tint" color="danger">
+                          <Warning16Regular style={{ verticalAlign: 'middle', marginRight: 3 }} />
+                          {lang === 'zh' ? '目标文件缺失' : 'Target Missing'}
+                        </Badge>
+                      )}
+                      {lockedByPriv && (
+                        <Badge size="small" appearance="outline" color="warning">
+                          {lang === 'zh' ? '修改需管理员权限' : 'Admin required'}
+                        </Badge>
+                      )}
+                    </div>
+                    <Text
+                      size={100}
+                      truncate
+                      title={it.command}
+                      style={{
+                        color: tokens.colorNeutralForeground3,
+                        fontFamily: 'Consolas, monospace',
+                      }}
+                    >
+                      {it.command}
+                    </Text>
+                  </div>
+
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexShrink: 0 }}>
+                    {it.target_path && it.target_exists && (
+                      <Button
+                        size="small"
+                        appearance="subtle"
+                        icon={<FolderOpen16Regular />}
+                        onClick={() => api.revealInExplorer(it.target_path!)}
+                      >
+                        {lang === 'zh' ? '定位' : 'Reveal'}
+                      </Button>
+                    )}
+                    <Switch
+                      checked={it.enabled}
+                      disabled={busyId === it.id || lockedByPriv}
+                      onChange={(_, d) => handleToggleRun(it, d.checked)}
+                    />
+                  </div>
+                </div>
+              );
+            })
+          ))}
+
+        {mode === 'services' &&
+          (loadingServices ? (
+            <div style={{ padding: 40, display: 'flex', justifyContent: 'center' }}>
+              <Spinner label={lang === 'zh' ? '正在扫描第三方后台服务...' : 'Scanning third-party services...'} />
+            </div>
+          ) : filteredServices.length === 0 ? (
+            <Text style={{ padding: 20, color: tokens.colorNeutralForeground3 }}>
+              {lang === 'zh' ? '当前筛选下没有匹配的第三方后台服务。' : 'No matching third-party services.'}
+            </Text>
+          ) : (
+            filteredServices.map((svc) => (
+              <div key={svc.name} className={styles.row}>
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 3, minWidth: 0, flex: 1 }}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
-                    <Text weight="semibold">{it.name}</Text>
-                    <Badge size="small" appearance="tint" color={it.scope === 'system' ? 'warning' : 'brand'}>
-                      {it.location}
+                    <Text weight="semibold">{svc.display_name}</Text>
+                    <Badge size="small" appearance="outline">
+                      {svc.name}
                     </Badge>
-                    {!it.target_exists && (
+                    <Badge
+                      size="small"
+                      appearance="tint"
+                      color={
+                        svc.start_mode === 'auto'
+                          ? 'warning'
+                          : svc.start_mode === 'manual'
+                          ? 'brand'
+                          : 'subtle'
+                      }
+                    >
+                      {svc.start_mode === 'auto'
+                        ? svc.delayed_auto
+                          ? lang === 'zh'
+                            ? '延迟自启'
+                            : 'Auto (Delayed)'
+                          : lang === 'zh'
+                          ? '开机自启'
+                          : 'Auto'
+                        : svc.start_mode === 'manual'
+                        ? lang === 'zh'
+                          ? '手动按需'
+                          : 'Manual'
+                        : lang === 'zh'
+                        ? '已禁用'
+                        : 'Disabled'}
+                    </Badge>
+                    {!svc.target_exists && (
                       <Badge size="small" appearance="tint" color="danger">
-                        <Warning16Regular style={{ verticalAlign: 'middle', marginRight: 3 }} />
-                        {lang === 'zh' ? '目标文件缺失' : 'Target Missing'}
-                      </Badge>
-                    )}
-                    {lockedByPriv && (
-                      <Badge size="small" appearance="outline" color="warning">
-                        {lang === 'zh' ? '修改需管理员权限' : 'Admin required to modify'}
+                        {lang === 'zh' ? '执行文件缺失' : 'Binary Missing'}
                       </Badge>
                     )}
                   </div>
+                  {svc.description && (
+                    <Text size={200} style={{ color: tokens.colorNeutralForeground2 }} truncate>
+                      {svc.description}
+                    </Text>
+                  )}
                   <Text
                     size={100}
                     truncate
-                    title={it.command}
+                    title={svc.image_path}
                     style={{
                       color: tokens.colorNeutralForeground3,
                       fontFamily: 'Consolas, monospace',
                     }}
                   >
-                    {it.command}
+                    {svc.image_path}
                   </Text>
                 </div>
 
-                <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexShrink: 0 }}>
-                  {it.target_path && it.target_exists && (
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
+                  {svc.target_path && svc.target_exists && (
                     <Button
                       size="small"
                       appearance="subtle"
                       icon={<FolderOpen16Regular />}
-                      onClick={() => api.revealInExplorer(it.target_path!)}
-                    >
-                      {lang === 'zh' ? '定位' : 'Reveal'}
-                    </Button>
+                      onClick={() => api.revealInExplorer(svc.target_path!)}
+                    />
                   )}
-                  <Switch
-                    checked={it.enabled}
-                    disabled={busyId === it.id || lockedByPriv}
-                    onChange={(_, d) => handleToggle(it, d.checked)}
-                  />
+                  <Button
+                    size="small"
+                    appearance={svc.start_mode === 'auto' ? 'primary' : 'outline'}
+                    disabled={busyId === svc.name}
+                    onClick={() => handleServiceMode(svc.name, 'auto')}
+                  >
+                    {lang === 'zh' ? '自启' : 'Auto'}
+                  </Button>
+                  <Button
+                    size="small"
+                    appearance={svc.start_mode === 'manual' ? 'primary' : 'outline'}
+                    disabled={busyId === svc.name}
+                    onClick={() => handleServiceMode(svc.name, 'manual')}
+                  >
+                    {lang === 'zh' ? '手动' : 'Manual'}
+                  </Button>
+                  <Button
+                    size="small"
+                    appearance={svc.start_mode === 'disabled' ? 'primary' : 'outline'}
+                    disabled={busyId === svc.name}
+                    onClick={() => handleServiceMode(svc.name, 'disabled')}
+                  >
+                    {lang === 'zh' ? '禁用' : 'Disable'}
+                  </Button>
                 </div>
               </div>
-            );
-          })
-        )}
+            ))
+          ))}
+
+        {mode === 'tasks' &&
+          (loadingTasks ? (
+            <div style={{ padding: 40, display: 'flex', justifyContent: 'center' }}>
+              <Spinner label={lang === 'zh' ? '正在枚举第三方计划任务...' : 'Scanning scheduled tasks...'} />
+            </div>
+          ) : filteredTasks.length === 0 ? (
+            <Text style={{ padding: 20, color: tokens.colorNeutralForeground3 }}>
+              {lang === 'zh' ? '当前筛选下没有匹配的第三方计划任务。' : 'No matching scheduled tasks.'}
+            </Text>
+          ) : (
+            filteredTasks.map((t) => (
+              <div key={t.path} className={styles.row}>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 3, minWidth: 0, flex: 1 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                    <Text weight="semibold">{t.name}</Text>
+                    <Badge size="small" appearance="outline">
+                      {t.path}
+                    </Badge>
+                    <Badge
+                      size="small"
+                      appearance="tint"
+                      color={t.enabled ? 'success' : 'subtle'}
+                    >
+                      {t.state}
+                    </Badge>
+                  </div>
+                  <Text
+                    size={100}
+                    truncate
+                    title={t.command}
+                    style={{
+                      color: tokens.colorNeutralForeground3,
+                      fontFamily: 'Consolas, monospace',
+                    }}
+                  >
+                    {t.command || '(Trigger / COM handler)'}
+                  </Text>
+                </div>
+
+                <Switch
+                  checked={t.enabled}
+                  disabled={busyId === t.path}
+                  onChange={(_, d) => handleToggleTask(t.path, d.checked)}
+                />
+              </div>
+            ))
+          ))}
       </div>
     </div>
   );

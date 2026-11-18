@@ -105,6 +105,182 @@ pub struct ApplyOutcome {
     pub warnings: Vec<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OptimizationProfileEntry {
+    pub item_id: String,
+    pub scope: ScopeName,
+    pub value: ApplyValue,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OptimizationPreset {
+    pub id: String,
+    pub name: LocalizedText,
+    pub description: LocalizedText,
+    pub entries: Vec<OptimizationProfileEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OptimizationProfile {
+    pub name: String,
+    pub created_at: String,
+    pub entries: Vec<OptimizationProfileEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BatchApplyOutcome {
+    pub applied_count: usize,
+    pub snapshots_created: usize,
+    pub warnings: Vec<String>,
+}
+
+/// Returns built-in curated optimization preset packs for one-click safe batch tuning.
+pub fn get_optimization_presets() -> Vec<OptimizationPreset> {
+    let bool_entries = |ids: &[&str], enabled: bool| -> Vec<OptimizationProfileEntry> {
+        ids.iter()
+            .map(|id| OptimizationProfileEntry {
+                item_id: (*id).to_string(),
+                scope: ScopeName::Current,
+                value: ApplyValue::Bool(enabled),
+            })
+            .collect()
+    };
+
+    let privacy_ids = &[
+        "opt-023", "opt-028", "opt-108", "opt-164", "opt-165", "opt-166", "opt-169", "opt-170",
+        "opt-174", "opt-175",
+    ];
+    let dev_ids = &[
+        "opt-011", "opt-036", "opt-037", "opt-038", "opt-059", "opt-168", "opt-172", "opt-173",
+    ];
+    let mut all_ids = Vec::with_capacity(privacy_ids.len() + dev_ids.len());
+    all_ids.extend_from_slice(privacy_ids);
+    all_ids.extend_from_slice(dev_ids);
+
+    vec![
+        OptimizationPreset {
+            id: "privacy_clean".to_string(),
+            name: LocalizedText {
+                zh: "纯净隐私与去广告方案".to_string(),
+                en: "Clean Privacy & No-Ads Pack".to_string(),
+            },
+            description: LocalizedText {
+                zh: "关闭开始菜单推荐、锁屏提示、Bing 搜索联想、OneDrive 横幅、Recall 与 Copilot 广告入口。".to_string(),
+                en: "Disables Start suggestions, Bing search suggestions, OneDrive banners, Recall, and Copilot buttons.".to_string(),
+            },
+            entries: bool_entries(privacy_ids, true),
+        },
+        OptimizationPreset {
+            id: "dev_power".to_string(),
+            name: LocalizedText {
+                zh: "开发者与极客效率方案".to_string(),
+                en: "Developer & Power User Pack".to_string(),
+            },
+            description: LocalizedText {
+                zh: "显示文件扩展名/隐藏文件、展开经典右键菜单、启用任务栏右键结束任务、关闭文件夹自动猜测并默认打开此电脑。".to_string(),
+                en: "Shows file extensions & hidden items, expands classic context menu, enables taskbar End Task, and opens This PC.".to_string(),
+            },
+            entries: bool_entries(dev_ids, true),
+        },
+        OptimizationPreset {
+            id: "windows_default".to_string(),
+            name: LocalizedText {
+                zh: "恢复上述预设项为系统默认".to_string(),
+                en: "Reset Preset Tweaks to Default".to_string(),
+            },
+            description: LocalizedText {
+                zh: "将隐私方案与效率方案中的所有开关统一还原为默认关闭状态，并自动生成快照。".to_string(),
+                en: "Resets all items included in the Privacy and Developer packs back to default off state.".to_string(),
+            },
+            entries: bool_entries(&all_ids, false),
+        },
+    ]
+}
+
+/// Applies multiple optimization entries sequentially, creating snapshots for each modified rule.
+pub fn apply_optimization_batch(
+    groups: &[OptimizationGroup],
+    entries: &[OptimizationProfileEntry],
+    snapshot_mgr: &SnapshotManager,
+) -> Result<BatchApplyOutcome> {
+    let mut applied_count = 0usize;
+    let mut snapshots_created = 0usize;
+    let mut warnings = Vec::new();
+
+    for entry in entries {
+        match apply_optimization(
+            groups,
+            &entry.item_id,
+            entry.scope,
+            entry.value.clone(),
+            snapshot_mgr,
+        ) {
+            Ok(outcome) => {
+                applied_count += 1;
+                if outcome.snapshot.is_some() {
+                    snapshots_created += 1;
+                }
+                for w in outcome.warnings {
+                    warnings.push(format!("{}: {}", entry.item_id, w));
+                }
+            }
+            Err(e) => {
+                warnings.push(format!("{}: {}", entry.item_id, e));
+            }
+        }
+    }
+
+    Ok(BatchApplyOutcome {
+        applied_count,
+        snapshots_created,
+        warnings,
+    })
+}
+
+/// Exports the active non-default optimization settings into a portable JSON profile.
+pub fn export_optimization_profile(
+    groups: &[OptimizationGroup],
+    sys: &SystemInfo,
+) -> OptimizationProfile {
+    let evaluated = evaluate_all_groups(groups, sys);
+    let mut entries = Vec::new();
+
+    for grp in evaluated {
+        for it in grp.items {
+            for (scope, st_opt) in [(ScopeName::Current, &it.current), (ScopeName::System, &it.system)] {
+                let Some(st) = st_opt else {
+                    continue;
+                };
+                match st {
+                    ScopeStatus::CheckBox(cb) if cb.enabled => {
+                        entries.push(OptimizationProfileEntry {
+                            item_id: it.id.clone(),
+                            scope,
+                            value: ApplyValue::Bool(true),
+                        });
+                    }
+                    ScopeStatus::Combo(c) => {
+                        if let Some(idx) = c.selected_index {
+                            entries.push(OptimizationProfileEntry {
+                                item_id: it.id.clone(),
+                                scope,
+                                value: ApplyValue::Index(idx),
+                            });
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    OptimizationProfile {
+        name: "DismNext Custom Optimization Profile".to_string(),
+        created_at: chrono::Local::now().to_rfc3339(),
+        entries,
+    }
+}
+
 pub fn evaluate_all_groups(
     groups: &[OptimizationGroup],
     sys: &SystemInfo,
@@ -757,5 +933,9 @@ mod tests {
         drop(k);
         let _ = hkcu.delete_subkey_all(sub_key);
         let _ = std::fs::remove_dir_all(&snap_dir);
+
+        let presets = get_optimization_presets();
+        assert_eq!(presets.len(), 3);
+        assert!(presets.iter().all(|p| !p.entries.is_empty()));
     }
 }
