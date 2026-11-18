@@ -3,7 +3,9 @@ use clap::{Parser, Subcommand};
 use dism_core::appx::{list_appx_packages, remove_appx_package, AppxCategory};
 use dism_core::cleaner::{execute_cleanup, scan_all, scan_rule, FileStatus};
 use dism_core::diskmap::analyze_path;
+use dism_core::drivers::{delete_driver, export_drivers, list_drivers};
 use dism_core::evaluator::eval_condition;
+use dism_core::features::{list_optional_features, set_feature_enabled, FeatureCategory};
 use dism_core::optimizer::{apply_optimization, evaluate_all_groups, ApplyValue, ScopeName, ScopeStatus};
 use dism_core::startup::{list_startup_items, set_startup_enabled};
 use dism_core::{Catalog, SnapshotManager, SystemInfo};
@@ -73,6 +75,52 @@ enum Commands {
     Appx {
         #[command(subcommand)]
         action: AppxCommands,
+    },
+    /// Third-party DriverStore package manager & backup utility
+    Drivers {
+        #[command(subcommand)]
+        action: DriversCommands,
+    },
+    /// Windows Optional Features (WSL, Hyper-V, NetFx3, Sandbox, SMB1, etc.)
+    Features {
+        #[command(subcommand)]
+        action: FeaturesCommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum DriversCommands {
+    /// List third-party oem*.inf driver packages
+    List {
+        #[arg(long)]
+        outdated_only: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Export backed-up driver packages to a folder
+    Export {
+        target_dir: PathBuf,
+        #[arg(long)]
+        names: Vec<String>,
+    },
+    /// Safely delete a non-active oem*.inf driver package
+    Delete { published_name: String },
+}
+
+#[derive(Subcommand)]
+enum FeaturesCommands {
+    /// List Windows Optional Features
+    List {
+        #[arg(long)]
+        category: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Enable or disable a Windows Optional Feature via DISM (Admin required)
+    Toggle {
+        name: String,
+        #[arg(long)]
+        enable: bool,
     },
 }
 
@@ -498,6 +546,97 @@ fn main() -> Result<()> {
             AppxCommands::Remove { package_full_name } => {
                 remove_appx_package(&package_full_name)?;
                 println!("Removed AppX package: {}", package_full_name);
+            }
+        },
+        Commands::Drivers { action } => match action {
+            DriversCommands::List { outdated_only, json } => {
+                let mut drivers = list_drivers();
+                if outdated_only {
+                    drivers.retain(|d| d.is_outdated_duplicate);
+                }
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&drivers)?);
+                } else {
+                    println!(
+                        "{:<10} {:<24} {:<16} {:<14} {:>10}  {}",
+                        "OEM INF", "Original Name", "Provider", "Version", "Size", "Status"
+                    );
+                    println!("{}", "-".repeat(94));
+                    let total_bytes: u64 = drivers.iter().map(|d| d.size_bytes).sum();
+                    let outdated_count = drivers.iter().filter(|d| d.is_outdated_duplicate).count();
+                    for d in &drivers {
+                        let status = if let Some(ref newer) = d.newer_version {
+                            format!("OUTDATED -> {}", newer)
+                        } else {
+                            d.class_name.clone()
+                        };
+                        println!(
+                            "{:<10} {:<24} {:<16} {:<14} {:>10}  {}",
+                            d.published_name,
+                            d.original_name,
+                            d.provider.chars().take(15).collect::<String>(),
+                            d.version,
+                            fmt_bytes(d.size_bytes),
+                            status
+                        );
+                    }
+                    println!(
+                        "\nTotal: {} packages ({}) | Outdated duplicates: {}",
+                        drivers.len(),
+                        fmt_bytes(total_bytes),
+                        outdated_count
+                    );
+                }
+            }
+            DriversCommands::Export { target_dir, names } => {
+                let filter = if names.is_empty() { None } else { Some(names.as_slice()) };
+                let report = export_drivers(&target_dir, filter)?;
+                println!(
+                    "Backed up {} drivers ({}) to {}",
+                    report.exported_count,
+                    fmt_bytes(report.total_bytes),
+                    report.target_dir
+                );
+                println!("Manifest: {}", report.manifest_path);
+            }
+            DriversCommands::Delete { published_name } => {
+                let out = delete_driver(&published_name)?;
+                println!("{}", out);
+            }
+        },
+        Commands::Features { action } => match action {
+            FeaturesCommands::List { category, json } => {
+                let mut features = list_optional_features();
+                if let Some(ref cat) = category {
+                    let target = cat.to_ascii_lowercase();
+                    features.retain(|f| match f.category {
+                        FeatureCategory::Virtualization => target == "virtualization",
+                        FeatureCategory::Developer => target == "developer",
+                        FeatureCategory::SecurityAi => target == "security_ai" || target == "security",
+                        FeatureCategory::NetworkSmb => target == "network_smb" || target == "network",
+                        FeatureCategory::PrintMedia => target == "print_media" || target == "print",
+                        FeatureCategory::IisWeb => target == "iis_web" || target == "iis",
+                    });
+                }
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&features)?);
+                } else {
+                    println!("{:<6} {:<40} {}", "State", "Feature Name", "Display Name");
+                    println!("{}", "-".repeat(90));
+                    for f in &features {
+                        println!(
+                            "{:<6} {:<40} {}",
+                            if f.enabled { "ON" } else { "OFF" },
+                            f.name,
+                            f.display_name.zh
+                        );
+                    }
+                    println!("\nTotal matching features: {}", features.len());
+                }
+            }
+            FeaturesCommands::Toggle { name, enable } => {
+                let res = set_feature_enabled(&name, enable)?;
+                println!("{}", serde_json::to_string_pretty(&res)?);
             }
         },
     }

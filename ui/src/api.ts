@@ -57,6 +57,7 @@ export interface CleanupScanResult {
   source: string;
   applicable: boolean;
   is_system_task: boolean;
+  system_task_proc: string | null;
   system_task_hint: LocalizedText | null;
   cleanable_bytes: number;
   cleanable_count: number;
@@ -252,6 +253,79 @@ export interface AppxPackageInfo {
   protected: boolean;
 }
 
+export interface DriverPackageInfo {
+  published_name: string;
+  original_name: string;
+  provider: string;
+  class_name: string;
+  class_guid: string;
+  version: string;
+  date: string;
+  signer_name: string;
+  repo_folder: string;
+  repo_path: string;
+  size_bytes: number;
+  is_outdated_duplicate: boolean;
+  newer_version: string | null;
+}
+
+export interface DriverListPayload {
+  drivers: DriverPackageInfo[];
+  total_bytes: number;
+  outdated_count: number;
+  outdated_bytes: number;
+  default_backup_dir: string;
+  deleted?: string[];
+  errors?: string[];
+}
+
+export interface DriverBackupReport {
+  target_dir: string;
+  exported_count: number;
+  total_bytes: number;
+  manifest_path: string;
+}
+
+export type FeatureCategory =
+  | 'virtualization'
+  | 'developer'
+  | 'security_ai'
+  | 'network_smb'
+  | 'print_media'
+  | 'iis_web';
+
+export interface WindowsFeatureInfo {
+  name: string;
+  display_name: LocalizedText;
+  description: LocalizedText;
+  category: FeatureCategory;
+  enabled: boolean;
+  high_impact: boolean;
+}
+
+export interface FeatureToggleOutcome {
+  name: string;
+  enabled: boolean;
+  restart_required: boolean;
+  output: string;
+}
+
+export interface SystemTaskStatus {
+  compact_os_enabled: boolean;
+  compact_os_raw_output: string;
+  outdated_drivers_count: number;
+  outdated_drivers_bytes: number;
+  orphaned_installer_count: number;
+  orphaned_installer_bytes: number;
+}
+
+export interface SystemTaskExecOutcome {
+  task_id: string;
+  success: boolean;
+  output: string;
+  status: SystemTaskStatus;
+}
+
 export const api = {
   getSysInfo: () => reqJson<SysInfoPayload>('/api/sysinfo'),
   elevate: () =>
@@ -312,5 +386,31 @@ export const api = {
     reqJson<{ removed: string; packages: AppxPackageInfo[] }>('/api/appx/remove', {
       method: 'POST',
       body: JSON.stringify({ package_full_name }),
+    }),
+  getDrivers: () => reqJson<DriverListPayload>('/api/drivers/list'),
+  exportDrivers: (target_dir: string, published_names: string[] | null) =>
+    reqJson<DriverBackupReport>('/api/drivers/export', {
+      method: 'POST',
+      body: JSON.stringify({ target_dir, published_names }),
+    }),
+  deleteDrivers: (published_names: string[]) =>
+    reqJson<DriverListPayload>('/api/drivers/delete', {
+      method: 'POST',
+      body: JSON.stringify({ published_names }),
+    }),
+  getFeatures: () => reqJson<{ features: WindowsFeatureInfo[] }>('/api/features/list'),
+  toggleFeature: (name: string, enabled: boolean) =>
+    reqJson<{ outcome: FeatureToggleOutcome; features: WindowsFeatureInfo[] }>(
+      '/api/features/toggle',
+      {
+        method: 'POST',
+        body: JSON.stringify({ name, enabled }),
+      }
+    ),
+  getSysTaskStatus: () => reqJson<SystemTaskStatus>('/api/systasks/status'),
+  runSysTask: (task_id: string) =>
+    reqJson<{ outcome: SystemTaskExecOutcome; system: SystemInfo }>('/api/systasks/run', {
+      method: 'POST',
+      body: JSON.stringify({ task_id }),
     }),
 };

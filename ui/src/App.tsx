@@ -14,7 +14,10 @@ import {
   Apps24Regular,
   Broom24Regular,
   DataPie24Regular,
+  DeveloperBoardRegular,
   History24Regular,
+  HomeRegular,
+  PuzzlePieceRegular,
   Rocket24Regular,
   Settings24Regular,
   ShieldCheckmark24Regular,
@@ -30,14 +33,17 @@ import {
   api,
   formatBytes,
 } from './api';
+import { DashboardTargetTab, DashboardView } from './views/DashboardView';
 import { SpaceRecycleView } from './views/SpaceRecycleView';
 import { OptimizationView } from './views/OptimizationView';
 import { SnapshotView } from './views/SnapshotView';
 import { DiskAnalyzerView } from './views/DiskAnalyzerView';
 import { StartupView } from './views/StartupView';
 import { AppxView } from './views/AppxView';
+import { DriverView } from './views/DriverView';
+import { FeaturesView } from './views/FeaturesView';
 
-type NavTab = 'cleanup' | 'diskmap' | 'optimize' | 'startup' | 'appx' | 'snapshots';
+type NavTab = DashboardTargetTab;
 
 const useStyles = makeStyles({
   shell: {
@@ -114,7 +120,7 @@ const AppShell: React.FC<{
 }> = ({ dark, onToggleTheme }) => {
   const styles = useStyles();
   const [lang, setLang] = useState<Lang>('zh');
-  const [tab, setTab] = useState<NavTab>('cleanup');
+  const [tab, setTab] = useState<NavTab>('dashboard');
   const [loading, setLoading] = useState(true);
   const [sysPayload, setSysPayload] = useState<SysInfoPayload | null>(null);
   const [cleanupEntries, setCleanupEntries] = useState<CleanupRuleEntry[]>([]);
@@ -222,6 +228,14 @@ const AppShell: React.FC<{
           <div className={styles.navStack}>
             <Button
               className={styles.navBtn}
+              appearance={tab === 'dashboard' ? 'primary' : 'subtle'}
+              icon={<HomeRegular style={{ fontSize: 22 }} />}
+              onClick={() => setTab('dashboard')}
+            >
+              {lang === 'zh' ? '系统概览' : 'Dashboard'}
+            </Button>
+            <Button
+              className={styles.navBtn}
               appearance={tab === 'cleanup' ? 'primary' : 'subtle'}
               icon={<Broom24Regular />}
               onClick={() => setTab('cleanup')}
@@ -235,6 +249,22 @@ const AppShell: React.FC<{
               onClick={() => setTab('diskmap')}
             >
               {lang === 'zh' ? '空间分析' : 'Space Analyzer'}
+            </Button>
+            <Button
+              className={styles.navBtn}
+              appearance={tab === 'drivers' ? 'primary' : 'subtle'}
+              icon={<DeveloperBoardRegular style={{ fontSize: 22 }} />}
+              onClick={() => setTab('drivers')}
+            >
+              {lang === 'zh' ? '驱动管理' : 'Driver Manager'}
+            </Button>
+            <Button
+              className={styles.navBtn}
+              appearance={tab === 'features' ? 'primary' : 'subtle'}
+              icon={<PuzzlePieceRegular style={{ fontSize: 22 }} />}
+              onClick={() => setTab('features')}
+            >
+              {lang === 'zh' ? '可选功能' : 'Optional Features'}
             </Button>
             <Button
               className={styles.navBtn}
@@ -383,6 +413,20 @@ const AppShell: React.FC<{
             <div style={{ display: 'flex', justifyContent: 'center', paddingTop: 60 }}>
               <Spinner label={lang === 'zh' ? '正在加载规则引擎...' : 'Loading engine...'} />
             </div>
+          ) : tab === 'dashboard' ? (
+            <DashboardView
+              lang={lang}
+              sysPayload={sysPayload}
+              cleanupEntries={cleanupEntries}
+              optGroups={optGroups}
+              snapshots={snapshots}
+              scanning={scanning}
+              onScanCleanup={handleScan}
+              onNavigate={setTab}
+              onSystemUpdated={(sys) =>
+                setSysPayload((prev) => (prev ? { ...prev, system: sys } : prev))
+              }
+            />
           ) : tab === 'cleanup' ? (
             <SpaceRecycleView
               lang={lang}
@@ -394,6 +438,10 @@ const AppShell: React.FC<{
                 const sys = await api.getSysInfo();
                 setSysPayload(sys);
               }}
+              onSystemTaskDone={async (sys) => {
+                setSysPayload((prev) => (prev ? { ...prev, system: sys } : prev));
+                await handleScan();
+              }}
             />
           ) : tab === 'diskmap' ? (
             <DiskAnalyzerView
@@ -402,6 +450,10 @@ const AppShell: React.FC<{
                 setSysPayload((prev) => (prev ? { ...prev, system: sys } : prev))
               }
             />
+          ) : tab === 'drivers' ? (
+            <DriverView lang={lang} isAdmin={Boolean(sysPayload?.system.is_admin)} />
+          ) : tab === 'features' ? (
+            <FeaturesView lang={lang} isAdmin={Boolean(sysPayload?.system.is_admin)} />
           ) : tab === 'startup' ? (
             <StartupView lang={lang} isAdmin={Boolean(sysPayload?.system.is_admin)} />
           ) : tab === 'appx' ? (

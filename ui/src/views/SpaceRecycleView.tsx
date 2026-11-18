@@ -25,6 +25,7 @@ import {
   Delete24Regular,
   Info16Regular,
   LockClosed16Regular,
+  PlayRegular,
   Search20Regular,
   ShieldLock16Regular,
   Warning16Regular,
@@ -34,6 +35,7 @@ import {
   CleanupRuleEntry,
   CleanupScanResult,
   Lang,
+  SystemInfo,
   api,
   formatBytes,
   pickText,
@@ -45,6 +47,7 @@ interface Props {
   scanning: boolean;
   onScan: () => Promise<void>;
   onExecuted: (report: CleanupExecutionReport) => void;
+  onSystemTaskDone?: (sys: SystemInfo) => Promise<void> | void;
 }
 
 const useStyles = makeStyles({
@@ -195,6 +198,7 @@ export const SpaceRecycleView: React.FC<Props> = ({
   scanning,
   onScan,
   onExecuted,
+  onSystemTaskDone,
 }) => {
   const styles = useStyles();
   const [search, setSearch] = useState('');
@@ -212,6 +216,8 @@ export const SpaceRecycleView: React.FC<Props> = ({
   const [previewItem, setPreviewItem] = useState<CleanupScanResult | null>(null);
   const [previewLoading, setPreviewLoading] = useState(false);
   const [executing, setExecuting] = useState(false);
+  const [taskRunning, setTaskRunning] = useState<string | null>(null);
+  const [taskNotice, setTaskNotice] = useState<string | null>(null);
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [lastReport, setLastReport] = useState<CleanupExecutionReport | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
@@ -307,6 +313,7 @@ export const SpaceRecycleView: React.FC<Props> = ({
     if (ids.length === 0) return;
     setExecuting(true);
     setErrorMsg(null);
+    setTaskNotice(null);
     try {
       const { report } = await api.executeCleanup(ids, dryRun);
       setLastReport(report);
@@ -318,6 +325,29 @@ export const SpaceRecycleView: React.FC<Props> = ({
     } finally {
       setExecuting(false);
       setConfirmOpen(false);
+    }
+  };
+
+  const handleRunSystemTask = async (taskId: string) => {
+    setTaskRunning(taskId);
+    setErrorMsg(null);
+    setTaskNotice(null);
+    try {
+      const { outcome, system } = await api.runSysTask(taskId);
+      setTaskNotice(outcome.output || (lang === 'zh' ? '系统任务执行完成' : 'Task completed'));
+      if (activeId) {
+        const refreshed = await api.previewCleanup(activeId);
+        setPreviewItem(refreshed);
+      }
+      if (onSystemTaskDone) {
+        await onSystemTaskDone(system);
+      } else {
+        await onScan();
+      }
+    } catch (e) {
+      setErrorMsg(String(e));
+    } finally {
+      setTaskRunning(null);
     }
   };
 
@@ -534,6 +564,89 @@ export const SpaceRecycleView: React.FC<Props> = ({
                     {pickText(activeEntry.system_task_hint, lang)}
                   </MessageBarBody>
                 </MessageBar>
+              )}
+
+              {activeEntry.system_task_proc && (
+                <div
+                  style={{
+                    display: 'flex',
+                    flexDirection: 'column',
+                    gap: '8px',
+                    padding: '10px',
+                    borderRadius: tokens.borderRadiusMedium,
+                    backgroundColor: tokens.colorNeutralBackground1,
+                    border: `1px solid ${tokens.colorBrandStroke2}`,
+                  }}
+                >
+                  <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+                    {activeEntry.system_task_proc === 'BuiltinComponentCleanup' && (
+                      <Button
+                        size="small"
+                        appearance="primary"
+                        icon={taskRunning === 'component_cleanup' ? <Spinner size="tiny" /> : <PlayRegular />}
+                        disabled={Boolean(taskRunning)}
+                        onClick={() => handleRunSystemTask('component_cleanup')}
+                      >
+                        {lang === 'zh' ? '执行 DISM 组件存储清理' : 'Run DISM /StartComponentCleanup'}
+                      </Button>
+                    )}
+                    {activeEntry.system_task_proc === 'BuiltinCompactOs' && (
+                      <>
+                        <Button
+                          size="small"
+                          appearance="primary"
+                          icon={taskRunning === 'compact_os_enable' ? <Spinner size="tiny" /> : <PlayRegular />}
+                          disabled={Boolean(taskRunning)}
+                          onClick={() => handleRunSystemTask('compact_os_enable')}
+                        >
+                          {lang === 'zh' ? '启用 CompactOS 系统压缩' : 'Enable CompactOS'}
+                        </Button>
+                        <Button
+                          size="small"
+                          appearance="outline"
+                          disabled={Boolean(taskRunning)}
+                          onClick={() => handleRunSystemTask('compact_os_disable')}
+                        >
+                          {lang === 'zh' ? '关闭 CompactOS 压缩' : 'Disable CompactOS'}
+                        </Button>
+                      </>
+                    )}
+                    {activeEntry.system_task_proc === 'BuiltinRestorePointCleanup' && (
+                      <Button
+                        size="small"
+                        appearance="primary"
+                        icon={taskRunning === 'restore_point_cleanup' ? <Spinner size="tiny" /> : <PlayRegular />}
+                        disabled={Boolean(taskRunning)}
+                        onClick={() => handleRunSystemTask('restore_point_cleanup')}
+                      >
+                        {lang === 'zh' ? '删除最旧系统还原点 (VSS)' : 'Delete Oldest Restore Point'}
+                      </Button>
+                    )}
+                    {activeEntry.system_task_proc === 'BuiltinDriverCleanup' && (
+                      <Button
+                        size="small"
+                        appearance="primary"
+                        icon={taskRunning === 'driver_cleanup' ? <Spinner size="tiny" /> : <PlayRegular />}
+                        disabled={Boolean(taskRunning)}
+                        onClick={() => handleRunSystemTask('driver_cleanup')}
+                      >
+                        {lang === 'zh' ? '一键卸载全部过期重复驱动' : 'Clean Outdated Drivers'}
+                      </Button>
+                    )}
+                  </div>
+                  {taskNotice && (
+                    <Text
+                      size={100}
+                      style={{
+                        fontFamily: 'Consolas, monospace',
+                        whiteSpace: 'pre-wrap',
+                        color: tokens.colorPaletteGreenForeground1,
+                      }}
+                    >
+                      {taskNotice}
+                    </Text>
+                  )}
+                </div>
               )}
 
               <div

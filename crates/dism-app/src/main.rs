@@ -1,13 +1,18 @@
 use anyhow::Result;
 use clap::Parser;
 use dism_core::appx::{list_appx_packages, remove_appx_package};
-use dism_core::catalog::Action;
-use dism_core::cleaner::{execute_cleanup, scan_all, scan_rule, CleanupScanResult};
+use dism_core::cleaner::{
+    execute_cleanup, is_deferred_system_task_proc, scan_all, scan_custom_proc_name, scan_rule,
+    CleanupScanResult,
+};
 use dism_core::diskmap::{analyze_path, get_presets, recycle_path};
+use dism_core::drivers::{default_backup_dir, delete_driver, export_drivers, list_drivers};
 use dism_core::evaluator::eval_condition;
+use dism_core::features::{list_optional_features, set_feature_enabled};
 use dism_core::optimizer::{apply_optimization, evaluate_all_groups, ApplyValue, ScopeName};
 use dism_core::startup::{list_startup_items, set_startup_enabled};
 use dism_core::sysinfo::relaunch_as_admin;
+use dism_core::systasks::{get_system_task_status, run_system_task};
 use dism_core::{Catalog, SnapshotManager, SystemInfo};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -79,6 +84,28 @@ struct StartupToggleReq {
 #[derive(Deserialize)]
 struct AppxRemoveReq {
     package_full_name: String,
+}
+
+#[derive(Deserialize)]
+struct DriverExportReq {
+    target_dir: String,
+    published_names: Option<Vec<String>>,
+}
+
+#[derive(Deserialize)]
+struct DriverDeleteReq {
+    published_names: Vec<String>,
+}
+
+#[derive(Deserialize)]
+struct FeatureToggleReq {
+    name: String,
+    enabled: bool,
+}
+
+#[derive(Deserialize)]
+struct SysTaskRunReq {
+    task_id: String,
 }
 
 #[derive(Serialize)]
@@ -267,23 +294,11 @@ fn dispatch_api(
                         .iter()
                         .find(|s| eval_condition(&s.applicable, &sys));
                     if let Some(scan) = active_scan {
-                        let is_sys_task = scan.actions.iter().any(|a| {
-                            matches!(
-                                a,
-                                Action::Custom { proc_name, .. }
-                                if matches!(
-                                    proc_name.as_str(),
-                                    "BuiltinComponentCleanup"
-                                        | "BuiltinCompactOs"
-                                        | "BuiltinHardLinkMerge"
-                                        | "BuiltinDriverCleanup"
-                                        | "BuiltinAppxCleanup"
-                                        | "BuiltinCorruptedAppxCleanup"
-                                        | "BuiltinRestorePointCleanup"
-                                        | "BuiltinInstallerCleanup"
-                                )
-                            )
-                        });
+                        let system_task_proc = scan_custom_proc_name(scan);
+                        let is_sys_task = system_task_proc
+                            .as_deref()
+                            .map(is_deferred_system_task_proc)
+                            .unwrap_or(false);
                         let stub = CleanupScanResult {
                             id: rule.id.clone(),
                             name: scan.name_override.clone().unwrap_or_else(|| rule.name.clone()),
@@ -300,6 +315,7 @@ fn dispatch_api(
                             source: rule.source.clone(),
                             applicable: true,
                             is_system_task: is_sys_task,
+                            system_task_proc,
                             system_task_hint: None,
                             cleanable_bytes: 0,
                             cleanable_count: 0,
@@ -454,8 +470,84 @@ fn dispatch_api(
                 "packages": packages,
             }))
         }
+        (&Method::Get, "/api/drivers/list") => Ok(drivers_list_payload()),
+        (&Method::Post, "/api/drivers/export") => {
+            let payload: DriverExportReq = read_json_body(req)?;
+            let report = export_drivers(
+                Path::new(payload.target_dir.trim()),
+                payload.published_names.as_deref(),
+            )?;
+            Ok(serde_json::to_value(report)?)
+        }
+        (&Method::Post, "/api/drivers/delete") => {
+            let payload: DriverDeleteReq = read_json_body(req)?;
+            if payload.published_names.is_empty() {
+                return Err(anyhow::anyhow!("No drivers specified for deletion"));
+            }
+            let mut deleted = Vec::new();
+            let mut errors = Vec::new();
+            for name in &payload.published_names {
+                match delete_driver(name) {
+                    Ok(_) => deleted.push(name.clone()),
+                    Err(e) => errors.push(format!("{}: {}", name, e)),
+                }
+            }
+            if deleted.is_empty() && !errors.is_empty() {
+                return Err(anyhow::anyhow!("{}", errors.join("; ")));
+            }
+            let mut body = drivers_list_payload();
+            if let Some(obj) = body.as_object_mut() {
+                obj.insert("deleted".to_string(), serde_json::json!(deleted));
+                obj.insert("errors".to_string(), serde_json::json!(errors));
+            }
+            Ok(body)
+        }
+        (&Method::Get, "/api/features/list") => {
+            let features = list_optional_features();
+            Ok(serde_json::json!({ "features": features }))
+        }
+        (&Method::Post, "/api/features/toggle") => {
+            let payload: FeatureToggleReq = read_json_body(req)?;
+            let outcome = set_feature_enabled(&payload.name, payload.enabled)?;
+            let features = list_optional_features();
+            Ok(serde_json::json!({
+                "outcome": outcome,
+                "features": features,
+            }))
+        }
+        (&Method::Get, "/api/systasks/status") => {
+            let status = get_system_task_status();
+            Ok(serde_json::to_value(status)?)
+        }
+        (&Method::Post, "/api/systasks/run") => {
+            let payload: SysTaskRunReq = read_json_body(req)?;
+            let outcome = run_system_task(payload.task_id.trim())?;
+            let updated_sys = SystemInfo::collect();
+            Ok(serde_json::json!({
+                "outcome": outcome,
+                "system": updated_sys,
+            }))
+        }
         _ => Err(anyhow::anyhow!("Unknown API endpoint: {}", path)),
     }
+}
+
+fn drivers_list_payload() -> serde_json::Value {
+    let drivers = list_drivers();
+    let total_bytes: u64 = drivers.iter().map(|d| d.size_bytes).sum();
+    let outdated_count = drivers.iter().filter(|d| d.is_outdated_duplicate).count();
+    let outdated_bytes: u64 = drivers
+        .iter()
+        .filter(|d| d.is_outdated_duplicate)
+        .map(|d| d.size_bytes)
+        .sum();
+    serde_json::json!({
+        "drivers": drivers,
+        "total_bytes": total_bytes,
+        "outdated_count": outdated_count,
+        "outdated_bytes": outdated_bytes,
+        "default_backup_dir": default_backup_dir(),
+    })
 }
 
 fn serve_static(req: Request, ui_dir: &Path, url_path: &str) {

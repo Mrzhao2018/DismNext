@@ -48,6 +48,7 @@ pub struct CleanupScanResult {
     pub source: String,
     pub applicable: bool,
     pub is_system_task: bool,
+    pub system_task_proc: Option<String>,
     pub system_task_hint: Option<LocalizedText>,
     pub cleanable_bytes: u64,
     pub cleanable_count: usize,
@@ -83,8 +84,41 @@ pub struct CleanupExecutionReport {
 struct CollectedTargets {
     files: Vec<PreviewFile>,
     removable_dirs: Vec<PathBuf>,
+    driver_targets: Vec<(String, u64)>,
     is_system_task: bool,
+    system_task_proc: Option<String>,
     system_task_hint: Option<LocalizedText>,
+}
+
+/// Returns true if the Builtin custom proc is triggered via dedicated system task actions
+/// rather than normal batch file-checkbox deletion.
+pub fn is_deferred_system_task_proc(proc_name: &str) -> bool {
+    matches!(
+        proc_name,
+        "BuiltinComponentCleanup"
+            | "BuiltinCompactOs"
+            | "BuiltinHardLinkMerge"
+            | "BuiltinAppxCleanup"
+            | "BuiltinCorruptedAppxCleanup"
+            | "BuiltinRestorePointCleanup"
+    )
+}
+
+/// Returns the first heavy system-task `Custom` proc name associated with a scan, if any.
+pub fn scan_custom_proc_name(scan: &CleanupScan) -> Option<String> {
+    for action in &scan.actions {
+        if let Action::Custom { proc_name, .. } = action {
+            if is_deferred_system_task_proc(proc_name)
+                || matches!(
+                    proc_name.as_str(),
+                    "BuiltinDriverCleanup" | "BuiltinInstallerCleanup"
+                )
+            {
+                return Some(proc_name.clone());
+            }
+        }
+    }
+    None
 }
 
 /// Scans all applicable cleanup rules in parallel without modifying any files.
@@ -154,6 +188,7 @@ pub fn scan_rule(rule: &CleanupRule, sys: &SystemInfo) -> CleanupScanResult {
         source: rule.source.clone(),
         applicable: true,
         is_system_task: collected.is_system_task,
+        system_task_proc: collected.system_task_proc,
         system_task_hint: collected.system_task_hint,
         cleanable_bytes,
         cleanable_count,
@@ -222,28 +257,50 @@ fn execute_single_rule(rule: &CleanupRule, sys: &SystemInfo, dry_run: bool) -> R
     let mut failed_files = 0usize;
     let mut errors = Vec::new();
 
-    for f in &collected.files {
-        match f.status {
-            FileStatus::Locked => {
-                skipped_locked_files += 1;
-            }
-            FileStatus::Protected => {
-                skipped_protected_files += 1;
-            }
-            FileStatus::Ready => {
-                if dry_run {
-                    deleted_bytes += f.size_bytes;
-                    deleted_files += 1;
-                } else {
-                    match remove_file_safe(Path::new(&f.path)) {
-                        Ok(()) => {
-                            deleted_bytes += f.size_bytes;
-                            deleted_files += 1;
+    if !collected.driver_targets.is_empty() {
+        for (published_name, size_bytes) in &collected.driver_targets {
+            if dry_run {
+                deleted_bytes += *size_bytes;
+                deleted_files += 1;
+            } else {
+                match crate::drivers::delete_driver(published_name) {
+                    Ok(_) => {
+                        deleted_bytes += *size_bytes;
+                        deleted_files += 1;
+                    }
+                    Err(e) => {
+                        failed_files += 1;
+                        if errors.len() < 10 {
+                            errors.push(format!("{}: {}", published_name, e));
                         }
-                        Err(e) => {
-                            failed_files += 1;
-                            if errors.len() < 10 {
-                                errors.push(format!("{}: {}", f.path, e));
+                    }
+                }
+            }
+        }
+    } else {
+        for f in &collected.files {
+            match f.status {
+                FileStatus::Locked => {
+                    skipped_locked_files += 1;
+                }
+                FileStatus::Protected => {
+                    skipped_protected_files += 1;
+                }
+                FileStatus::Ready => {
+                    if dry_run {
+                        deleted_bytes += f.size_bytes;
+                        deleted_files += 1;
+                    } else {
+                        match remove_file_safe(Path::new(&f.path)) {
+                            Ok(()) => {
+                                deleted_bytes += f.size_bytes;
+                                deleted_files += 1;
+                            }
+                            Err(e) => {
+                                failed_files += 1;
+                                if errors.len() < 10 {
+                                    errors.push(format!("{}: {}", f.path, e));
+                                }
                             }
                         }
                     }
@@ -299,6 +356,7 @@ fn empty_result(rule: &CleanupRule, applicable: bool) -> CleanupScanResult {
         source: rule.source.clone(),
         applicable,
         is_system_task: false,
+        system_task_proc: None,
         system_task_hint: None,
         cleanable_bytes: 0,
         cleanable_count: 0,
@@ -320,7 +378,9 @@ fn collect_scan_targets(scan: &CleanupScan, sys: &SystemInfo) -> CollectedTarget
     let mut files = Vec::new();
     let mut seen_paths = HashSet::<String>::new();
     let mut removable_dirs = Vec::new();
+    let mut driver_targets = Vec::new();
     let mut is_system_task = false;
+    let mut system_task_proc = scan_custom_proc_name(scan);
     let mut system_task_hint: Option<LocalizedText> = None;
 
     for action in &scan.actions {
@@ -357,7 +417,9 @@ fn collect_scan_targets(scan: &CleanupScan, sys: &SystemInfo) -> CollectedTarget
                     &mut files,
                     &mut seen_paths,
                     &mut removable_dirs,
+                    &mut driver_targets,
                     &mut is_system_task,
+                    &mut system_task_proc,
                     &mut system_task_hint,
                 );
             }
@@ -368,7 +430,9 @@ fn collect_scan_targets(scan: &CleanupScan, sys: &SystemInfo) -> CollectedTarget
     CollectedTargets {
         files,
         removable_dirs,
+        driver_targets,
         is_system_task,
+        system_task_proc,
         system_task_hint,
     }
 }
@@ -463,13 +527,16 @@ fn collect_general_action(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn handle_custom_proc(
     proc_name: &str,
     sys: &SystemInfo,
     files: &mut Vec<PreviewFile>,
     seen_paths: &mut HashSet<String>,
     removable_dirs: &mut Vec<PathBuf>,
+    driver_targets: &mut Vec<(String, u64)>,
     is_system_task: &mut bool,
+    system_task_proc: &mut Option<String>,
     system_task_hint: &mut Option<LocalizedText>,
 ) {
     match proc_name {
@@ -519,56 +586,124 @@ fn handle_custom_proc(
             );
         }
         "BuiltinInstallerCleanup" => {
-            *is_system_task = true;
+            let orphans = crate::systasks::find_orphaned_installer_files();
+            let orphan_count = orphans.len();
+            for (path, _sz) in orphans {
+                record_file(&path, files, seen_paths);
+            }
+            *is_system_task = false;
+            *system_task_proc = Some(proc_name.to_string());
             *system_task_hint = Some(LocalizedText {
-                zh: "Windows Installer 孤儿补丁需要严格校验 MSI 数据库引用，Phase 1 暂不直接删除以保安全。".to_string(),
-                en: "Orphaned Windows Installer (.msp) cleanup requires MSI database reference verification and is skipped in Phase 1 for safety.".to_string(),
+                zh: format!(
+                    "已交叉核验 Installer\\UserData 数据库，检出 {} 个无引用孤立 .msi/.msp 安装缓存（已安装软件依赖包已保护）。",
+                    orphan_count
+                ),
+                en: format!(
+                    "Cross-checked Installer\\UserData database and found {} orphaned .msi/.msp cache file(s); referenced packages remain protected.",
+                    orphan_count
+                ),
             });
         }
         "BuiltinComponentCleanup" => {
+            for p in [
+                r"%SystemRoot%\WinSxS\Temp\PendingDeletes",
+                r"%SystemRoot%\WinSxS\ManifestCache",
+            ] {
+                collect_general_action(p, "File", &[], &[], sys, files, seen_paths, removable_dirs);
+            }
             *is_system_task = true;
+            *system_task_proc = Some(proc_name.to_string());
             *system_task_hint = Some(LocalizedText {
-                zh: "系统组件存储清理需调用 Windows DISM 接口 (Dism.exe /Online /Cleanup-Image /StartComponentCleanup)，将在 Phase 2 接入。".to_string(),
-                en: "WinSxS component cleanup uses Windows DISM (/StartComponentCleanup) and will be wired natively in Phase 2.".to_string(),
+                zh: "已启用 DISM 组件存储深度清理：可在右侧操作区直接点击“执行 DISM 组件存储清理”启动 /StartComponentCleanup。".to_string(),
+                en: "WinSxS component cleanup ready: trigger DISM /StartComponentCleanup directly from the action panel.".to_string(),
             });
         }
         "BuiltinCompactOs" => {
+            let (enabled, _raw) = crate::systasks::query_compact_os();
             *is_system_task = true;
+            *system_task_proc = Some(proc_name.to_string());
             *system_task_hint = Some(LocalizedText {
-                zh: "CompactOS 文件系统压缩属于系统级操作 (compact.exe /CompactOS:always)，将在 Phase 2 接入。".to_string(),
-                en: "CompactOS compression is a system-level operation (compact.exe /CompactOS:always) scheduled for Phase 2.".to_string(),
+                zh: format!(
+                    "当前状态：{} CompactOS 系统文件压缩（可在右侧直接启用或还原）。",
+                    if enabled { "已启用" } else { "未启用" }
+                ),
+                en: format!(
+                    "Live state: CompactOS compression is currently {} (toggle via action panel).",
+                    if enabled { "ENABLED" } else { "DISABLED" }
+                ),
             });
         }
         "BuiltinHardLinkMerge" => {
             *is_system_task = true;
+            *system_task_proc = Some(proc_name.to_string());
             *system_task_hint = Some(LocalizedText {
-                zh: "NTFS 硬链接合并属于底层系统级任务，将在后续阶段评估接入。".to_string(),
-                en: "NTFS hardlink merge is an advanced disk operation excluded from Phase 1 safe cleanup.".to_string(),
+                zh: "NTFS 硬链接合并涉及底层卷修改，建议先完成系统组件清理与驱动去重。".to_string(),
+                en: "NTFS hardlink merge operates at volume level; prefer WinSxS cleanup and driver deduplication first.".to_string(),
             });
         }
         "BuiltinDriverCleanup" => {
-            *is_system_task = true;
+            let drivers = crate::drivers::list_drivers();
+            let outdated: Vec<_> = drivers
+                .into_iter()
+                .filter(|d| d.is_outdated_duplicate)
+                .collect();
+            for d in &outdated {
+                let key = d.published_name.to_ascii_lowercase();
+                if seen_paths.insert(key) {
+                    let newer = d.newer_version.as_deref().unwrap_or("newer");
+                    files.push(PreviewFile {
+                        path: format!(
+                            "{} [{} · {} v{} -> {}]",
+                            d.repo_path, d.published_name, d.original_name, d.version, newer
+                        ),
+                        size_bytes: d.size_bytes,
+                        status: FileStatus::Ready,
+                        reason: Some(format!(
+                            "已被更新版本 {} 取代，将通过 pnputil 安全移除 ({})",
+                            newer, d.published_name
+                        )),
+                    });
+                    driver_targets.push((d.published_name.clone(), d.size_bytes));
+                }
+            }
+            *is_system_task = false;
+            *system_task_proc = Some(proc_name.to_string());
             *system_task_hint = Some(LocalizedText {
-                zh: "过期驱动程序清理需枚举 DriverStore 包引用，将在 Phase 2 接入。".to_string(),
-                en: "Outdated driver store cleanup requires DriverStore enumeration scheduled for Phase 2.".to_string(),
+                zh: format!(
+                    "已识别 {} 个被新版本取代的重复旧驱动包（勾选执行或点击右侧按钮即可安全卸载，当前生效驱动保留）。",
+                    outdated.len()
+                ),
+                en: format!(
+                    "Detected {} outdated duplicate driver package(s) safely removable via pnputil while keeping active drivers.",
+                    outdated.len()
+                ),
             });
         }
         "BuiltinAppxCleanup" | "BuiltinCorruptedAppxCleanup" => {
+            for p in [
+                r"%ProgramFiles%\WindowsApps\DeletedAllUserPackages",
+                r"%LOCALAPPDATA%\Packages\*\AC\Temp",
+            ] {
+                collect_general_action(p, "Directory|File", &[], &[], sys, files, seen_paths, removable_dirs);
+            }
             *is_system_task = true;
+            *system_task_proc = Some(proc_name.to_string());
             *system_task_hint = Some(LocalizedText {
-                zh: "Appx 应用包清理将在 Phase 2 通过 WinRT PackageManager 接口原生实现。".to_string(),
-                en: "Appx package cleanup will use native WinRT PackageManager APIs in Phase 2.".to_string(),
+                zh: "已扫描遗留 Appx 临时缓存；如需整包卸载预装 UWP 应用，请前往左侧“预装应用管理”页面。".to_string(),
+                en: "Scanned leftover Appx caches; use the AppX Manager view in the sidebar for full package removal.".to_string(),
             });
         }
         "BuiltinRestorePointCleanup" => {
             *is_system_task = true;
+            *system_task_proc = Some(proc_name.to_string());
             *system_task_hint = Some(LocalizedText {
-                zh: "系统还原点管理需调用 VSS 卷影复制接口，将在 Phase 2 接入。".to_string(),
-                en: "System Restore point management requires VSS APIs scheduled for Phase 2.".to_string(),
+                zh: "可通过右侧系统任务按钮调用 vssadmin 删除最旧卷影复制还原点以释放磁盘空间。".to_string(),
+                en: "Run oldest VSS restore point cleanup directly from the right-hand system task panel.".to_string(),
             });
         }
         _ => {
             *is_system_task = true;
+            *system_task_proc = Some(proc_name.to_string());
         }
     }
 }
