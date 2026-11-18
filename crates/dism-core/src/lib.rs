@@ -6,6 +6,7 @@ pub mod drivers;
 pub mod evaluator;
 pub mod features;
 pub mod lockcheck;
+pub mod mcp;
 pub mod optimizer;
 pub mod rescue;
 pub mod snapshot;

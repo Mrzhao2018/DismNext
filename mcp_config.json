@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "dismnext": {
+      "command": "E:/code/dismplus/target/release/dism-cli.exe",
+      "args": [
+        "mcp"
+      ]
+    }
+  }
+}

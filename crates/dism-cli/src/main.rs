@@ -6,6 +6,7 @@ use dism_core::diskmap::analyze_path;
 use dism_core::drivers::{delete_driver, export_drivers, list_drivers};
 use dism_core::evaluator::eval_condition;
 use dism_core::features::{list_optional_features, set_feature_enabled, FeatureCategory};
+use dism_core::mcp::run_mcp_stdio;
 use dism_core::optimizer::{apply_optimization, evaluate_all_groups, ApplyValue, ScopeName, ScopeStatus};
 use dism_core::startup::{list_startup_items, set_startup_enabled};
 use dism_core::{Catalog, SnapshotManager, SystemInfo};
@@ -86,6 +87,8 @@ enum Commands {
         #[command(subcommand)]
         action: FeaturesCommands,
     },
+    /// Run the Model Context Protocol (MCP) server over stdio (JSON-RPC 2.0)
+    Mcp,
 }
 
 #[derive(Subcommand)]
@@ -639,6 +642,9 @@ fn main() -> Result<()> {
                 println!("{}", serde_json::to_string_pretty(&res)?);
             }
         },
+        Commands::Mcp => {
+            run_mcp_stdio(&catalog)?;
+        }
     }
 
     let _ = eval_condition;
