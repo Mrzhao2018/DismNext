@@ -20,6 +20,7 @@ import {
   tokens,
 } from '@fluentui/react-components';
 import {
+  Add20Regular,
   Broom24Regular,
   CheckmarkCircle16Regular,
   Delete24Regular,
@@ -46,6 +47,7 @@ interface Props {
   entries: CleanupRuleEntry[];
   scanning: boolean;
   onScan: () => Promise<void>;
+  onEntriesUpdated?: (items: CleanupRuleEntry[]) => void;
   onExecuted: (report: CleanupExecutionReport) => void;
   onSystemTaskDone?: (sys: SystemInfo) => Promise<void> | void;
 }
@@ -197,6 +199,7 @@ export const SpaceRecycleView: React.FC<Props> = ({
   entries,
   scanning,
   onScan,
+  onEntriesUpdated,
   onExecuted,
   onSystemTaskDone,
 }) => {
@@ -204,6 +207,16 @@ export const SpaceRecycleView: React.FC<Props> = ({
   const [search, setSearch] = useState('');
   const deferredSearch = React.useDeferredValue(search);
   const [groupFilter, setGroupFilter] = useState<string>('ALL');
+  const [customModalOpen, setCustomModalOpen] = useState(false);
+  const [customName, setCustomName] = useState('');
+  const [customRoot, setCustomRoot] = useState('');
+  const [customQueries, setCustomQueries] = useState('*.log, *.tmp');
+  const [customExcluded, setCustomExcluded] = useState('');
+  const [customLevel, setCustomLevel] = useState<number>(2);
+  const [customTesting, setCustomTesting] = useState(false);
+  const [customSaving, setCustomSaving] = useState(false);
+  const [customPreview, setCustomPreview] = useState<CleanupScanResult | null>(null);
+  const [customError, setCustomError] = useState<string | null>(null);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(() => {
     const init = new Set<string>();
     entries.forEach((e) => {
@@ -534,6 +547,18 @@ export const SpaceRecycleView: React.FC<Props> = ({
           <Button size="small" appearance="subtle" onClick={() => applyPreset('none')}>
             {lang === 'zh' ? '取消全选' : 'Clear'}
           </Button>
+          <Button
+            size="small"
+            appearance="outline"
+            icon={<Add20Regular />}
+            onClick={() => {
+              setCustomPreview(null);
+              setCustomError(null);
+              setCustomModalOpen(true);
+            }}
+          >
+            {lang === 'zh' ? '+ 自定义规则' : '+ Custom Rule'}
+          </Button>
         </div>
         <div className={styles.toolbarRight}>
           <Input
@@ -596,6 +621,11 @@ export const SpaceRecycleView: React.FC<Props> = ({
                             Win11
                           </Badge>
                         )}
+                        {r.source === 'custom' && (
+                          <Badge size="small" appearance="outline" color="informative">
+                            {lang === 'zh' ? '自定义' : 'Custom'}
+                          </Badge>
+                        )}
                         {levelBadge(r.level)}
                         {r.is_system_task && (
                           <Badge size="small" appearance="tint" color="subtle">
@@ -646,11 +676,36 @@ export const SpaceRecycleView: React.FC<Props> = ({
         <div className={styles.drawer}>
           {activeEntry ? (
             <>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 }}>
                 <Text size={400} weight="bold">
                   {pickText(activeEntry.name, lang)}
                 </Text>
-                {levelBadge(activeEntry.level)}
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                  {activeEntry.source === 'custom' && (
+                    <Button
+                      size="small"
+                      appearance="subtle"
+                      onClick={async () => {
+                        try {
+                          const res = await api.deleteCustomRule(activeEntry.id);
+                          onEntriesUpdated?.(res.items);
+                          setActiveId(res.items.length > 0 ? res.items[0].rule.id : null);
+                          setPreviewItem(null);
+                          setTaskNotice(
+                            lang === 'zh'
+                              ? `已删除自定义规则：${pickText(activeEntry.name, lang)}`
+                              : `Deleted custom rule: ${pickText(activeEntry.name, lang)}`
+                          );
+                        } catch (err) {
+                          setErrorMsg(String(err));
+                        }
+                      }}
+                    >
+                      {lang === 'zh' ? '删除自定义规则' : 'Delete Custom Rule'}
+                    </Button>
+                  )}
+                  {levelBadge(activeEntry.level)}
+                </div>
               </div>
               <Text size={200} style={{ color: tokens.colorNeutralForeground2 }}>
                 {pickText(activeEntry.description, lang)}
@@ -981,6 +1036,191 @@ export const SpaceRecycleView: React.FC<Props> = ({
                 onClick={() => pendingSysTask && handleRunSystemTask(pendingSysTask)}
               >
                 {lang === 'zh' ? '确认执行任务' : 'Confirm Task'}
+              </Button>
+            </DialogActions>
+          </DialogBody>
+        </DialogSurface>
+      </Dialog>
+
+      <Dialog open={customModalOpen} onOpenChange={(_, d) => setCustomModalOpen(d.open)}>
+        <DialogSurface style={{ maxWidth: 640 }}>
+          <DialogBody>
+            <DialogTitle>
+              {lang === 'zh' ? '新建自定义清理规则' : 'Create Custom Cleanup Rule'}
+            </DialogTitle>
+            <DialogContent>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                {customError && (
+                  <MessageBar intent="error">
+                    <MessageBarBody>{customError}</MessageBarBody>
+                  </MessageBar>
+                )}
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                  <Text size={200} weight="semibold">
+                    {lang === 'zh' ? '规则名称 *' : 'Rule Name *'}
+                  </Text>
+                  <Input
+                    placeholder={lang === 'zh' ? '例如：我的构建缓存日志' : 'e.g. Build Temp Logs'}
+                    value={customName}
+                    onChange={(_, d) => setCustomName(d.value)}
+                  />
+                </div>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                  <Text size={200} weight="semibold">
+                    {lang === 'zh' ? '目标根目录 *（支持 %LOCALAPPDATA% 等环境变量）' : 'Target Root Path *'}
+                  </Text>
+                  <Input
+                    placeholder={lang === 'zh' ? '例如：%LOCALAPPDATA%\\MyApp\\Logs 或 D:\\Builds\\Logs' : 'e.g. %LOCALAPPDATA%\\MyApp\\Logs'}
+                    value={customRoot}
+                    onChange={(_, d) => setCustomRoot(d.value)}
+                  />
+                </div>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                  <Text size={200} weight="semibold">
+                    {lang === 'zh' ? '匹配文件通配符（逗号分隔，留空则清理整个目标目录内容）' : 'File Queries (comma-separated, optional)'}
+                  </Text>
+                  <Input
+                    placeholder="*.log, *.tmp, *.dmp"
+                    value={customQueries}
+                    onChange={(_, d) => setCustomQueries(d.value)}
+                  />
+                </div>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                  <Text size={200} weight="semibold">
+                    {lang === 'zh' ? '排除项（逗号分隔，可选）' : 'Excluded Patterns (optional)'}
+                  </Text>
+                  <Input
+                    placeholder="latest.log, config.json"
+                    value={customExcluded}
+                    onChange={(_, d) => setCustomExcluded(d.value)}
+                  />
+                </div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <Text size={200} weight="semibold">
+                    {lang === 'zh' ? '安全等级：' : 'Level:'}
+                  </Text>
+                  {[3, 2, 1].map((lv) => (
+                    <Button
+                      key={lv}
+                      size="small"
+                      appearance={customLevel === lv ? 'primary' : 'outline'}
+                      onClick={() => setCustomLevel(lv)}
+                    >
+                      {lv === 3 ? 'L3 推荐' : lv === 2 ? 'L2 标准' : 'L1 谨慎'}
+                    </Button>
+                  ))}
+                </div>
+
+                {customPreview && (
+                  <div
+                    style={{
+                      padding: 10,
+                      borderRadius: tokens.borderRadiusMedium,
+                      backgroundColor: tokens.colorNeutralBackground3,
+                      display: 'flex',
+                      flexDirection: 'column',
+                      gap: 6,
+                      maxHeight: 200,
+                      overflowY: 'auto',
+                    }}
+                  >
+                    <Text size={200} weight="semibold">
+                      {lang === 'zh'
+                        ? `Dry-Run 测试命中：${customPreview.cleanable_count} 个可清理文件 (${formatBytes(customPreview.cleanable_bytes)}) · 跳过占用 ${customPreview.skipped_locked_count} 个`
+                        : `Dry-Run Matched: ${customPreview.cleanable_count} ready (${formatBytes(customPreview.cleanable_bytes)}), ${customPreview.skipped_locked_count} locked`}
+                    </Text>
+                    {customPreview.preview_files.slice(0, 15).map((pf) => (
+                      <Text
+                        key={pf.path}
+                        size={100}
+                        truncate
+                        style={{ fontFamily: 'Consolas, monospace', color: tokens.colorNeutralForeground2 }}
+                      >
+                        [{pf.status}] {formatBytes(pf.size_bytes)} - {pf.path}
+                      </Text>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </DialogContent>
+            <DialogActions>
+              <Button appearance="secondary" onClick={() => setCustomModalOpen(false)}>
+                {lang === 'zh' ? '取消' : 'Cancel'}
+              </Button>
+              <Button
+                appearance="outline"
+                disabled={customTesting || !customName.trim() || !customRoot.trim()}
+                onClick={async () => {
+                  setCustomTesting(true);
+                  setCustomError(null);
+                  try {
+                    const splitList = (s: string) =>
+                      s
+                        .split(',')
+                        .map((x) => x.trim())
+                        .filter(Boolean);
+                    const res = await api.testCustomRule({
+                      name_zh: customName,
+                      root_path: customRoot,
+                      queries: splitList(customQueries),
+                      excluded: splitList(customExcluded),
+                      level: customLevel,
+                    });
+                    setCustomPreview(res);
+                  } catch (err) {
+                    setCustomError(String(err));
+                  } finally {
+                    setCustomTesting(false);
+                  }
+                }}
+              >
+                {customTesting
+                  ? lang === 'zh'
+                    ? '测试中...'
+                    : 'Testing...'
+                  : lang === 'zh'
+                  ? 'Dry-Run 测试扫描'
+                  : 'Test (Dry-Run)'}
+              </Button>
+              <Button
+                appearance="primary"
+                disabled={customSaving || !customName.trim() || !customRoot.trim()}
+                onClick={async () => {
+                  setCustomSaving(true);
+                  setCustomError(null);
+                  try {
+                    const splitList = (s: string) =>
+                      s
+                        .split(',')
+                        .map((x) => x.trim())
+                        .filter(Boolean);
+                    const res = await api.saveCustomRule({
+                      name_zh: customName,
+                      root_path: customRoot,
+                      queries: splitList(customQueries),
+                      excluded: splitList(customExcluded),
+                      level: customLevel,
+                    });
+                    onEntriesUpdated?.(res.items);
+                    setActiveId(res.saved.id);
+                    setPreviewItem(res.saved);
+                    setCustomModalOpen(false);
+                    setCustomName('');
+                    setCustomRoot('');
+                  } catch (err) {
+                    setCustomError(String(err));
+                  } finally {
+                    setCustomSaving(false);
+                  }
+                }}
+              >
+                {customSaving
+                  ? lang === 'zh'
+                    ? '保存中...'
+                    : 'Saving...'
+                  : lang === 'zh'
+                  ? '保存并启用规则'
+                  : 'Save Rule'}
               </Button>
             </DialogActions>
           </DialogBody>

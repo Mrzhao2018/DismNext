@@ -5,11 +5,13 @@ use crate::drivers::{default_backup_dir, export_drivers, list_drivers};
 use crate::features::{list_optional_features, FeatureCategory};
 use crate::lockcheck::find_locking_processes;
 use crate::optimizer::{evaluate_all_groups, get_optimization_presets};
+use crate::report::generate_health_report;
 use crate::rescue::{create_restore_point, list_restore_points, run_rescue_action};
 use crate::snapshot::{snapshot_summary, SnapshotManager, SnapshotSummary};
 use crate::startup::{list_scheduled_tasks, list_startup_items, list_third_party_services};
 use crate::sysinfo::SystemInfo;
 use crate::systasks::get_system_task_status;
+use crate::uninstaller::{list_win32_apps, scan_app_leftovers};
 use anyhow::{anyhow, Result};
 use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, BufWriter, Write};
@@ -481,6 +483,39 @@ pub fn tool_definitions() -> Vec<Value> {
                 "additionalProperties": false
             }
         }),
+        json!({
+            "name": "dismnext_list_installed_apps",
+            "description": "List installed classic desktop software (Win32/MSI) from HKLM/HKCU Uninstall keys, optionally filtering by keyword or scanning leftover folders for a specific app ID.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "search": {
+                        "type": "string",
+                        "description": "Optional keyword filter matching display name or publisher."
+                    },
+                    "scan_leftovers_for_id": {
+                        "type": "string",
+                        "description": "Optional app ID (from list output) to scan candidate AppData/ProgramData/install leftovers."
+                    }
+                },
+                "additionalProperties": false
+            }
+        }),
+        json!({
+            "name": "dismnext_export_health_report",
+            "description": "Generate a comprehensive Windows health audit report (score 0-100, disk usage, reclaimable space, drivers, startup items, and installed apps) in Markdown or structured JSON.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "format": {
+                        "type": "string",
+                        "enum": ["markdown", "json"],
+                        "description": "Output format ('markdown' or 'json'; defaults to 'json')."
+                    }
+                },
+                "additionalProperties": false
+            }
+        }),
     ]
 }
 
@@ -773,6 +808,59 @@ fn dispatch_tool_call(name: &str, args: &Value, catalog: &Catalog) -> Result<Val
                 }
             }
         }
+        "dismnext_list_installed_apps" => {
+            let mut apps = list_win32_apps();
+            if let Some(target_id) = args
+                .get("scan_leftovers_for_id")
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                let app = apps
+                    .into_iter()
+                    .find(|a| a.id == target_id)
+                    .ok_or_else(|| anyhow!("Installed application '{}' not found", target_id))?;
+                let leftovers =
+                    scan_app_leftovers(&app.display_name, &app.publisher, &app.install_location);
+                return Ok(json!({
+                    "app": app,
+                    "leftover_count": leftovers.len(),
+                    "leftovers": leftovers
+                }));
+            }
+            if let Some(search) = args
+                .get("search")
+                .and_then(|v| v.as_str())
+                .map(|s| s.trim().to_ascii_lowercase())
+                .filter(|s| !s.is_empty())
+            {
+                apps.retain(|a| {
+                    a.display_name.to_ascii_lowercase().contains(&search)
+                        || a.publisher.to_ascii_lowercase().contains(&search)
+                });
+            }
+            Ok(json!({
+                "count": apps.len(),
+                "apps": apps
+            }))
+        }
+        "dismnext_export_health_report" => {
+            let fmt = args
+                .get("format")
+                .and_then(|v| v.as_str())
+                .unwrap_or("json")
+                .to_ascii_lowercase();
+            let report = generate_health_report(catalog, None);
+            if fmt == "markdown" {
+                Ok(json!({
+                    "health_score": report.health_score,
+                    "generated_at": report.generated_at,
+                    "markdown": report.markdown
+                }))
+            } else {
+                Ok(serde_json::to_value(report)?)
+            }
+        }
         _ => Err(anyhow!("Unknown tool: {}", name)),
     }
 }
@@ -837,7 +925,7 @@ mod tests {
         });
         let resp = handle_mcp_request(&req, &catalog).expect("tools/list returns response");
         let tools = resp["result"]["tools"].as_array().expect("tools array");
-        assert_eq!(tools.len(), 14);
+        assert_eq!(tools.len(), 16);
         for t in tools {
             assert!(t["name"].as_str().unwrap().starts_with("dismnext_"));
             assert_eq!(t["inputSchema"]["type"], "object");
@@ -863,7 +951,7 @@ mod tests {
             .as_str()
             .expect("content text");
         let parsed: Value = serde_json::from_str(text).expect("valid JSON tool payload");
-        assert_eq!(parsed["catalog"]["cleanup_rules"], 86);
+        assert!(parsed["catalog"]["cleanup_rules"].as_u64().unwrap() >= 86);
         assert!(parsed["system"]["system_disk"]["total_bytes"].as_u64().unwrap() > 0);
 
         let snap_req = json!({

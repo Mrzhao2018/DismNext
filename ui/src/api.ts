@@ -428,6 +428,79 @@ export interface OrphanDirEntry {
   modified_date: string;
 }
 
+export interface Win32AppInfo {
+  id: string;
+  key_name: string;
+  display_name: string;
+  publisher: string;
+  display_version: string;
+  install_date: string;
+  install_location: string;
+  uninstall_string: string;
+  quiet_uninstall_string: string;
+  estimated_size_bytes: number;
+  scope: string;
+  is_msi: boolean;
+}
+
+export interface AppLeftoverItem {
+  path: string;
+  kind: string;
+  size_bytes: number;
+  file_count: number;
+}
+
+export interface UninstallLaunchOutcome {
+  app_id: string;
+  display_name: string;
+  command_launched: string;
+  leftovers: AppLeftoverItem[];
+}
+
+export interface CustomRuleInput {
+  id?: string;
+  name_zh: string;
+  name_en?: string;
+  description_zh?: string;
+  description_en?: string;
+  level?: number;
+  root_path: string;
+  queries: string[];
+  excluded: string[];
+  flags?: string;
+}
+
+export interface ReportRuleSummary {
+  id: string;
+  name_zh: string;
+  name_en: string;
+  cleanable_bytes: number;
+}
+
+export interface HealthReportPayload {
+  generated_at: string;
+  health_score: number;
+  score_notes: string[];
+  os_summary: string;
+  disk_root: string;
+  disk_total_bytes: number;
+  disk_free_bytes: number;
+  disk_used_bytes: number;
+  reclaimable_bytes: number;
+  outdated_drivers_count: number;
+  outdated_drivers_bytes: number;
+  orphaned_installer_count: number;
+  orphaned_installer_bytes: number;
+  enabled_startups: number;
+  auto_services: number;
+  enabled_tasks: number;
+  installed_win32_apps: number;
+  compact_os_enabled: boolean;
+  top_cleanup_rules: ReportRuleSummary[];
+  markdown: string;
+  html: string;
+}
+
 export const api = {
   getSysInfo: () => reqJson<SysInfoPayload>('/api/sysinfo'),
   elevate: () =>
@@ -570,4 +643,31 @@ export const api = {
       body: JSON.stringify({ path, min_size_bytes }),
     }),
   getOrphanDirs: () => reqJson<{ orphans: OrphanDirEntry[] }>('/api/diskmap/orphans'),
+  getWin32Apps: () => reqJson<{ apps: Win32AppInfo[] }>('/api/uninstaller/list'),
+  scanAppLeftovers: (display_name: string, publisher: string, install_location: string) =>
+    reqJson<{ leftovers: AppLeftoverItem[] }>('/api/uninstaller/leftovers', {
+      method: 'POST',
+      body: JSON.stringify({ display_name, publisher, install_location }),
+    }),
+  uninstallWin32App: (app_id: string, use_quiet: boolean) =>
+    reqJson<UninstallLaunchOutcome>('/api/uninstaller/uninstall', {
+      method: 'POST',
+      body: JSON.stringify({ app_id, use_quiet }),
+    }),
+  testCustomRule: (input: CustomRuleInput) =>
+    reqJson<CleanupScanResult>('/api/cleanup/custom/test', {
+      method: 'POST',
+      body: JSON.stringify(input),
+    }),
+  saveCustomRule: (input: CustomRuleInput) =>
+    reqJson<{ saved: CleanupScanResult; items: CleanupRuleEntry[] }>('/api/cleanup/custom/save', {
+      method: 'POST',
+      body: JSON.stringify(input),
+    }),
+  deleteCustomRule: (rule_id: string) =>
+    reqJson<{ items: CleanupRuleEntry[] }>('/api/cleanup/custom/delete', {
+      method: 'POST',
+      body: JSON.stringify({ rule_id }),
+    }),
+  exportHealthReport: () => reqJson<HealthReportPayload>('/api/report/export'),
 };

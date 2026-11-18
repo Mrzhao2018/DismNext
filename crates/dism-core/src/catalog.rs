@@ -1,7 +1,7 @@
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
-use std::path::Path;
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 
 pub const EMBEDDED_CATALOG_JSON: &str = include_str!("../../../catalog/rules.json");
 
@@ -189,6 +189,20 @@ pub struct OptimizationGroup {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CustomRuleInput {
+    pub id: Option<String>,
+    pub name_zh: String,
+    pub name_en: Option<String>,
+    pub description_zh: Option<String>,
+    pub description_en: Option<String>,
+    pub level: Option<u8>,
+    pub root_path: String,
+    pub queries: Vec<String>,
+    pub excluded: Vec<String>,
+    pub flags: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Catalog {
     pub schema_version: u32,
     pub base_version: String,
@@ -197,33 +211,343 @@ pub struct Catalog {
 }
 
 impl Catalog {
-    /// Loads catalog from an explicit path, `catalog/rules.json` in CWD/exe dir, or embedded JSON fallback.
+    /// Loads catalog from an explicit path, `catalog/rules.json` in CWD/exe dir, or embedded JSON fallback,
+    /// and merges user-defined rules from `data/custom_rules.json`.
     pub fn load(explicit_path: Option<&Path>) -> Result<Self> {
-        if let Some(p) = explicit_path {
+        let mut catalog: Self = if let Some(p) = explicit_path {
             let text = std::fs::read_to_string(p)
                 .with_context(|| format!("Failed to read catalog at {}", p.display()))?;
-            return serde_json::from_str(&text)
-                .with_context(|| format!("Failed to parse catalog JSON at {}", p.display()));
-        }
+            serde_json::from_str(&text)
+                .with_context(|| format!("Failed to parse catalog JSON at {}", p.display()))?
+        } else {
+            let candidates = [
+                Path::new("catalog/rules.json").to_path_buf(),
+                std::env::current_exe()
+                    .ok()
+                    .and_then(|e| e.parent().map(|d| d.join("catalog/rules.json")))
+                    .unwrap_or_default(),
+            ];
 
-        let candidates = [
-            Path::new("catalog/rules.json").to_path_buf(),
-            std::env::current_exe()
-                .ok()
-                .and_then(|e| e.parent().map(|d| d.join("catalog/rules.json")))
-                .unwrap_or_default(),
-        ];
+            let mut loaded_disk = None;
+            for c in candidates {
+                if !c.as_os_str().is_empty() && c.exists() {
+                    let text = std::fs::read_to_string(&c)
+                        .with_context(|| format!("Failed to read catalog at {}", c.display()))?;
+                    loaded_disk = Some(
+                        serde_json::from_str(&text)
+                            .with_context(|| format!("Failed to parse catalog JSON at {}", c.display()))?,
+                    );
+                    break;
+                }
+            }
 
-        for c in candidates {
-            if !c.as_os_str().is_empty() && c.exists() {
-                let text = std::fs::read_to_string(&c)
-                    .with_context(|| format!("Failed to read catalog at {}", c.display()))?;
-                return serde_json::from_str(&text)
-                    .with_context(|| format!("Failed to parse catalog JSON at {}", c.display()));
+            match loaded_disk {
+                Some(cat) => cat,
+                None => serde_json::from_str(EMBEDDED_CATALOG_JSON)
+                    .context("Failed to parse embedded catalog/rules.json")?,
+            }
+        };
+
+        let existing_ids: HashSet<String> = catalog
+            .cleanup_rules
+            .iter()
+            .map(|r| r.id.clone())
+            .collect();
+        for custom_rule in Self::load_custom_rules() {
+            if !existing_ids.contains(&custom_rule.id) {
+                catalog.cleanup_rules.push(custom_rule);
             }
         }
 
-        serde_json::from_str(EMBEDDED_CATALOG_JSON)
-            .context("Failed to parse embedded catalog/rules.json")
+        Ok(catalog)
+    }
+
+    /// Resolves the path to user-defined cleanup rules (`data/custom_rules.json`).
+    pub fn custom_rules_path() -> PathBuf {
+        let cwd_path = PathBuf::from("data").join("custom_rules.json");
+        if cwd_path.exists() {
+            return cwd_path;
+        }
+        if let Ok(exe) = std::env::current_exe() {
+            if let Some(dir) = exe.parent() {
+                let exe_data = dir.join("data").join("custom_rules.json");
+                if exe_data.exists() {
+                    return exe_data;
+                }
+                if Path::new("data").exists() {
+                    return cwd_path;
+                }
+                return exe_data;
+            }
+        }
+        cwd_path
+    }
+
+    /// Builds and safety-validates a `CleanupRule` from a user custom-rule form input.
+    pub fn build_custom_rule(input: &CustomRuleInput) -> Result<CleanupRule> {
+        let name_zh = input.name_zh.trim();
+        if name_zh.is_empty() {
+            return Err(anyhow!("Custom rule name must not be empty"));
+        }
+        let raw_root = input.root_path.trim();
+        if raw_root.is_empty() {
+            return Err(anyhow!("Custom rule root_path must not be empty"));
+        }
+
+        let queries: Vec<String> = input
+            .queries
+            .iter()
+            .map(|q| q.trim().to_string())
+            .filter(|q| !q.is_empty())
+            .collect();
+        let excluded: Vec<String> = input
+            .excluded
+            .iter()
+            .map(|e| e.trim().to_string())
+            .filter(|e| !e.is_empty())
+            .collect();
+
+        if queries.is_empty() && is_unsafe_bare_custom_root(raw_root) {
+            return Err(anyhow!(
+                "Safety guard: '{}' cannot be added without file/subfolder query filters (queries)",
+                raw_root
+            ));
+        }
+
+        let id = input
+            .id
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| {
+                let ts = chrono::Local::now().format("%Y%m%d%H%M%S").to_string();
+                format!("custom-{}", ts)
+            });
+
+        let name_en = input
+            .name_en
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or(name_zh)
+            .to_string();
+        let desc_zh = input
+            .description_zh
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| {
+                if queries.is_empty() {
+                    format!("自定义目录清理：{}", raw_root)
+                } else {
+                    format!("自定义匹配清理：{} ({})", raw_root, queries.join(", "))
+                }
+            });
+        let desc_en = input
+            .description_en
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| format!("Custom cleanup target: {}", raw_root));
+
+        let flags = input
+            .flags
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or("Directory|File")
+            .to_string();
+
+        let level = input.level.unwrap_or(2).clamp(1, 3);
+
+        Ok(CleanupRule {
+            id,
+            name: LocalizedText {
+                zh: name_zh.to_string(),
+                en: name_en,
+            },
+            group: LocalizedText {
+                zh: "自定义规则".to_string(),
+                en: "Custom Rules".to_string(),
+            },
+            description: LocalizedText {
+                zh: desc_zh,
+                en: desc_en,
+            },
+            warning: None,
+            level,
+            work: None,
+            source: "custom".to_string(),
+            scans: vec![CleanupScan {
+                work: 10,
+                scan_type: None,
+                name_override: None,
+                description_override: None,
+                warning_override: None,
+                applicable: Condition::True,
+                named_applicables: HashMap::new(),
+                actions: vec![Action::General {
+                    root_path: raw_root.to_string(),
+                    flags,
+                    id: None,
+                    queries,
+                    excluded,
+                }],
+                rescan: false,
+                restart: None,
+            }],
+        })
+    }
+
+    pub fn load_custom_rules() -> Vec<CleanupRule> {
+        load_custom_rules_from(&Self::custom_rules_path())
+    }
+
+    pub fn save_custom_rule(input: CustomRuleInput) -> Result<CleanupRule> {
+        save_custom_rule_to(&Self::custom_rules_path(), input)
+    }
+
+    pub fn delete_custom_rule(rule_id: &str) -> Result<()> {
+        delete_custom_rule_from(&Self::custom_rules_path(), rule_id)
+    }
+}
+
+fn load_custom_rules_from(path: &Path) -> Vec<CleanupRule> {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    serde_json::from_str::<Vec<CleanupRule>>(&text).unwrap_or_default()
+}
+
+fn save_custom_rule_to(path: &Path, input: CustomRuleInput) -> Result<CleanupRule> {
+    let rule = Catalog::build_custom_rule(&input)?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut existing = load_custom_rules_from(path);
+    if let Some(pos) = existing.iter().position(|r| r.id == rule.id) {
+        existing[pos] = rule.clone();
+    } else {
+        existing.push(rule.clone());
+    }
+    std::fs::write(path, serde_json::to_string_pretty(&existing)?)?;
+    Ok(rule)
+}
+
+fn delete_custom_rule_from(path: &Path, rule_id: &str) -> Result<()> {
+    let mut existing = load_custom_rules_from(path);
+    let before = existing.len();
+    existing.retain(|r| r.id != rule_id);
+    if existing.len() == before {
+        return Err(anyhow!("Custom rule '{}' not found", rule_id));
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(path, serde_json::to_string_pretty(&existing)?)?;
+    Ok(())
+}
+
+fn is_unsafe_bare_custom_root(raw_root: &str) -> bool {
+    let norm = raw_root
+        .trim()
+        .replace('/', "\\")
+        .trim_end_matches('\\')
+        .to_ascii_lowercase();
+    if norm.len() <= 2 && norm.ends_with(':') {
+        return true;
+    }
+    let static_blocked = [
+        "%systemdrive%",
+        "%systemroot%",
+        "%windir%",
+        "%userprofile%",
+        "%programfiles%",
+        "%programfilesx86%",
+        "%programfiles(x86)%",
+        "%programdata%",
+        "%localappdata%",
+        "%appdata%",
+        r"c:\windows",
+        r"c:\windows\system32",
+        r"c:\windows\syswow64",
+        r"c:\users",
+    ];
+    if static_blocked.iter().any(|b| *b == norm) {
+        return true;
+    }
+    for env_key in [
+        "SystemRoot",
+        "USERPROFILE",
+        "ProgramFiles",
+        "ProgramFiles(x86)",
+        "ProgramW6432",
+        "ProgramData",
+        "LOCALAPPDATA",
+        "APPDATA",
+    ] {
+        if let Ok(v) = std::env::var(env_key) {
+            if v.trim().trim_end_matches('\\').eq_ignore_ascii_case(&norm) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_custom_rule_validation_and_persistence_sandbox() {
+        let base = std::env::temp_dir().join(format!("dismnext_custom_rule_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let file_path = base.join("custom_rules.json");
+
+        // Reject unsafe bare system root without queries
+        let bad = CustomRuleInput {
+            id: None,
+            name_zh: "Danger".into(),
+            name_en: None,
+            description_zh: None,
+            description_en: None,
+            level: Some(2),
+            root_path: r"%SystemRoot%".into(),
+            queries: vec![],
+            excluded: vec![],
+            flags: None,
+        };
+        assert!(Catalog::build_custom_rule(&bad).is_err());
+
+        // Safe custom directory saves, loads, and deletes cleanly
+        let ok_in = CustomRuleInput {
+            id: Some("custom-test-01".into()),
+            name_zh: "我的构建日志".into(),
+            name_en: Some("Build Logs".into()),
+            description_zh: None,
+            description_en: None,
+            level: Some(3),
+            root_path: base.to_string_lossy().into_owned(),
+            queries: vec!["*.log".into()],
+            excluded: vec!["keep.log".into()],
+            flags: Some("File".into()),
+        };
+        let saved = save_custom_rule_to(&file_path, ok_in).unwrap();
+        assert_eq!(saved.id, "custom-test-01");
+        assert_eq!(saved.source, "custom");
+
+        let loaded = load_custom_rules_from(&file_path);
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].name.en, "Build Logs");
+
+        delete_custom_rule_from(&file_path, "custom-test-01").unwrap();
+        assert!(load_custom_rules_from(&file_path).is_empty());
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

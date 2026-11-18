@@ -8,14 +8,16 @@ pub mod features;
 pub mod lockcheck;
 pub mod mcp;
 pub mod optimizer;
+pub mod report;
 pub mod rescue;
 pub mod snapshot;
 pub mod startup;
 pub mod sysinfo;
 pub mod systasks;
+pub mod uninstaller;
 
 pub use appx::{list_appx_packages, remove_appx_package, AppxCategory, AppxPackageInfo};
-pub use catalog::{Catalog, CleanupRule, OptimizationGroup};
+pub use catalog::{Catalog, CleanupRule, CustomRuleInput, OptimizationGroup};
 pub use cleaner::{
     execute_cleanup, is_deferred_system_task_proc, scan_all, scan_custom_proc_name, scan_rule,
     scan_rule_preview, CleanupExecutionReport, CleanupScanResult, FileStatus, PreviewFile,
@@ -43,6 +45,7 @@ pub use optimizer::{
     BatchApplyOutcome, OptimizationGroupStatus, OptimizationItemStatus, OptimizationPreset,
     OptimizationProfile, OptimizationProfileEntry, ScopeName, ScopeStatus,
 };
+pub use report::{generate_health_report, HealthReportPayload, ReportRuleSummary};
 pub use rescue::{
     create_restore_point, list_restore_points, run_rescue_action, RescueActionOutcome,
     RestorePointInfo,
@@ -57,4 +60,8 @@ pub use sysinfo::SystemInfo;
 pub use systasks::{
     get_system_task_status, query_compact_os, run_system_task, SystemTaskExecOutcome,
     SystemTaskStatus,
+};
+pub use uninstaller::{
+    invalidate_win32_apps_cache, launch_win32_uninstaller, list_win32_apps, scan_app_leftovers,
+    AppLeftoverItem, UninstallLaunchOutcome, Win32AppInfo,
 };

@@ -309,7 +309,7 @@ const AppShell: React.FC<{
               icon={<Apps24Regular />}
               onClick={() => setTab('appx')}
             >
-              {lang === 'zh' ? '预装应用管理' : 'AppX Manager'}
+              {lang === 'zh' ? '应用卸载管理' : 'App Uninstaller'}
             </Button>
             <Button
               className={styles.navBtn}
@@ -469,6 +469,7 @@ const AppShell: React.FC<{
                 entries={cleanupEntries}
                 scanning={scanning}
                 onScan={handleScan}
+                onEntriesUpdated={(items) => setCleanupEntries(items)}
                 onExecuted={async () => {
                   await handleScan();
                   const sys = await api.getSysInfo();

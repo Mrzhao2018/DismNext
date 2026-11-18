@@ -1004,7 +1004,7 @@ fn compute_orphaned_app_dirs() -> Vec<OrphanDirEntry> {
     results
 }
 
-fn measure_dir_stats(dir: &Path) -> (u64, usize) {
+pub(crate) fn measure_dir_stats(dir: &Path) -> (u64, usize) {
     const MAX_FILES_PER_ORPHAN_DIR: usize = 20_000;
     let mut size = 0u64;
     let mut files = 0usize;

@@ -16,9 +16,11 @@ import {
 import {
   Apps24Regular,
   ArrowClockwise20Regular,
+  ArrowDownload20Regular,
   Broom24Regular,
   DataPie24Regular,
   DeveloperBoardRegular,
+  DocumentText24Regular,
   HardDriveRegular,
   History24Regular,
   PlayRegular,
@@ -31,6 +33,7 @@ import {
   AppxPackageInfo,
   CleanupRuleEntry,
   DriverListPayload,
+  HealthReportPayload,
   Lang,
   OptimizationGroupStatus,
   RegistrySnapshot,
@@ -165,6 +168,28 @@ export const DashboardView: React.FC<Props> = ({
   const [taskRunning, setTaskRunning] = useState(false);
   const [confirmCleanupOpen, setConfirmCleanupOpen] = useState(false);
   const [taskFeedback, setTaskFeedback] = useState<string | null>(null);
+  const [reportLoading, setReportLoading] = useState(false);
+  const [reportData, setReportData] = useState<HealthReportPayload | null>(null);
+
+  const handleExportReport = async () => {
+    setReportLoading(true);
+    try {
+      const data = await api.exportHealthReport();
+      setReportData(data);
+    } finally {
+      setReportLoading(false);
+    }
+  };
+
+  const downloadTextFile = (filename: string, content: string, mime: string) => {
+    const blob = new Blob([content], { type: mime });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
 
   const loadMetrics = async () => {
     setLoadingStats(true);
@@ -265,6 +290,20 @@ export const DashboardView: React.FC<Props> = ({
               onClick={() => onNavigate('diskmap')}
             >
               {lang === 'zh' ? '空间分布分析' : 'Space Analyzer'}
+            </Button>
+            <Button
+              appearance="outline"
+              icon={reportLoading ? <Spinner size="tiny" /> : <DocumentText24Regular />}
+              disabled={reportLoading}
+              onClick={() => void handleExportReport()}
+            >
+              {reportLoading
+                ? lang === 'zh'
+                  ? '生成报告中...'
+                  : 'Generating...'
+                : lang === 'zh'
+                ? '导出体检报告'
+                : 'Health Report'}
             </Button>
             <Button
               appearance="subtle"
@@ -590,6 +629,90 @@ export const DashboardView: React.FC<Props> = ({
               <Button appearance="primary" onClick={() => void handleRunComponentCleanup()}>
                 {lang === 'zh' ? '确认执行清理' : 'Confirm Cleanup'}
               </Button>
+            </DialogActions>
+          </DialogBody>
+        </DialogSurface>
+      </Dialog>
+
+      <Dialog open={Boolean(reportData)} onOpenChange={(_, d) => !d.open && setReportData(null)}>
+        <DialogSurface style={{ maxWidth: 760 }}>
+          <DialogBody>
+            <DialogTitle>
+              {lang === 'zh' ? '系统健康体检报告预览' : 'System Health Report Preview'}
+            </DialogTitle>
+            <DialogContent>
+              {reportData && (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 10 }}>
+                    <Text size={300} style={{ color: tokens.colorNeutralForeground3 }}>
+                      {reportData.os_summary} · {reportData.generated_at}
+                    </Text>
+                    <Badge
+                      size="large"
+                      appearance="filled"
+                      color={
+                        reportData.health_score >= 85
+                          ? 'success'
+                          : reportData.health_score >= 65
+                          ? 'warning'
+                          : 'danger'
+                      }
+                    >
+                      {lang === 'zh' ? `健康评分 ${reportData.health_score} / 100` : `Health Score ${reportData.health_score} / 100`}
+                    </Badge>
+                  </div>
+                  <pre
+                    style={{
+                      margin: 0,
+                      padding: 12,
+                      maxHeight: 360,
+                      overflowY: 'auto',
+                      borderRadius: tokens.borderRadiusMedium,
+                      backgroundColor: tokens.colorNeutralBackground3,
+                      fontFamily: 'Consolas, monospace',
+                      fontSize: 12,
+                      whiteSpace: 'pre-wrap',
+                    }}
+                  >
+                    {reportData.markdown}
+                  </pre>
+                </div>
+              )}
+            </DialogContent>
+            <DialogActions>
+              <Button appearance="secondary" onClick={() => setReportData(null)}>
+                {lang === 'zh' ? '关闭' : 'Close'}
+              </Button>
+              {reportData && (
+                <>
+                  <Button
+                    appearance="outline"
+                    icon={<ArrowDownload20Regular />}
+                    onClick={() =>
+                      downloadTextFile(
+                        `dismnext-health-report-${reportData.generated_at.slice(0, 10)}.md`,
+                        reportData.markdown,
+                        'text/markdown;charset=utf-8'
+                      )
+                    }
+                  >
+                    {lang === 'zh' ? '下载 Markdown (.md)' : 'Download Markdown'}
+                  </Button>
+                  <Button
+                    appearance="primary"
+                    icon={<ArrowDownload20Regular />}
+                    onClick={() =>
+                      downloadTextFile(
+                        `dismnext-health-report-${reportData.generated_at.slice(0, 10)}.html`,
+                        reportData.html,
+                        'text/html;charset=utf-8'
+                      )
+                    }
+                  >
+                    {lang === 'zh' ? '下载 HTML 报告' : 'Download HTML Report'}
+                  </Button>
+                </>
+              )}
             </DialogActions>
           </DialogBody>
         </DialogSurface>

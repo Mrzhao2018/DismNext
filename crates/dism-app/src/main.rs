@@ -16,6 +16,7 @@ use dism_core::optimizer::{
     apply_optimization, apply_optimization_batch, evaluate_all_groups, export_optimization_profile,
     get_optimization_presets, ApplyValue, OptimizationProfileEntry, ScopeName,
 };
+use dism_core::report::generate_health_report;
 use dism_core::rescue::{create_restore_point, list_restore_points, run_rescue_action};
 use dism_core::startup::{
     list_scheduled_tasks, list_startup_items, list_third_party_services,
@@ -23,7 +24,10 @@ use dism_core::startup::{
 };
 use dism_core::sysinfo::relaunch_as_admin;
 use dism_core::systasks::{get_system_task_status, run_system_task};
-use dism_core::{Catalog, SnapshotManager, SystemInfo};
+use dism_core::uninstaller::{
+    launch_win32_uninstaller, list_win32_apps, scan_app_leftovers,
+};
+use dism_core::{Catalog, CustomRuleInput, SnapshotManager, SystemInfo};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
@@ -31,6 +35,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, RwLock};
 use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
+
+include!(concat!(env!("OUT_DIR"), "/embedded_ui.rs"));
 
 #[derive(Parser)]
 #[command(name = "dism-app", about = "DismNext Desktop Host Server & GUI Launcher")]
@@ -50,7 +56,7 @@ struct Args {
 
 struct AppState {
     port: u16,
-    catalog: Catalog,
+    catalog: RwLock<Catalog>,
     snap_mgr: SnapshotManager,
     scan_cache: RwLock<HashMap<String, CleanupScanResult>>,
     ui_dir: Option<PathBuf>,
@@ -156,6 +162,24 @@ struct DuplicatesReq {
     min_size_bytes: Option<u64>,
 }
 
+#[derive(Deserialize)]
+struct LeftoversReq {
+    display_name: String,
+    publisher: String,
+    install_location: String,
+}
+
+#[derive(Deserialize)]
+struct UninstallWin32Req {
+    app_id: String,
+    use_quiet: Option<bool>,
+}
+
+#[derive(Deserialize)]
+struct DeleteCustomRuleReq {
+    rule_id: String,
+}
+
 #[derive(Serialize)]
 struct ErrorPayload {
     error: String,
@@ -169,7 +193,7 @@ fn main() -> Result<()> {
 
     let state = Arc::new(AppState {
         port: args.port,
-        catalog,
+        catalog: RwLock::new(catalog),
         snap_mgr,
         scan_cache: RwLock::new(HashMap::new()),
         ui_dir,
@@ -180,9 +204,14 @@ fn main() -> Result<()> {
     let url = format!("http://{}", addr);
     println!("DismNext server listening on {}", url);
     if let Some(ref d) = state.ui_dir {
-        println!("Serving UI from {}", d.display());
+        println!("Serving external UI from {}", d.display());
+    } else if !EMBEDDED_UI_ASSETS.is_empty() {
+        println!(
+            "Serving embedded portable UI ({} assets compiled into binary)",
+            EMBEDDED_UI_ASSETS.len()
+        );
     } else {
-        println!("UI dist directory not found; serving API endpoints only.");
+        println!("UI assets not found; serving API endpoints only.");
     }
 
     if !args.no_window {
@@ -228,6 +257,9 @@ fn resolve_ui_dir(explicit: Option<PathBuf>) -> Option<PathBuf> {
         if p.join("index.html").exists() {
             return Some(p);
         }
+    }
+    if !EMBEDDED_UI_ASSETS.is_empty() {
+        return None;
     }
     let mut candidates = vec![PathBuf::from("ui/dist")];
     if let Ok(exe) = std::env::current_exe() {
@@ -312,6 +344,8 @@ fn handle_request(mut req: Request, state: &AppState) {
 
     if let Some(ref ui_dir) = state.ui_dir {
         serve_static(req, ui_dir, path);
+    } else if !EMBEDDED_UI_ASSETS.is_empty() {
+        serve_embedded(req, path);
     } else {
         let mut resp = Response::from_string(
             "DismNext API Server is running. Run `npm run build` in ui/ to enable GUI.",
@@ -320,6 +354,65 @@ fn handle_request(mut req: Request, state: &AppState) {
         add_cors_headers(&mut resp, state.port, origin_header.as_deref());
         let _ = req.respond(resp);
     }
+}
+
+fn cleanup_rules_stub_list(
+    catalog: &Catalog,
+    cache: &HashMap<String, CleanupScanResult>,
+    sys: &SystemInfo,
+) -> Vec<serde_json::Value> {
+    let mut list = Vec::new();
+    for rule in &catalog.cleanup_rules {
+        if let Some(cached) = cache.get(&rule.id) {
+            list.push(serde_json::json!({
+                "scanned": true,
+                "rule": cached,
+            }));
+        } else {
+            let active_scan = rule
+                .scans
+                .iter()
+                .find(|s| eval_condition(&s.applicable, sys));
+            if let Some(scan) = active_scan {
+                let system_task_proc = scan_custom_proc_name(scan);
+                let is_sys_task = system_task_proc
+                    .as_deref()
+                    .map(is_deferred_system_task_proc)
+                    .unwrap_or(false);
+                let stub = CleanupScanResult {
+                    id: rule.id.clone(),
+                    name: scan.name_override.clone().unwrap_or_else(|| rule.name.clone()),
+                    group: rule.group.clone(),
+                    description: scan
+                        .description_override
+                        .clone()
+                        .unwrap_or_else(|| rule.description.clone()),
+                    warning: scan
+                        .warning_override
+                        .clone()
+                        .or_else(|| rule.warning.clone()),
+                    level: rule.level,
+                    source: rule.source.clone(),
+                    applicable: true,
+                    is_system_task: is_sys_task,
+                    system_task_proc,
+                    system_task_hint: None,
+                    cleanable_bytes: 0,
+                    cleanable_count: 0,
+                    skipped_locked_bytes: 0,
+                    skipped_locked_count: 0,
+                    skipped_protected_bytes: 0,
+                    skipped_protected_count: 0,
+                    preview_files: Vec::new(),
+                };
+                list.push(serde_json::json!({
+                    "scanned": false,
+                    "rule": stub,
+                }));
+            }
+        }
+    }
+    list
 }
 
 fn dispatch_api(
@@ -331,15 +424,18 @@ fn dispatch_api(
     let sys = SystemInfo::collect();
 
     match (req.method(), path) {
-        (&Method::Get, "/api/sysinfo") => Ok(serde_json::json!({
-            "system": sys,
-            "catalog": {
-                "base_version": state.catalog.base_version,
-                "cleanup_rules_total": state.catalog.cleanup_rules.len(),
-                "optimization_groups_total": state.catalog.optimization_groups.len(),
-                "optimization_items_total": state.catalog.optimization_groups.iter().map(|g| g.items.len()).sum::<usize>(),
-            }
-        })),
+        (&Method::Get, "/api/sysinfo") => {
+            let cat = state.catalog.read().unwrap();
+            Ok(serde_json::json!({
+                "system": sys,
+                "catalog": {
+                    "base_version": cat.base_version,
+                    "cleanup_rules_total": cat.cleanup_rules.len(),
+                    "optimization_groups_total": cat.optimization_groups.len(),
+                    "optimization_items_total": cat.optimization_groups.iter().map(|g| g.items.len()).sum::<usize>(),
+                }
+            }))
+        }
         (&Method::Post, "/api/sys/elevate") => {
             if sys.is_admin {
                 return Ok(serde_json::json!({ "already_admin": true, "relaunching": false }));
@@ -361,62 +457,16 @@ fn dispatch_api(
             Ok(serde_json::json!({ "already_admin": false, "relaunching": true }))
         }
         (&Method::Get, "/api/cleanup/rules") => {
+            let cat = state.catalog.read().unwrap();
             let cache = state.scan_cache.read().unwrap();
-            let mut list = Vec::new();
-            for rule in &state.catalog.cleanup_rules {
-                if let Some(cached) = cache.get(&rule.id) {
-                    list.push(serde_json::json!({
-                        "scanned": true,
-                        "rule": cached,
-                    }));
-                } else {
-                    let active_scan = rule
-                        .scans
-                        .iter()
-                        .find(|s| eval_condition(&s.applicable, &sys));
-                    if let Some(scan) = active_scan {
-                        let system_task_proc = scan_custom_proc_name(scan);
-                        let is_sys_task = system_task_proc
-                            .as_deref()
-                            .map(is_deferred_system_task_proc)
-                            .unwrap_or(false);
-                        let stub = CleanupScanResult {
-                            id: rule.id.clone(),
-                            name: scan.name_override.clone().unwrap_or_else(|| rule.name.clone()),
-                            group: rule.group.clone(),
-                            description: scan
-                                .description_override
-                                .clone()
-                                .unwrap_or_else(|| rule.description.clone()),
-                            warning: scan
-                                .warning_override
-                                .clone()
-                                .or_else(|| rule.warning.clone()),
-                            level: rule.level,
-                            source: rule.source.clone(),
-                            applicable: true,
-                            is_system_task: is_sys_task,
-                            system_task_proc,
-                            system_task_hint: None,
-                            cleanable_bytes: 0,
-                            cleanable_count: 0,
-                            skipped_locked_bytes: 0,
-                            skipped_locked_count: 0,
-                            skipped_protected_bytes: 0,
-                            skipped_protected_count: 0,
-                            preview_files: Vec::new(),
-                        };
-                        list.push(serde_json::json!({
-                            "scanned": false,
-                            "rule": stub,
-                        }));
-                    }
-                }
-            }
+            let list = cleanup_rules_stub_list(&cat, &cache, &sys);
             Ok(serde_json::json!({ "items": list }))
         }
         (&Method::Post, "/api/cleanup/scan") => {
-            let results = scan_all(&state.catalog.cleanup_rules, &sys);
+            let results = {
+                let cat = state.catalog.read().unwrap();
+                scan_all(&cat.cleanup_rules, &sys)
+            };
             {
                 let mut cache = state.scan_cache.write().unwrap();
                 cache.clear();
@@ -429,13 +479,15 @@ fn dispatch_api(
         (&Method::Get, "/api/cleanup/preview") => {
             let id = parse_query_param(query, "id")
                 .ok_or_else(|| anyhow::anyhow!("Missing ?id= parameter"))?;
-            let rule = state
-                .catalog
-                .cleanup_rules
-                .iter()
-                .find(|r| r.id == id)
-                .ok_or_else(|| anyhow::anyhow!("Rule '{}' not found", id))?;
-            let res = scan_rule_preview(rule, &sys);
+            let res = {
+                let cat = state.catalog.read().unwrap();
+                let rule = cat
+                    .cleanup_rules
+                    .iter()
+                    .find(|r| r.id == id)
+                    .ok_or_else(|| anyhow::anyhow!("Rule '{}' not found", id))?;
+                scan_rule_preview(rule, &sys)
+            };
             {
                 let mut cache = state.scan_cache.write().unwrap();
                 cache.insert(res.id.clone(), res.clone());
@@ -444,8 +496,9 @@ fn dispatch_api(
         }
         (&Method::Post, "/api/cleanup/execute") => {
             let payload: ExecuteReq = read_json_body(req)?;
+            let cat = state.catalog.read().unwrap();
             let report = execute_cleanup(
-                &state.catalog.cleanup_rules,
+                &cat.cleanup_rules,
                 &payload.rule_ids,
                 &sys,
                 payload.dry_run,
@@ -453,7 +506,7 @@ fn dispatch_api(
             if !payload.dry_run {
                 let mut cache = state.scan_cache.write().unwrap();
                 for id in &payload.rule_ids {
-                    if let Some(rule) = state.catalog.cleanup_rules.iter().find(|r| r.id == *id) {
+                    if let Some(rule) = cat.cleanup_rules.iter().find(|r| r.id == *id) {
                         cache.insert(id.clone(), scan_rule(rule, &sys));
                     }
                 }
@@ -464,20 +517,56 @@ fn dispatch_api(
                 "system": updated_sys,
             }))
         }
+        (&Method::Post, "/api/cleanup/custom/test") => {
+            let payload: CustomRuleInput = read_json_body(req)?;
+            let rule = Catalog::build_custom_rule(&payload)?;
+            let res = scan_rule_preview(&rule, &sys);
+            Ok(serde_json::to_value(res)?)
+        }
+        (&Method::Post, "/api/cleanup/custom/save") => {
+            let payload: CustomRuleInput = read_json_body(req)?;
+            let saved = Catalog::save_custom_rule(payload)?;
+            let scanned = scan_rule_preview(&saved, &sys);
+            let mut cat = state.catalog.write().unwrap();
+            if let Some(pos) = cat.cleanup_rules.iter().position(|r| r.id == saved.id) {
+                cat.cleanup_rules[pos] = saved.clone();
+            } else {
+                cat.cleanup_rules.push(saved.clone());
+            }
+            let mut cache = state.scan_cache.write().unwrap();
+            cache.insert(scanned.id.clone(), scanned.clone());
+            let items = cleanup_rules_stub_list(&cat, &cache, &sys);
+            Ok(serde_json::json!({
+                "saved": scanned,
+                "items": items,
+            }))
+        }
+        (&Method::Post, "/api/cleanup/custom/delete") => {
+            let payload: DeleteCustomRuleReq = read_json_body(req)?;
+            Catalog::delete_custom_rule(&payload.rule_id)?;
+            let mut cat = state.catalog.write().unwrap();
+            cat.cleanup_rules.retain(|r| r.id != payload.rule_id);
+            let mut cache = state.scan_cache.write().unwrap();
+            cache.remove(&payload.rule_id);
+            let items = cleanup_rules_stub_list(&cat, &cache, &sys);
+            Ok(serde_json::json!({ "items": items }))
+        }
         (&Method::Get, "/api/optimizer/groups") => {
-            let groups = evaluate_all_groups(&state.catalog.optimization_groups, &sys);
+            let cat = state.catalog.read().unwrap();
+            let groups = evaluate_all_groups(&cat.optimization_groups, &sys);
             Ok(serde_json::json!({ "groups": groups }))
         }
         (&Method::Post, "/api/optimizer/apply") => {
             let payload: OptApplyReq = read_json_body(req)?;
+            let cat = state.catalog.read().unwrap();
             let outcome = apply_optimization(
-                &state.catalog.optimization_groups,
+                &cat.optimization_groups,
                 &payload.item_id,
                 payload.scope,
                 payload.value,
                 &state.snap_mgr,
             )?;
-            let refreshed = evaluate_all_groups(&state.catalog.optimization_groups, &sys);
+            let refreshed = evaluate_all_groups(&cat.optimization_groups, &sys);
             Ok(serde_json::json!({
                 "outcome": outcome,
                 "groups": refreshed,
@@ -490,7 +579,8 @@ fn dispatch_api(
         (&Method::Post, "/api/snapshots/restore") => {
             let payload: RestoreReq = read_json_body(req)?;
             let restored = state.snap_mgr.restore(&payload.snapshot_id)?;
-            let refreshed_groups = evaluate_all_groups(&state.catalog.optimization_groups, &sys);
+            let cat = state.catalog.read().unwrap();
+            let refreshed_groups = evaluate_all_groups(&cat.optimization_groups, &sys);
             Ok(serde_json::json!({
                 "restored": restored,
                 "groups": refreshed_groups,
@@ -645,19 +735,21 @@ fn dispatch_api(
         }
         (&Method::Post, "/api/optimizer/batch") => {
             let payload: OptBatchReq = read_json_body(req)?;
+            let cat = state.catalog.read().unwrap();
             let outcome = apply_optimization_batch(
-                &state.catalog.optimization_groups,
+                &cat.optimization_groups,
                 &payload.entries,
                 &state.snap_mgr,
             )?;
-            let groups = evaluate_all_groups(&state.catalog.optimization_groups, &sys);
+            let groups = evaluate_all_groups(&cat.optimization_groups, &sys);
             Ok(serde_json::json!({
                 "outcome": outcome,
                 "groups": groups,
             }))
         }
         (&Method::Get, "/api/optimizer/profile/export") => {
-            let profile = export_optimization_profile(&state.catalog.optimization_groups, &sys);
+            let cat = state.catalog.read().unwrap();
+            let profile = export_optimization_profile(&cat.optimization_groups, &sys);
             Ok(serde_json::to_value(profile)?)
         }
         (&Method::Get, "/api/rescue/restore-points") => {
@@ -687,7 +779,85 @@ fn dispatch_api(
             let orphans = find_orphaned_app_dirs();
             Ok(serde_json::json!({ "orphans": orphans }))
         }
+        (&Method::Get, "/api/uninstaller/list") => {
+            let apps = list_win32_apps();
+            Ok(serde_json::json!({ "apps": apps }))
+        }
+        (&Method::Post, "/api/uninstaller/leftovers") => {
+            let payload: LeftoversReq = read_json_body(req)?;
+            let leftovers = scan_app_leftovers(
+                &payload.display_name,
+                &payload.publisher,
+                &payload.install_location,
+            );
+            Ok(serde_json::json!({ "leftovers": leftovers }))
+        }
+        (&Method::Post, "/api/uninstaller/uninstall") => {
+            let payload: UninstallWin32Req = read_json_body(req)?;
+            let outcome = launch_win32_uninstaller(
+                payload.app_id.trim(),
+                payload.use_quiet.unwrap_or(false),
+            )?;
+            Ok(serde_json::to_value(outcome)?)
+        }
+        (&Method::Get, "/api/report/export") => {
+            let cached: Vec<CleanupScanResult> = {
+                let cache = state.scan_cache.read().unwrap();
+                cache.values().cloned().collect()
+            };
+            let cat = state.catalog.read().unwrap();
+            let cached_opt = if cached.is_empty() {
+                None
+            } else {
+                Some(cached.as_slice())
+            };
+            let report = generate_health_report(&cat, cached_opt);
+            Ok(serde_json::to_value(report)?)
+        }
         _ => Err(anyhow::anyhow!("Unknown API endpoint: {}", path)),
+    }
+}
+
+fn serve_embedded(req: Request, url_path: &str) {
+    let rel = url_path.trim_start_matches('/');
+    if rel.contains("..") {
+        let _ = req.respond(Response::empty(StatusCode(403)));
+        return;
+    }
+    let normalized = if rel.is_empty() {
+        "/index.html".to_string()
+    } else {
+        format!("/{}", rel)
+    };
+
+    let matched = EMBEDDED_UI_ASSETS
+        .iter()
+        .find(|(p, _, _)| *p == normalized)
+        .or_else(|| {
+            EMBEDDED_UI_ASSETS
+                .iter()
+                .find(|(p, _, _)| *p == "/index.html")
+        });
+
+    match matched {
+        Some((route, mime, bytes)) => {
+            let mut resp = Response::from_data(*bytes).with_status_code(StatusCode(200));
+            if let Ok(h) = Header::from_bytes("Content-Type", *mime) {
+                resp.add_header(h);
+            }
+            let cache_ctl = if route.starts_with("/assets/") {
+                "public, max-age=31536000, immutable"
+            } else {
+                "no-cache"
+            };
+            if let Ok(h) = Header::from_bytes("Cache-Control", cache_ctl) {
+                resp.add_header(h);
+            }
+            let _ = req.respond(resp);
+        }
+        None => {
+            let _ = req.respond(Response::empty(StatusCode(404)));
+        }
     }
 }
 
