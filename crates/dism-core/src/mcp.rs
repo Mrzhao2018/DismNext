@@ -18,7 +18,7 @@ use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
 
 const SERVER_NAME: &str = "dismnext-mcp";
-const SERVER_VERSION: &str = "0.1.0";
+const SERVER_VERSION: &str = "2.0.0";
 const DEFAULT_PROTOCOL_VERSION: &str = "2024-11-05";
 
 enum FramingMode {
