@@ -2,6 +2,7 @@ use anyhow::Result;
 use clap::Parser;
 use dism_core::catalog::Action;
 use dism_core::cleaner::{execute_cleanup, scan_all, scan_rule, CleanupScanResult};
+use dism_core::diskmap::{analyze_path, get_presets};
 use dism_core::evaluator::eval_condition;
 use dism_core::optimizer::{apply_optimization, evaluate_all_groups, ApplyValue, ScopeName};
 use dism_core::sysinfo::relaunch_as_admin;
@@ -54,6 +55,17 @@ struct OptApplyReq {
 #[derive(Deserialize)]
 struct RestoreReq {
     snapshot_id: String,
+}
+
+#[derive(Deserialize)]
+struct DiskAnalyzeReq {
+    path: String,
+    max_depth: Option<usize>,
+}
+
+#[derive(Deserialize)]
+struct RevealReq {
+    path: String,
 }
 
 #[derive(Serialize)]
@@ -373,6 +385,29 @@ fn dispatch_api(
                 "restored": restored,
                 "groups": refreshed_groups,
             }))
+        }
+        (&Method::Get, "/api/diskmap/presets") => {
+            let presets = get_presets(&sys);
+            Ok(serde_json::json!({ "presets": presets }))
+        }
+        (&Method::Post, "/api/diskmap/analyze") => {
+            let payload: DiskAnalyzeReq = read_json_body(req)?;
+            let report = analyze_path(
+                Path::new(payload.path.trim()),
+                payload.max_depth.unwrap_or(3),
+            )?;
+            Ok(serde_json::to_value(report)?)
+        }
+        (&Method::Post, "/api/diskmap/reveal") => {
+            let payload: RevealReq = read_json_body(req)?;
+            let target = Path::new(payload.path.trim());
+            if !target.exists() {
+                return Err(anyhow::anyhow!("Path does not exist: {}", payload.path));
+            }
+            let _ = Command::new("explorer.exe")
+                .arg(format!("/select,{}", target.to_string_lossy()))
+                .spawn();
+            Ok(serde_json::json!({ "ok": true }))
         }
         _ => Err(anyhow::anyhow!("Unknown API endpoint: {}", path)),
     }

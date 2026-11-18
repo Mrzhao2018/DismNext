@@ -1,6 +1,7 @@
 use anyhow::{anyhow, Result};
 use clap::{Parser, Subcommand};
 use dism_core::cleaner::{execute_cleanup, scan_all, scan_rule, FileStatus};
+use dism_core::diskmap::analyze_path;
 use dism_core::evaluator::eval_condition;
 use dism_core::optimizer::{apply_optimization, evaluate_all_groups, ApplyValue, ScopeName, ScopeStatus};
 use dism_core::{Catalog, SnapshotManager, SystemInfo};
@@ -52,6 +53,14 @@ enum Commands {
     Snapshot {
         #[command(subcommand)]
         action: SnapshotCommands,
+    },
+    /// WinDirStat-style disk space analyzer (parallel treemap & extension breakdown)
+    Diskmap {
+        path: Option<PathBuf>,
+        #[arg(long, default_value_t = 3)]
+        depth: usize,
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -342,6 +351,57 @@ fn main() -> Result<()> {
                 println!("Restored snapshot {} ({})", restored.id, restored.item_name.zh);
             }
         },
+        Commands::Diskmap { path, depth, json } => {
+            let target = match path {
+                Some(p) => p,
+                None => PathBuf::from(
+                    std::env::var("LOCALAPPDATA").unwrap_or_else(|_| r"C:\".to_string()),
+                ),
+            };
+            let report = analyze_path(&target, depth)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                println!(
+                    "=== Disk Analysis: {} ({} ms) ===",
+                    report.root_path, report.elapsed_ms
+                );
+                println!(
+                    "Total: {} | Files: {} | Dirs: {}",
+                    fmt_bytes(report.total_bytes),
+                    report.total_files,
+                    report.total_dirs
+                );
+                println!("\nTop Subdirectories / Entries:");
+                for ch in report.tree.children.iter().take(15) {
+                    let pct = if report.total_bytes > 0 {
+                        (ch.size_bytes as f64 / report.total_bytes as f64) * 100.0
+                    } else {
+                        0.0
+                    };
+                    println!(
+                        "  {:>10} ({:5.1}%)  {} {}",
+                        fmt_bytes(ch.size_bytes),
+                        pct,
+                        if ch.is_dir { "[DIR]" } else { "     " },
+                        ch.name
+                    );
+                }
+                println!("\nTop Extensions:");
+                for ext in report.extensions.iter().take(10) {
+                    println!(
+                        "  {:<12} {:>10} ({} files)",
+                        ext.ext,
+                        fmt_bytes(ext.size_bytes),
+                        ext.file_count
+                    );
+                }
+                println!("\nTop Largest Files:");
+                for lf in report.largest_files.iter().take(10) {
+                    println!("  {:>10}  {}", fmt_bytes(lf.size_bytes), lf.path);
+                }
+            }
+        }
     }
 
     let _ = eval_condition;

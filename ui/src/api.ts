@@ -179,6 +179,49 @@ async function reqJson<T>(url: string, init?: RequestInit): Promise<T> {
   return data as T;
 }
 
+export interface DiskTreeNode {
+  name: string;
+  path: string;
+  is_dir: boolean;
+  is_aggregate: boolean;
+  aggregate_count: number;
+  size_bytes: number;
+  file_count: number;
+  dir_count: number;
+  ext: string | null;
+  children: DiskTreeNode[];
+}
+
+export interface ExtensionStat {
+  ext: string;
+  size_bytes: number;
+  file_count: number;
+  color: string;
+}
+
+export interface LargeFileEntry {
+  path: string;
+  name: string;
+  ext: string;
+  size_bytes: number;
+}
+
+export interface DiskPreset {
+  label: LocalizedText;
+  path: string;
+}
+
+export interface DiskAnalysisReport {
+  root_path: string;
+  elapsed_ms: number;
+  total_bytes: number;
+  total_files: number;
+  total_dirs: number;
+  tree: DiskTreeNode;
+  extensions: ExtensionStat[];
+  largest_files: LargeFileEntry[];
+}
+
 export const api = {
   getSysInfo: () => reqJson<SysInfoPayload>('/api/sysinfo'),
   elevate: () =>
@@ -212,4 +255,15 @@ export const api = {
         body: JSON.stringify({ snapshot_id }),
       }
     ),
+  getDiskPresets: () => reqJson<{ presets: DiskPreset[] }>('/api/diskmap/presets'),
+  analyzeDisk: (path: string, max_depth = 3) =>
+    reqJson<DiskAnalysisReport>('/api/diskmap/analyze', {
+      method: 'POST',
+      body: JSON.stringify({ path, max_depth }),
+    }),
+  revealInExplorer: (path: string) =>
+    reqJson<{ ok: boolean }>('/api/diskmap/reveal', {
+      method: 'POST',
+      body: JSON.stringify({ path }),
+    }),
 };

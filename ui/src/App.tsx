@@ -12,6 +12,7 @@ import {
 } from '@fluentui/react-components';
 import {
   Broom24Regular,
+  DataPie24Regular,
   History24Regular,
   Settings24Regular,
   ShieldCheckmark24Regular,
@@ -30,8 +31,9 @@ import {
 import { SpaceRecycleView } from './views/SpaceRecycleView';
 import { OptimizationView } from './views/OptimizationView';
 import { SnapshotView } from './views/SnapshotView';
+import { DiskAnalyzerView } from './views/DiskAnalyzerView';
 
-type NavTab = 'cleanup' | 'optimize' | 'snapshots';
+type NavTab = 'cleanup' | 'diskmap' | 'optimize' | 'snapshots';
 
 const useStyles = makeStyles({
   shell: {
@@ -224,6 +226,14 @@ const AppShell: React.FC<{
             </Button>
             <Button
               className={styles.navBtn}
+              appearance={tab === 'diskmap' ? 'primary' : 'subtle'}
+              icon={<DataPie24Regular />}
+              onClick={() => setTab('diskmap')}
+            >
+              {lang === 'zh' ? '空间分析 (Treemap)' : 'Space Analyzer'}
+            </Button>
+            <Button
+              className={styles.navBtn}
               appearance={tab === 'optimize' ? 'primary' : 'subtle'}
               icon={<Settings24Regular />}
               onClick={() => setTab('optimize')}
@@ -365,6 +375,8 @@ const AppShell: React.FC<{
                 setSysPayload(sys);
               }}
             />
+          ) : tab === 'diskmap' ? (
+            <DiskAnalyzerView lang={lang} />
           ) : tab === 'optimize' ? (
             <OptimizationView
               lang={lang}
