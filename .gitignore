@@ -1,0 +1,17 @@
+# Rust build artifacts
+/target/
+
+# Node / Vite frontend dependencies and build outputs
+/ui/node_modules/
+/ui/dist/
+
+# Runtime user data and registry snapshots
+/data/
+
+# Local reverse-engineering reference directory (contains third-party binaries/Ghidra projects)
+/RE/
+
+# OS & editor files
+.DS_Store
+Thumbs.db
+*.log
