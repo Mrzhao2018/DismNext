@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "base_version": "10.1.1002.2+win11",
+  "base_version": "DismNext 2.0",
   "cleanup_rules": [
     {
       "id": "clean-001",
@@ -10,7 +10,7 @@
       },
       "group": {
         "zh": "过期文件",
-        "en": "Expired files"
+        "en": "Expired Files"
       },
       "description": {
         "zh": "清理被取代的组件并减少组件存储的大小。",
@@ -19,7 +19,7 @@
       "warning": null,
       "level": 2,
       "work": null,
-      "source": "official-1002.2",
+      "source": "dismnext-core",
       "scans": [
         {
           "work": 15,
@@ -132,7 +132,7 @@
       },
       "group": {
         "zh": "过期文件",
-        "en": "Expired files"
+        "en": "Expired Files"
       },
       "description": {
         "zh": "在系统升级或者还原后留下的系统备份。",
@@ -144,7 +144,7 @@
       },
       "level": 2,
       "work": null,
-      "source": "official-1002.2",
+      "source": "dismnext-core",
       "scans": [
         {
           "work": 5,
@@ -183,7 +183,7 @@
       },
       "group": {
         "zh": "过期文件",
-        "en": "Expired files"
+        "en": "Expired Files"
       },
       "description": {
         "zh": "360浏览器在升级到新版本后留下的备份文件，在故障时回滚到老版本。",
@@ -192,7 +192,7 @@
       "warning": null,
       "level": 2,
       "work": null,
-      "source": "official-1002.2",
+      "source": "dismnext-core",
       "scans": [
         {
           "work": 1,
@@ -242,7 +242,7 @@
       },
       "group": {
         "zh": "过期文件",
-        "en": "Expired files"
+        "en": "Expired Files"
       },
       "description": {
         "zh": "阿里旺旺在升级到新版本后留下的备份文件，在故障时回滚到老版本。",
@@ -251,7 +251,7 @@
       "warning": null,
       "level": 2,
       "work": null,
-      "source": "official-1002.2",
+      "source": "dismnext-core",
       "scans": [
         {
           "work": 1,
@@ -300,43 +300,45 @@
     {
       "id": "clean-005",
       "name": {
-        "zh": "阿里亲淘老版本备份",
-        "en": "Previous Backup of AliQinTao"
+        "zh": "Microsoft Edge 旧版本回滚备份",
+        "en": "Microsoft Edge Previous Version Backup"
       },
       "group": {
         "zh": "过期文件",
-        "en": "Expired files"
+        "en": "Expired Files"
       },
       "description": {
-        "zh": "阿里亲淘在升级到新版本后留下的备份文件，在故障时回滚到老版本。",
-        "en": "Backup files created by AliQinTao when upgrading to a newer version. This is used to restore to the previous version should the program malfunctions."
+        "zh": "清理 Microsoft Edge 升级后遗留在 Application 目录下的旧版本回滚文件夹，严格保留当前运行版本。",
+        "en": "Removes outdated version folders left by Microsoft Edge updates while preserving the active executable version."
       },
       "warning": null,
       "level": 2,
       "work": null,
-      "source": "official-1002.2",
+      "source": "win11-modern",
       "scans": [
         {
-          "work": 1,
+          "work": 10,
           "scan_type": null,
           "name_override": null,
           "description_override": null,
           "warning_override": null,
           "applicable": {
-            "type": "And",
+            "type": "Or",
             "children": [
               {
-                "type": "ImageFlags",
-                "mask": 1
+                "type": "FileExist",
+                "file_path": "%ProgramFilesX86%\\Microsoft\\Edge\\Application\\msedge.exe",
+                "wow64": null
               },
               {
-                "type": "RegExist",
-                "key": "HKEY_LOCAL_MACHINE\\SOFTWARE\\Alibaba\\WWLights\\810588CDA60249EB05C110B0DED77CD8",
-                "value": null,
-                "reg_type": null,
-                "data": null,
-                "compare": null,
-                "wow64": "True"
+                "type": "FileExist",
+                "file_path": "%ProgramFiles%\\Microsoft\\Edge\\Application\\msedge.exe",
+                "wow64": null
+              },
+              {
+                "type": "FileExist",
+                "file_path": "%LOCALAPPDATA%\\Microsoft\\Edge\\Application\\msedge.exe",
+                "wow64": null
               }
             ]
           },
@@ -344,14 +346,38 @@
           "actions": [
             {
               "type": "General",
-              "root_path": "?GetRegSz(HKEY_LOCAL_MACHINE\\SOFTWARE\\Alibaba\\WWLights\\810588CDA60249EB05C110B0DED77CD8,Path,True)",
+              "root_path": "%ProgramFilesX86%\\Microsoft\\Edge\\Application",
               "flags": "Directory",
               "id": null,
               "queries": [
-                "*.*.*"
+                "*.*.*.*"
               ],
               "excluded": [
-                "?GetIniData(%Root%AliQinTao.ini,Common,Version)"
+                "?GetFileVersion(%Root%msedge.exe)"
+              ]
+            },
+            {
+              "type": "General",
+              "root_path": "%ProgramFiles%\\Microsoft\\Edge\\Application",
+              "flags": "Directory",
+              "id": null,
+              "queries": [
+                "*.*.*.*"
+              ],
+              "excluded": [
+                "?GetFileVersion(%Root%msedge.exe)"
+              ]
+            },
+            {
+              "type": "General",
+              "root_path": "%LOCALAPPDATA%\\Microsoft\\Edge\\Application",
+              "flags": "Directory",
+              "id": null,
+              "queries": [
+                "*.*.*.*"
+              ],
+              "excluded": [
+                "?GetFileVersion(%Root%msedge.exe)"
               ]
             }
           ],
@@ -363,12 +389,12 @@
     {
       "id": "clean-006",
       "name": {
-        "zh": "Chrome浏览器老版本备份（by Honry）",
-        "en": "Previous Backup of Chrome (by Honry)"
+        "zh": "Chrome浏览器老版本备份",
+        "en": "Previous Backup of Chrome"
       },
       "group": {
         "zh": "过期文件",
-        "en": "Expired files"
+        "en": "Expired Files"
       },
       "description": {
         "zh": "Chrome浏览器升级到新版本后留下的备份文件，在故障时回滚到老版本。",
@@ -377,102 +403,95 @@
       "warning": null,
       "level": 2,
       "work": null,
-      "source": "official-1002.2",
+      "source": "dismnext-core",
       "scans": [
         {
-          "work": 1,
+          "work": 10,
           "scan_type": null,
           "name_override": null,
           "description_override": null,
           "warning_override": null,
           "applicable": {
-            "type": "And",
+            "type": "Or",
             "children": [
               {
-                "type": "ImageFlags",
-                "mask": 1
+                "type": "FileExist",
+                "file_path": "%ProgramFiles%\\Google\\Chrome\\Application\\chrome.exe",
+                "wow64": null
               },
               {
-                "type": "Or",
-                "children": [
-                  {
-                    "type": "RegExist",
-                    "key": "HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\App Paths\\chrome.exe",
-                    "value": "Path",
-                    "reg_type": null,
-                    "data": null,
-                    "compare": null,
-                    "wow64": null
-                  },
-                  {
-                    "type": "RegExist",
-                    "key": "HKEY_LOCAL_MACHINE\\Software\\Microsoft\\Windows\\CurrentVersion\\App Paths\\chrome.exe",
-                    "value": "Path",
-                    "reg_type": null,
-                    "data": null,
-                    "compare": null,
-                    "wow64": null
-                  }
-                ]
+                "type": "FileExist",
+                "file_path": "%ProgramFilesX86%\\Google\\Chrome\\Application\\chrome.exe",
+                "wow64": null
+              },
+              {
+                "type": "FileExist",
+                "file_path": "%LOCALAPPDATA%\\Google\\Chrome\\Application\\chrome.exe",
+                "wow64": null
+              },
+              {
+                "type": "RegExist",
+                "key": "HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\App Paths\\chrome.exe",
+                "value": "Path",
+                "reg_type": null,
+                "data": null,
+                "compare": null,
+                "wow64": null
+              },
+              {
+                "type": "RegExist",
+                "key": "HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\App Paths\\chrome.exe",
+                "value": "Path",
+                "reg_type": null,
+                "data": null,
+                "compare": null,
+                "wow64": null
               }
             ]
           },
-          "named_applicables": {
-            "Applicable_1": {
-              "type": "And",
-              "children": [
-                {
-                  "type": "RegExist",
-                  "key": "HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\App Paths\\chrome.exe",
-                  "value": "Path",
-                  "reg_type": null,
-                  "data": null,
-                  "compare": null,
-                  "wow64": null
-                },
-                {
-                  "type": "Not",
-                  "children": [
-                    {
-                      "type": "FileExist",
-                      "file_path": "?GetRegSz(HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\App Paths\\chrome.exe,Path)\\new_chrome.exe",
-                      "wow64": null
-                    }
-                  ]
-                }
+          "named_applicables": {},
+          "actions": [
+            {
+              "type": "General",
+              "root_path": "%ProgramFiles%\\Google\\Chrome\\Application",
+              "flags": "Directory",
+              "id": null,
+              "queries": [
+                "*.*.*.*"
+              ],
+              "excluded": [
+                "?GetFileVersion(%Root%chrome.exe)"
               ]
             },
-            "Applicable_2": {
-              "type": "And",
-              "children": [
-                {
-                  "type": "RegExist",
-                  "key": "HKEY_LOCAL_MACHINE\\Software\\Microsoft\\Windows\\CurrentVersion\\App Paths\\chrome.exe",
-                  "value": "Path",
-                  "reg_type": null,
-                  "data": null,
-                  "compare": null,
-                  "wow64": null
-                },
-                {
-                  "type": "Not",
-                  "children": [
-                    {
-                      "type": "FileExist",
-                      "file_path": "?GetRegSz(HKEY_LOCAL_MACHINE\\Software\\Microsoft\\Windows\\CurrentVersion\\App Paths\\chrome.exe,Path)\\new_chrome.exe",
-                      "wow64": null
-                    }
-                  ]
-                }
+            {
+              "type": "General",
+              "root_path": "%ProgramFilesX86%\\Google\\Chrome\\Application",
+              "flags": "Directory",
+              "id": null,
+              "queries": [
+                "*.*.*.*"
+              ],
+              "excluded": [
+                "?GetFileVersion(%Root%chrome.exe)"
               ]
-            }
-          },
-          "actions": [
+            },
+            {
+              "type": "General",
+              "root_path": "%LOCALAPPDATA%\\Google\\Chrome\\Application",
+              "flags": "Directory",
+              "id": null,
+              "queries": [
+                "*.*.*.*"
+              ],
+              "excluded": [
+                "?GetFileVersion(%Root%chrome.exe)"
+              ]
+            },
             {
               "type": "General",
               "root_path": "?GetRegSz(HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\App Paths\\chrome.exe,Path)",
               "flags": "Directory",
-              "id": "Applicable_1",
+              "id": null,
               "queries": [
                 "*.*.*.*"
               ],
@@ -484,7 +503,7 @@
               "type": "General",
               "root_path": "?GetRegSz(HKEY_LOCAL_MACHINE\\Software\\Microsoft\\Windows\\CurrentVersion\\App Paths\\chrome.exe,Path)",
               "flags": "Directory",
-              "id": "Applicable_2",
+              "id": null,
               "queries": [
                 "*.*.*.*"
               ],
@@ -501,12 +520,12 @@
     {
       "id": "clean-007",
       "name": {
-        "zh": "Opera浏览器老版本备份（by MS-PC2）",
-        "en": "Previous Backup of Opera (by MS-PC2)"
+        "zh": "Opera浏览器老版本备份",
+        "en": "Previous Backup of Opera"
       },
       "group": {
         "zh": "过期文件",
-        "en": "Expired files"
+        "en": "Expired Files"
       },
       "description": {
         "zh": "Opera浏览器升级到新版本后留下的备份文件，在故障时回滚到老版本。",
@@ -515,7 +534,7 @@
       "warning": null,
       "level": 2,
       "work": null,
-      "source": "official-1002.2",
+      "source": "dismnext-core",
       "scans": [
         {
           "work": 1,
@@ -609,42 +628,44 @@
     {
       "id": "clean-008",
       "name": {
-        "zh": "PPLive老版本备份（by 何超）",
-        "en": "Previous Backup of PPLive (by HeChao)"
+        "zh": "微信与企业微信更新安装包缓存",
+        "en": "WeChat & WeCom Update Package Cache"
       },
       "group": {
         "zh": "过期文件",
-        "en": "Expired files"
+        "en": "Expired Files"
       },
       "description": {
-        "zh": "PPLive在升级到新版本后留下的备份文件，在故障时回滚到老版本。",
-        "en": "Previous Backup created by PPLive when upgrading to a newer version. This is used to restore to the previous version should the program malfunctions."
+        "zh": "清理微信与企业微信版本自动更新后残留的 patch / update / updata 安装包目录，不影响聊天记录与登录状态。",
+        "en": "Clears leftover update packages stored by WeChat and WeCom without affecting chat history or login data."
       },
       "warning": null,
       "level": 2,
       "work": null,
-      "source": "official-1002.2",
+      "source": "win11-modern",
       "scans": [
         {
-          "work": 1,
+          "work": 10,
           "scan_type": null,
           "name_override": null,
           "description_override": null,
           "warning_override": null,
           "applicable": {
-            "type": "And",
+            "type": "Or",
             "children": [
               {
-                "type": "ImageFlags",
-                "mask": 1
+                "type": "FileExist",
+                "file_path": "%APPDATA%\\Tencent\\WeChat\\patch",
+                "wow64": null
               },
               {
-                "type": "RegExist",
-                "key": "HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\App Paths\\PPLive.exe",
-                "value": "Path",
-                "reg_type": null,
-                "data": null,
-                "compare": null,
+                "type": "FileExist",
+                "file_path": "%APPDATA%\\Tencent\\xwechat\\update",
+                "wow64": null
+              },
+              {
+                "type": "FileExist",
+                "file_path": "%APPDATA%\\Tencent\\WXWork\\updata",
                 "wow64": null
               }
             ]
@@ -653,15 +674,27 @@
           "actions": [
             {
               "type": "General",
-              "root_path": "?GetRegSz(HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\App Paths\\PPLive.exe,Path)",
-              "flags": "Directory",
+              "root_path": "%APPDATA%\\Tencent\\WeChat\\patch",
+              "flags": "Directory|File",
               "id": null,
-              "queries": [
-                "*.*.*.*"
-              ],
-              "excluded": [
-                "?GetIniData(%Root%version.dat,version,current)"
-              ]
+              "queries": [],
+              "excluded": []
+            },
+            {
+              "type": "General",
+              "root_path": "%APPDATA%\\Tencent\\xwechat\\update",
+              "flags": "Directory|File",
+              "id": null,
+              "queries": [],
+              "excluded": []
+            },
+            {
+              "type": "General",
+              "root_path": "%APPDATA%\\Tencent\\WXWork\\updata",
+              "flags": "Directory|File",
+              "id": null,
+              "queries": [],
+              "excluded": []
             }
           ],
           "rescan": false,
@@ -672,12 +705,12 @@
     {
       "id": "clean-009",
       "name": {
-        "zh": "酷狗音乐老版本备份（by 何超）",
-        "en": "Previous Backup of Kugou Music (by HeChao)"
+        "zh": "酷狗音乐老版本备份",
+        "en": "Previous Backup of Kugou Music"
       },
       "group": {
         "zh": "过期文件",
-        "en": "Expired files"
+        "en": "Expired Files"
       },
       "description": {
         "zh": "酷狗音乐在升级到新版本后留下的备份文件，在故障时回滚到老版本。",
@@ -686,7 +719,7 @@
       "warning": null,
       "level": 2,
       "work": null,
-      "source": "official-1002.2",
+      "source": "dismnext-core",
       "scans": [
         {
           "work": 1,
@@ -735,43 +768,50 @@
     {
       "id": "clean-010",
       "name": {
-        "zh": "2345拼音输入法老版本备份（by 何超）",
-        "en": "Previous Backup of 2345 Pinyin IME (by HeChao)"
+        "zh": "VS Code / Cursor 扩展安装包与编译缓存",
+        "en": "VS Code & Cursor Extension VSIX / Code Cache"
       },
       "group": {
-        "zh": "过期文件",
-        "en": "Expired files"
+        "zh": "开发者缓存",
+        "en": "Developer Cache"
       },
       "description": {
-        "zh": "2345拼音输入法在升级到新版本后留下的备份文件，在故障时回滚到老版本。",
-        "en": "Previous Backup created by 2345 Pinyin IME when upgrading to a newer version. This is used to restore to the previous version should the program malfunctions."
+        "zh": "清理 Visual Studio Code 与 Cursor 残留的离线 VSIX 扩展安装包及 V8 代码编译缓存（CachedData），不影响已安装插件与配置。",
+        "en": "Clears CachedExtensionVSIXs and CachedData folders for VS Code and Cursor without affecting installed extensions or settings."
       },
       "warning": null,
       "level": 2,
       "work": null,
-      "source": "official-1002.2",
+      "source": "win11-modern",
       "scans": [
         {
-          "work": 1,
+          "work": 10,
           "scan_type": null,
           "name_override": null,
           "description_override": null,
           "warning_override": null,
           "applicable": {
-            "type": "And",
+            "type": "Or",
             "children": [
               {
-                "type": "ImageFlags",
-                "mask": 1
+                "type": "FileExist",
+                "file_path": "%APPDATA%\\Code\\CachedExtensionVSIXs",
+                "wow64": null
               },
               {
-                "type": "RegExist",
-                "key": "HKEY_LOCAL_MACHINE\\SOFTWARE\\2345Pinyin",
-                "value": "Path",
-                "reg_type": null,
-                "data": null,
-                "compare": null,
-                "wow64": "True"
+                "type": "FileExist",
+                "file_path": "%APPDATA%\\Code\\CachedData",
+                "wow64": null
+              },
+              {
+                "type": "FileExist",
+                "file_path": "%APPDATA%\\Cursor\\CachedExtensionVSIXs",
+                "wow64": null
+              },
+              {
+                "type": "FileExist",
+                "file_path": "%APPDATA%\\Cursor\\CachedData",
+                "wow64": null
               }
             ]
           },
@@ -779,15 +819,35 @@
           "actions": [
             {
               "type": "General",
-              "root_path": "?GetRegSz(HKEY_LOCAL_MACHINE\\SOFTWARE\\2345Pinyin,Path,True)",
-              "flags": "Directory",
+              "root_path": "%APPDATA%\\Code\\CachedExtensionVSIXs",
+              "flags": "Directory|File",
               "id": null,
-              "queries": [
-                "*.*.*.*"
-              ],
-              "excluded": [
-                "?GetRegSz(HKEY_LOCAL_MACHINE\\SOFTWARE\\2345Pinyin,Version,True)"
-              ]
+              "queries": [],
+              "excluded": []
+            },
+            {
+              "type": "General",
+              "root_path": "%APPDATA%\\Code\\CachedData",
+              "flags": "Directory|File",
+              "id": null,
+              "queries": [],
+              "excluded": []
+            },
+            {
+              "type": "General",
+              "root_path": "%APPDATA%\\Cursor\\CachedExtensionVSIXs",
+              "flags": "Directory|File",
+              "id": null,
+              "queries": [],
+              "excluded": []
+            },
+            {
+              "type": "General",
+              "root_path": "%APPDATA%\\Cursor\\CachedData",
+              "flags": "Directory|File",
+              "id": null,
+              "queries": [],
+              "excluded": []
             }
           ],
           "rescan": false,
@@ -798,12 +858,12 @@
     {
       "id": "clean-011",
       "name": {
-        "zh": "WPS老版本备份（by Rambin）",
-        "en": "Previous Backup of WPS (by Rambin)"
+        "zh": "WPS老版本备份",
+        "en": "Previous Backup of WPS"
       },
       "group": {
         "zh": "过期文件",
-        "en": "Expired files"
+        "en": "Expired Files"
       },
       "description": {
         "zh": "WPS在升级到新版本后留下的备份文件，在故障时回滚到老版本。",
@@ -812,7 +872,7 @@
       "warning": null,
       "level": 2,
       "work": null,
-      "source": "official-1002.2",
+      "source": "dismnext-core",
       "scans": [
         {
           "work": 1,
@@ -875,7 +935,7 @@
       "warning": null,
       "level": 2,
       "work": null,
-      "source": "official-1002.2",
+      "source": "dismnext-core",
       "scans": [
         {
           "work": 4,
@@ -922,8 +982,8 @@
     {
       "id": "clean-013",
       "name": {
-        "zh": "Windows报告",
-        "en": "Windows Error Report"
+        "zh": "Windows 错误报告 (WER)",
+        "en": "Windows Error Reports (WER)"
       },
       "group": {
         "zh": "系统相关",
@@ -936,7 +996,7 @@
       "warning": null,
       "level": 3,
       "work": null,
-      "source": "official-1002.2",
+      "source": "dismnext-core",
       "scans": [
         {
           "work": 1,
@@ -945,13 +1005,25 @@
           "description_override": null,
           "warning_override": null,
           "applicable": {
-            "type": "True"
+            "type": "Or",
+            "children": [
+              {
+                "type": "FileExist",
+                "file_path": "%SystemDrive%\\Users\\*\\AppData\\Local\\Microsoft\\Windows\\WER",
+                "wow64": null
+              },
+              {
+                "type": "FileExist",
+                "file_path": "%ProgramData%\\Microsoft\\Windows\\WER",
+                "wow64": null
+              }
+            ]
           },
           "named_applicables": {},
           "actions": [
             {
               "type": "General",
-              "root_path": "%SystemDrive%\\Users\\*\\AppData\\Local\\Microsoft\\Windows\\WER\\",
+              "root_path": "%SystemDrive%\\Users\\*\\AppData\\Local\\Microsoft\\Windows\\WER\\\\",
               "flags": "Directory|File",
               "id": null,
               "queries": [],
@@ -959,15 +1031,7 @@
             },
             {
               "type": "General",
-              "root_path": "%ProgramData%\\Microsoft\\Windows\\WER\\",
-              "flags": "Directory|File",
-              "id": null,
-              "queries": [],
-              "excluded": []
-            },
-            {
-              "type": "General",
-              "root_path": "%SystemRoot%\\LiveKernelReports",
+              "root_path": "%ProgramData%\\Microsoft\\Windows\\WER\\\\",
               "flags": "Directory|File",
               "id": null,
               "queries": [],
@@ -996,7 +1060,7 @@
       "warning": null,
       "level": 3,
       "work": null,
-      "source": "official-1002.2",
+      "source": "dismnext-core",
       "scans": [
         {
           "work": 1,
@@ -1064,7 +1128,7 @@
       },
       "level": 2,
       "work": null,
-      "source": "official-1002.2",
+      "source": "dismnext-core",
       "scans": [
         {
           "work": 1,
@@ -1122,7 +1186,7 @@
       },
       "level": 0,
       "work": null,
-      "source": "official-1002.2",
+      "source": "dismnext-core",
       "scans": [
         {
           "work": 1,
@@ -1165,7 +1229,7 @@
       "warning": null,
       "level": 2,
       "work": null,
-      "source": "official-1002.2",
+      "source": "dismnext-core",
       "scans": [
         {
           "work": 1,
@@ -1256,7 +1320,7 @@
       },
       "level": 2,
       "work": null,
-      "source": "official-1002.2",
+      "source": "dismnext-core",
       "scans": [
         {
           "work": 1,
@@ -1298,7 +1362,7 @@
       "warning": null,
       "level": 2,
       "work": null,
-      "source": "official-1002.2",
+      "source": "dismnext-core",
       "scans": [
         {
           "work": 1,
@@ -1335,11 +1399,11 @@
       },
       "group": {
         "zh": "缓存文件",
-        "en": "Cache files"
+        "en": "Cache Files"
       },
       "description": {
-        "zh": "引用了NuGet包的.NET应用程序在使用Visual Studio生成时产生的缓存（含 v3-cache 与 .nuget 缓存）。",
-        "en": "NuGet package & HTTP v3 cache generated during .NET / Visual Studio builds (.nuget and LocalAppData\\NuGet\\v3-cache)."
+        "zh": "清理 NuGet 本地包存储（.nuget\\packages）、v3-cache 与 http-cache，严格保留用户的 NuGet.Config 源配置文件。",
+        "en": "Clears NuGet package cache (.nuget\\packages, v3-cache, and http-cache) while strictly preserving NuGet.Config."
       },
       "warning": {
         "zh": "如果未在Visual Studio的首选项中打开“允许NuGet下载缺少的程序包”，则应用生成将会失败。",
@@ -1347,10 +1411,10 @@
       },
       "level": 2,
       "work": null,
-      "source": "official-1002.2",
+      "source": "dismnext-core",
       "scans": [
         {
-          "work": 1,
+          "work": 10,
           "scan_type": null,
           "name_override": null,
           "description_override": null,
@@ -1360,34 +1424,28 @@
             "children": [
               {
                 "type": "FileExist",
-                "file_path": "%USERPROFILE%\\.nuget",
+                "file_path": "%USERPROFILE%\\.nuget\\packages",
                 "wow64": null
               },
               {
                 "type": "FileExist",
                 "file_path": "%LOCALAPPDATA%\\NuGet\\v3-cache",
                 "wow64": null
+              },
+              {
+                "type": "FileExist",
+                "file_path": "%LOCALAPPDATA%\\NuGet\\http-cache",
+                "wow64": null
               }
             ]
           },
-          "named_applicables": {
-            "Applicable_1": {
-              "type": "FileExist",
-              "file_path": "%USERPROFILE%\\.nuget",
-              "wow64": null
-            },
-            "Applicable_2": {
-              "type": "FileExist",
-              "file_path": "%LOCALAPPDATA%\\NuGet\\v3-cache",
-              "wow64": null
-            }
-          },
+          "named_applicables": {},
           "actions": [
             {
               "type": "General",
-              "root_path": "%USERPROFILE%\\.nuget",
+              "root_path": "%USERPROFILE%\\.nuget\\packages",
               "flags": "Directory|File",
-              "id": "Applicable_1",
+              "id": null,
               "queries": [],
               "excluded": []
             },
@@ -1395,7 +1453,15 @@
               "type": "General",
               "root_path": "%LOCALAPPDATA%\\NuGet\\v3-cache",
               "flags": "Directory|File",
-              "id": "Applicable_2",
+              "id": null,
+              "queries": [],
+              "excluded": []
+            },
+            {
+              "type": "General",
+              "root_path": "%LOCALAPPDATA%\\NuGet\\http-cache",
+              "flags": "Directory|File",
+              "id": null,
               "queries": [],
               "excluded": []
             }
@@ -1408,12 +1474,12 @@
     {
       "id": "clean-021",
       "name": {
-        "zh": "Windows下载缓存",
-        "en": "Windows Download Cache"
+        "zh": "Windows 更新下载缓存",
+        "en": "Windows Update Download Cache"
       },
       "group": {
         "zh": "缓存文件",
-        "en": "Cache files"
+        "en": "Cache Files"
       },
       "description": {
         "zh": "Windows在下载更新以及更新Metro应用时会在这里产生临时安装包。",
@@ -1422,58 +1488,24 @@
       "warning": null,
       "level": 2,
       "work": null,
-      "source": "official-1002.2",
+      "source": "dismnext-core",
       "scans": [
         {
-          "work": 1,
-          "scan_type": null,
-          "name_override": null,
-          "description_override": null,
-          "warning_override": null,
-          "applicable": {
-            "type": "And",
-            "children": [
-              {
-                "type": "ImageFlags",
-                "mask": 1
-              },
-              {
-                "type": "FileExist",
-                "file_path": "%SystemRoot%\\SoftwareDistribution\\Download",
-                "wow64": null
-              }
-            ]
-          },
-          "named_applicables": {},
-          "actions": [
-            {
-              "type": "General",
-              "root_path": "%SystemRoot%\\SoftwareDistribution\\Download",
-              "flags": "Directory|File",
-              "id": null,
-              "queries": [],
-              "excluded": []
-            }
-          ],
-          "rescan": false,
-          "restart": null
-        },
-        {
-          "work": 1,
+          "work": 10,
           "scan_type": null,
           "name_override": null,
           "description_override": null,
           "warning_override": null,
           "applicable": {
             "type": "FileExist",
-            "file_path": "%SystemRoot%\\SoftwareDistribution",
+            "file_path": "%SystemRoot%\\SoftwareDistribution\\Download",
             "wow64": null
           },
           "named_applicables": {},
           "actions": [
             {
               "type": "General",
-              "root_path": "%SystemRoot%\\SoftwareDistribution",
+              "root_path": "%SystemRoot%\\SoftwareDistribution\\Download",
               "flags": "Directory|File",
               "id": null,
               "queries": [],
@@ -1493,7 +1525,7 @@
       },
       "group": {
         "zh": "缓存文件",
-        "en": "Cache files"
+        "en": "Cache Files"
       },
       "description": {
         "zh": "Win10开始使用传递优化（DeliveryOptimization）服务下载Windows更新和通用应用（UWP）产生的缓存文件",
@@ -1502,7 +1534,7 @@
       "warning": null,
       "level": 2,
       "work": null,
-      "source": "official-1002.2",
+      "source": "dismnext-core",
       "scans": [
         {
           "work": 1,
@@ -1585,7 +1617,7 @@
       },
       "group": {
         "zh": "缓存文件",
-        "en": "Cache files"
+        "en": "Cache Files"
       },
       "description": {
         "zh": "Terminal Server Client运行时产生的一些缓存文件。",
@@ -1594,7 +1626,7 @@
       "warning": null,
       "level": 3,
       "work": null,
-      "source": "official-1002.2",
+      "source": "dismnext-core",
       "scans": [
         {
           "work": 1,
@@ -1624,38 +1656,38 @@
     {
       "id": "clean-024",
       "name": {
-        "zh": "XDE缓存文件",
-        "en": "XDE Cache Files"
+        "zh": "JetBrains IDE 本地缓存与日志",
+        "en": "JetBrains IDE Local Caches & Logs"
       },
       "group": {
-        "zh": "缓存文件",
-        "en": "Cache files"
+        "zh": "开发者缓存",
+        "en": "Developer Cache"
       },
       "description": {
-        "zh": "WP开发时保存的一些虚拟机状态文件，不建议频繁清理此条目。",
-        "en": "Files created by the virtual machine when developing for the Windows Phone platform. It is not recommended to clean this up frequently."
+        "zh": "清理 IntelliJ IDEA / PyCharm / CLion / RustRover 等 JetBrains 系列 IDE 产生的运行日志（log）与临时文件（tmp）。",
+        "en": "Clears JetBrains IDE log and temporary directories under %LOCALAPPDATA%\\JetBrains."
       },
       "warning": null,
       "level": 2,
       "work": null,
-      "source": "official-1002.2",
+      "source": "win11-modern",
       "scans": [
         {
-          "work": 1,
+          "work": 10,
           "scan_type": null,
           "name_override": null,
           "description_override": null,
           "warning_override": null,
           "applicable": {
             "type": "FileExist",
-            "file_path": "%ProgramData%\\Microsoft\\XDE",
+            "file_path": "%LOCALAPPDATA%\\JetBrains",
             "wow64": null
           },
           "named_applicables": {},
           "actions": [
             {
               "type": "General",
-              "root_path": "%ProgramData%\\Microsoft\\XDE",
+              "root_path": "%LOCALAPPDATA%\\JetBrains\\*\\log",
               "flags": "Directory|File",
               "id": null,
               "queries": [],
@@ -1663,7 +1695,7 @@
             },
             {
               "type": "General",
-              "root_path": "%SystemDrive%\\Users\\*\\AppData\\Local\\Microsoft\\XDE",
+              "root_path": "%LOCALAPPDATA%\\JetBrains\\*\\tmp",
               "flags": "Directory|File",
               "id": null,
               "queries": [],
@@ -1683,7 +1715,7 @@
       },
       "group": {
         "zh": "缓存文件",
-        "en": "Cache files"
+        "en": "Cache Files"
       },
       "description": {
         "zh": "调试程序时创建的符号缓存，不建议频繁清理此条目。",
@@ -1692,7 +1724,7 @@
       "warning": null,
       "level": 2,
       "work": null,
-      "source": "official-1002.2",
+      "source": "dismnext-core",
       "scans": [
         {
           "work": 1,
@@ -1726,12 +1758,12 @@
     {
       "id": "clean-026",
       "name": {
-        "zh": "NET程序集缓存（by 大胖子技术员）",
-        "en": "NET Assembly Cache (by dpzjsy)"
+        "zh": "NET程序集缓存",
+        "en": "NET Assembly Cache"
       },
       "group": {
         "zh": "缓存文件",
-        "en": "Cache files"
+        "en": "Cache Files"
       },
       "description": {
         "zh": "NET程序运行过程中产生的机器代码缓存文件，不建议频繁清理此条目。",
@@ -1740,7 +1772,7 @@
       "warning": null,
       "level": 2,
       "work": null,
-      "source": "official-1002.2",
+      "source": "dismnext-core",
       "scans": [
         {
           "work": 5,
@@ -1790,38 +1822,72 @@
     {
       "id": "clean-027",
       "name": {
-        "zh": "Visual Studio智能跟踪（by LP）",
-        "en": "Visual Studio IntelliTrace (by LP)"
+        "zh": "Visual Studio 诊断与组件缓存",
+        "en": "Visual Studio Diagnostics & Component Cache"
       },
       "group": {
         "zh": "缓存文件",
-        "en": "Cache files"
+        "en": "Cache Files"
       },
       "description": {
-        "zh": "Visual Studio调试程序时留下的智能跟踪缓存。",
-        "en": "Cache of IntelliTrace when debugging a program."
+        "zh": "清理 Visual Studio 产生的 TraceDebugging 诊断跟踪数据、ComponentModelCache 与 Roslyn / WebView2 临时缓存。",
+        "en": "Clears Visual Studio TraceDebugging logs, ComponentModelCache, and Roslyn / WebView2 transient caches."
       },
       "warning": null,
       "level": 1,
       "work": null,
-      "source": "official-1002.2",
+      "source": "dismnext-core",
       "scans": [
         {
-          "work": 1,
+          "work": 10,
           "scan_type": null,
           "name_override": null,
           "description_override": null,
           "warning_override": null,
           "applicable": {
-            "type": "FileExist",
-            "file_path": "%ProgramData%\\Microsoft Visual Studio\\10.0\\TraceDebugging",
-            "wow64": null
+            "type": "Or",
+            "children": [
+              {
+                "type": "FileExist",
+                "file_path": "%ProgramData%\\Microsoft Visual Studio",
+                "wow64": null
+              },
+              {
+                "type": "FileExist",
+                "file_path": "%LOCALAPPDATA%\\Microsoft\\VisualStudio",
+                "wow64": null
+              }
+            ]
           },
           "named_applicables": {},
           "actions": [
             {
               "type": "General",
-              "root_path": "%ProgramData%\\Microsoft Visual Studio\\10.0\\TraceDebugging",
+              "root_path": "%ProgramData%\\Microsoft Visual Studio\\*\\TraceDebugging",
+              "flags": "Directory|File",
+              "id": null,
+              "queries": [],
+              "excluded": []
+            },
+            {
+              "type": "General",
+              "root_path": "%LOCALAPPDATA%\\Microsoft\\VisualStudio\\*\\ComponentModelCache",
+              "flags": "Directory|File",
+              "id": null,
+              "queries": [],
+              "excluded": []
+            },
+            {
+              "type": "General",
+              "root_path": "%LOCALAPPDATA%\\Microsoft\\VisualStudio\\Roslyn\\Cache",
+              "flags": "Directory|File",
+              "id": null,
+              "queries": [],
+              "excluded": []
+            },
+            {
+              "type": "General",
+              "root_path": "%LOCALAPPDATA%\\Microsoft\\VisualStudio\\WebView2Cache",
               "flags": "Directory|File",
               "id": null,
               "queries": [],
@@ -1836,12 +1902,12 @@
     {
       "id": "clean-028",
       "name": {
-        "zh": "Windows预读取文件（by 辰g.）",
-        "en": "Windows Prefetch Files (by Cheng g.)"
+        "zh": "Windows预读取文件",
+        "en": "Windows Prefetch Files"
       },
       "group": {
         "zh": "缓存文件",
-        "en": "Cache files"
+        "en": "Cache Files"
       },
       "description": {
         "zh": "用于加速下次程序启动速度，不建议频繁清理此条目。",
@@ -1850,7 +1916,7 @@
       "warning": null,
       "level": 2,
       "work": null,
-      "source": "official-1002.2",
+      "source": "dismnext-core",
       "scans": [
         {
           "work": 1,
@@ -1880,21 +1946,21 @@
     {
       "id": "clean-029",
       "name": {
-        "zh": "缩略图缓存",
-        "en": "Thumbnail Cache"
+        "zh": "Windows 缩略图与图标缓存",
+        "en": "Windows Thumbnail & Icon Cache"
       },
       "group": {
         "zh": "缓存文件",
-        "en": "Cache files"
+        "en": "Cache Files"
       },
       "description": {
-        "zh": "",
-        "en": ""
+        "zh": "清理资源管理器生成的 thumbcache_*.db 缩略图缓存与 iconcache_*.db 图标缓存，不影响个性化或布局配置，重建后自动恢复显示。",
+        "en": "Clears Windows Explorer thumbnail (thumbcache_*.db) and icon (iconcache_*.db) cache databases while preserving Explorer configuration files."
       },
       "warning": null,
       "level": 2,
       "work": null,
-      "source": "official-1002.2",
+      "source": "dismnext-core",
       "scans": [
         {
           "work": 1,
@@ -1917,10 +1983,11 @@
             {
               "type": "General",
               "root_path": "%LocalAppData%",
-              "flags": "Directory|File",
+              "flags": "File",
               "id": null,
               "queries": [
-                "Microsoft\\Windows\\Explorer\\*",
+                "Microsoft\\Windows\\Explorer\\thumbcache_*.db",
+                "Microsoft\\Windows\\Explorer\\iconcache_*.db",
                 "IconCache.db"
               ],
               "excluded": []
@@ -1955,10 +2022,11 @@
             {
               "type": "General",
               "root_path": "%SystemDrive%\\Users\\*\\AppData\\Local",
-              "flags": "Directory|File",
+              "flags": "File",
               "id": null,
               "queries": [
-                "Microsoft\\Windows\\Explorer\\*",
+                "Microsoft\\Windows\\Explorer\\thumbcache_*.db",
+                "Microsoft\\Windows\\Explorer\\iconcache_*.db",
                 "IconCache.db"
               ],
               "excluded": []
@@ -1977,7 +2045,7 @@
       },
       "group": {
         "zh": "缓存文件",
-        "en": "Cache files"
+        "en": "Cache Files"
       },
       "description": {
         "zh": "清理每个用户账户和应用容器下的Windows网络组件（例如IE，Edge）的网页缓存（仅支持默认目录）",
@@ -1986,7 +2054,7 @@
       "warning": null,
       "level": 3,
       "work": null,
-      "source": "official-1002.2",
+      "source": "dismnext-core",
       "scans": [
         {
           "work": 1,
@@ -2125,7 +2193,7 @@
       },
       "group": {
         "zh": "缓存文件",
-        "en": "Cache files"
+        "en": "Cache Files"
       },
       "description": {
         "zh": "清理每个用户账户和应用容器下的Windows网络组件（例如IE，Edge）的Cookies（仅支持默认目录）",
@@ -2134,7 +2202,7 @@
       "warning": null,
       "level": 2,
       "work": null,
-      "source": "official-1002.2",
+      "source": "dismnext-core",
       "scans": [
         {
           "work": 1,
@@ -2285,7 +2353,7 @@
       },
       "level": 2,
       "work": null,
-      "source": "official-1002.2",
+      "source": "dismnext-core",
       "scans": [
         {
           "work": 1,
@@ -2314,7 +2382,7 @@
     {
       "id": "clean-033",
       "name": {
-        "zh": "Windows Defender保护历史记录",
+        "zh": "Windows Defender 保护历史记录",
         "en": "Windows Defender Protection History"
       },
       "group": {
@@ -2322,16 +2390,16 @@
         "en": "Applications"
       },
       "description": {
-        "zh": "Windows Defender保护历史记录存放了Windows Defender日志，日志过多会导致打开保护历史记录记录闪退",
-        "en": "Windows Defender保护历史记录存放了Windows Defender日志，日志过多会导致打开保护历史记录记录闪退"
+        "zh": "清理 Windows Defender 检测事件日志与历史记录；若历史记录过多，安全中心界面可能出现卡顿。",
+        "en": "Clears Windows Defender protection detection history and service scan logs."
       },
       "warning": {
-        "zh": "清理后无法还原被隔离文件",
-        "en": "清理后无法还原被隔离文件"
+        "zh": "清理后历史威胁检测条目将被清空（可能影响已隔离项目的界面追溯）。",
+        "en": "Clears recorded threat history entries (may remove GUI trace of previously quarantined items)."
       },
       "level": 2,
       "work": null,
-      "source": "official-1002.2",
+      "source": "dismnext-core",
       "scans": [
         {
           "work": 1,
@@ -2363,42 +2431,69 @@
     {
       "id": "clean-034",
       "name": {
-        "zh": "WebPI缓存",
-        "en": "WebPI Cache"
+        "zh": "WinGet 包管理器下载缓存",
+        "en": "WinGet Package Manager Download Cache"
       },
       "group": {
         "zh": "应用程序",
         "en": "Applications"
       },
       "description": {
-        "zh": "Web平台安装程序的缓存",
-        "en": "The Web Platform Installer's Cache"
+        "zh": "清理 Windows 包管理器（winget）安装与升级软件后残留的临时安装包和本地缓存。",
+        "en": "Clears downloaded installer archives and temporary staging folders left behind by Windows Package Manager (WinGet)."
       },
       "warning": null,
       "level": 2,
       "work": null,
-      "source": "official-1002.2",
+      "source": "win11-modern",
       "scans": [
         {
-          "work": 1,
+          "work": 10,
           "scan_type": null,
           "name_override": null,
           "description_override": null,
           "warning_override": null,
           "applicable": {
-            "type": "RegExist",
-            "key": "HKEY_LOCAL_MACHINE\\SOFTWARE\\Wow6432Node\\Microsoft\\WebPlatformInstaller",
-            "value": null,
-            "reg_type": null,
-            "data": null,
-            "compare": null,
-            "wow64": null
+            "type": "Or",
+            "children": [
+              {
+                "type": "FileExist",
+                "file_path": "%LOCALAPPDATA%\\Temp\\WinGet",
+                "wow64": null
+              },
+              {
+                "type": "FileExist",
+                "file_path": "%LOCALAPPDATA%\\Microsoft\\WinGet\\Cache",
+                "wow64": null
+              },
+              {
+                "type": "FileExist",
+                "file_path": "%LOCALAPPDATA%\\Packages\\Microsoft.DesktopAppInstaller_8wekyb3d8bbwe\\LocalState",
+                "wow64": null
+              }
+            ]
           },
           "named_applicables": {},
           "actions": [
             {
               "type": "General",
-              "root_path": "%SystemDrive%\\Users\\*\\AppData\\Local\\Microsoft\\Web Platform Installer\\",
+              "root_path": "%LOCALAPPDATA%\\Temp\\WinGet",
+              "flags": "Directory|File",
+              "id": null,
+              "queries": [],
+              "excluded": []
+            },
+            {
+              "type": "General",
+              "root_path": "%LOCALAPPDATA%\\Microsoft\\WinGet\\Cache",
+              "flags": "Directory|File",
+              "id": null,
+              "queries": [],
+              "excluded": []
+            },
+            {
+              "type": "General",
+              "root_path": "%LOCALAPPDATA%\\Packages\\Microsoft.DesktopAppInstaller_*\\LocalState\\*\\Temp",
               "flags": "Directory|File",
               "id": null,
               "queries": [],
@@ -2430,7 +2525,7 @@
       },
       "level": 2,
       "work": null,
-      "source": "official-1002.2",
+      "source": "dismnext-core",
       "scans": [
         {
           "work": 1,
@@ -2464,7 +2559,7 @@
       },
       "group": {
         "zh": "备份文件",
-        "en": "Backup files"
+        "en": "Backup Files"
       },
       "description": {
         "zh": "修改启动信息后系统会创建备份，方便回滚。如果确定不需要还原则可以删除。",
@@ -2473,7 +2568,7 @@
       "warning": null,
       "level": 3,
       "work": null,
-      "source": "official-1002.2",
+      "source": "dismnext-core",
       "scans": [
         {
           "work": 1,
@@ -2512,7 +2607,7 @@
       },
       "group": {
         "zh": "备份文件",
-        "en": "Backup files"
+        "en": "Backup Files"
       },
       "description": {
         "zh": "硬链接合并功能留下的备份文件。",
@@ -2524,7 +2619,7 @@
       },
       "level": 2,
       "work": null,
-      "source": "official-1002.2",
+      "source": "dismnext-core",
       "scans": [
         {
           "work": 1,
@@ -2563,7 +2658,7 @@
       },
       "group": {
         "zh": "备份文件",
-        "en": "Backup files"
+        "en": "Backup Files"
       },
       "description": {
         "zh": "会声会影使用过程中会在此目录产生存档，在不需要后可以删除。",
@@ -2575,7 +2670,7 @@
       },
       "level": 2,
       "work": null,
-      "source": "official-1002.2",
+      "source": "dismnext-core",
       "scans": [
         {
           "work": 1,
@@ -2616,53 +2711,42 @@
     {
       "id": "clean-039",
       "name": {
-        "zh": "最后一次正确配置（by Stanlazy）",
-        "en": "Last Known Good Configuration (by Stanlazy)"
+        "zh": "Windows 字体缓存",
+        "en": "Windows Font Cache"
       },
       "group": {
-        "zh": "备份文件",
-        "en": "Backup files"
+        "zh": "缓存文件",
+        "en": "Cache Files"
       },
       "description": {
-        "zh": "最近能正常启动计算机的配置备份。",
-        "en": "Backup of the most recent configuration that could start up the PC."
+        "zh": "清理 FontCache 服务生成的历史字体渲染缓存（*FontCache*.dat）；清理后系统将在需要时自动重建。",
+        "en": "Clears legacy *FontCache*.dat cache files under LocalService\\FontCache; Windows rebuilds them automatically when needed."
       },
       "warning": null,
       "level": 2,
       "work": null,
-      "source": "official-1002.2",
+      "source": "win11-modern",
       "scans": [
         {
-          "work": 1,
+          "work": 10,
           "scan_type": null,
           "name_override": null,
           "description_override": null,
           "warning_override": null,
           "applicable": {
-            "type": "Or",
-            "children": [
-              {
-                "type": "FileExist",
-                "file_path": "%SystemRoot%\\lastgood",
-                "wow64": null
-              },
-              {
-                "type": "FileExist",
-                "file_path": "%SystemRoot%\\lastgood.tmp",
-                "wow64": null
-              }
-            ]
+            "type": "FileExist",
+            "file_path": "%SystemRoot%\\ServiceProfiles\\LocalService\\AppData\\Local\\FontCache",
+            "wow64": null
           },
           "named_applicables": {},
           "actions": [
             {
               "type": "General",
-              "root_path": "%SystemRoot%",
-              "flags": "Directory|File",
+              "root_path": "%SystemRoot%\\ServiceProfiles\\LocalService\\AppData\\Local\\FontCache",
+              "flags": "File",
               "id": null,
               "queries": [
-                "lastgood",
-                "lastgood.tmp"
+                "*FontCache*.dat"
               ],
               "excluded": []
             }
@@ -2680,16 +2764,16 @@
       },
       "group": {
         "zh": "临时文件",
-        "en": "Temprorary Files"
+        "en": "Temporary Files"
       },
       "description": {
         "zh": "系统更新时在WinSxS里面产生的临时文件。",
-        "en": "Temprorary files created inside the WinSxS folder when updating the system."
+        "en": "Temporary files created inside the WinSxS folder when updating the system."
       },
       "warning": null,
       "level": 3,
       "work": null,
-      "source": "official-1002.2",
+      "source": "dismnext-core",
       "scans": [
         {
           "work": 1,
@@ -2727,12 +2811,12 @@
     {
       "id": "clean-041",
       "name": {
-        "zh": "Windows日志（by chenyu、YukiSakura）",
-        "en": "Windows Log (by chenyu, YukiSakura)"
+        "zh": "Windows 系统运行日志",
+        "en": "Windows System Runtime Logs"
       },
       "group": {
         "zh": "临时文件",
-        "en": "Temprorary Files"
+        "en": "Temporary Files"
       },
       "description": {
         "zh": "Windows在运行时产生的日志。",
@@ -2741,7 +2825,7 @@
       "warning": null,
       "level": 3,
       "work": null,
-      "source": "official-1002.2",
+      "source": "dismnext-core",
       "scans": [
         {
           "work": 1,
@@ -2764,8 +2848,7 @@
                 "*.bak",
                 "*log.txt",
                 "SchedLgU.txt",
-                "Performance\\WinSAT\\*.log",
-                "Panther\\*.log"
+                "Performance\\WinSAT\\*.log"
               ],
               "excluded": []
             },
@@ -2810,14 +2893,6 @@
             {
               "type": "General",
               "root_path": "*\\System Volume Information\\Chkdsk",
-              "flags": "Directory|File",
-              "id": null,
-              "queries": [],
-              "excluded": []
-            },
-            {
-              "type": "General",
-              "root_path": "%ProgramData%\\USOShared\\Logs",
               "flags": "Directory|File",
               "id": null,
               "queries": [],
@@ -2889,20 +2964,20 @@
       "id": "clean-042",
       "name": {
         "zh": "临时文件",
-        "en": "Temprorary Files"
+        "en": "Temporary Files"
       },
       "group": {
         "zh": "临时文件",
-        "en": "Temprorary Files"
+        "en": "Temporary Files"
       },
       "description": {
         "zh": "一些程序为特定用户产生的临时文件。",
-        "en": "Temprorary files created by some applications."
+        "en": "Temporary files created by Windows services and user applications."
       },
       "warning": null,
       "level": 2,
       "work": null,
-      "source": "official-1002.2",
+      "source": "dismnext-core",
       "scans": [
         {
           "work": 1,
@@ -3063,20 +3138,20 @@
       "id": "clean-043",
       "name": {
         "zh": "常见的驱动临时解压目录",
-        "en": "Temprorary Driver Directories"
+        "en": "Temporary Driver Directories"
       },
       "group": {
         "zh": "临时文件",
-        "en": "Temprorary Files"
+        "en": "Temporary Files"
       },
       "description": {
         "zh": "Intel、AMD以及Nvidia驱动在安装时留下的解压目录。",
-        "en": "Leftover files or directories created when installing Intel, AMD, or NVIDIA drivers."
+        "en": "Temporary driver extraction folders left behind on the system drive after driver installation."
       },
       "warning": null,
       "level": 3,
       "work": null,
-      "source": "official-1002.2",
+      "source": "dismnext-core",
       "scans": [
         {
           "work": 1,
@@ -3133,16 +3208,16 @@
       },
       "group": {
         "zh": "临时文件",
-        "en": "Temprorary Files"
+        "en": "Temporary Files"
       },
       "description": {
         "zh": "在系统升级或者还原后留下的系统临时安装文件，如果你确定当前没有进行系统升级或者还原，那么可以安全删除。",
-        "en": "Temprorary installation files created when upgrading or restoring to a previous backup. You may safely remove the files if you are certain that no system upgrade or restoration is in place."
+        "en": "Temporary installation files created when upgrading or restoring to a previous backup. You may safely remove the files if you are certain that no system upgrade or restoration is in place."
       },
       "warning": null,
       "level": 2,
       "work": null,
-      "source": "official-1002.2",
+      "source": "dismnext-core",
       "scans": [
         {
           "work": 3,
@@ -3198,16 +3273,16 @@
       },
       "group": {
         "zh": "临时文件",
-        "en": "Temprorary Files"
+        "en": "Temporary Files"
       },
       "description": {
         "zh": "QQ运行时产生的临时文件还有日志，不影响QQ消息记录，建议定期删除。",
-        "en": "Temprorary files and logs created by Tencent QQ when it is running. This does not affect chat history. It is recommended to clean this up regularly."
+        "en": "Temporary files and logs created by Tencent QQ when it is running. This does not affect chat history. It is recommended to clean this up regularly."
       },
       "warning": null,
       "level": 2,
       "work": null,
-      "source": "official-1002.2",
+      "source": "dismnext-core",
       "scans": [
         {
           "work": 1,
@@ -3270,16 +3345,16 @@
       },
       "group": {
         "zh": "临时文件",
-        "en": "Temprorary Files"
+        "en": "Temporary Files"
       },
       "description": {
         "zh": "YY运行时产生的一些临时文件以及日志，建议定期删除。",
-        "en": "Temprorary files and logs created by YY when it is runnig. It is recommended to clean this up regularly."
+        "en": "Temporary files and logs created by YY when running; safe to clean periodically."
       },
       "warning": null,
       "level": 2,
       "work": null,
-      "source": "official-1002.2",
+      "source": "dismnext-core",
       "scans": [
         {
           "work": 1,
@@ -3318,16 +3393,16 @@
     {
       "id": "clean-047",
       "name": {
-        "zh": "ProgramData 通用临时目录（原腾讯下载目录）",
-        "en": "ProgramData Shared Temp Folder (Legacy Tencent Download Rule)"
+        "zh": "ProgramData 共享临时目录",
+        "en": "ProgramData Shared Temp Folder"
       },
       "group": {
         "zh": "临时文件",
-        "en": "Temprorary Files"
+        "en": "Temporary Files"
       },
       "description": {
-        "zh": "原规则名标注为腾讯下载残留，但实际扫描通用的 %ProgramData%\\temp 目录，可能包含其他软件临时文件，已降级为谨慎清理。",
-        "en": "Scans the shared %ProgramData%\\temp directory. Downgraded from default-checked because non-Tencent installers may also store temp files here."
+        "zh": "扫描 %ProgramData%\\temp 公共临时目录；部分安装程序或下载器可能在此存放临时文件，默认降级为谨慎清理。",
+        "en": "Scans the shared %ProgramData%\\temp directory. Marked caution-level because active installers may also use this folder."
       },
       "warning": {
         "zh": "此操作将清空整个 %ProgramData%\\temp 目录，请确认无安装程序正在运行。",
@@ -3335,7 +3410,7 @@
       },
       "level": 1,
       "work": null,
-      "source": "official-1002.2",
+      "source": "dismnext-core",
       "scans": [
         {
           "work": 1,
@@ -3369,47 +3444,44 @@
     {
       "id": "clean-048",
       "name": {
-        "zh": "微软拼音安装文件",
-        "en": "Microsoft Pinyin Installation Files"
+        "zh": "Windows 剪贴板历史缓存",
+        "en": "Windows Clipboard History Cache"
       },
       "group": {
         "zh": "临时文件",
-        "en": "Temprorary Files"
+        "en": "Temporary Files"
       },
       "description": {
-        "zh": "微软拼音升级程序遗留下的安装文件。",
-        "en": "Files leftover from the Microsoft Pinyin IME Updater."
+        "zh": "清理 Win+V 剪贴板历史记录的 HistoryData 临时缓存，严格保留用户手动固定的 Pinned 目录条目。",
+        "en": "Clears unpinned Win+V clipboard history under Clipboard\\HistoryData while strictly preserving user-pinned items under Pinned."
       },
-      "warning": null,
-      "level": 3,
+      "warning": {
+        "zh": "清理后将清空 Win+V 未固定的剪贴板历史记录（已固定的 Pinned 条目不受影响）。",
+        "en": "Clears unpinned Win+V clipboard history entries (items under Pinned are preserved)."
+      },
+      "level": 1,
       "work": null,
-      "source": "official-1002.2",
+      "source": "win11-modern",
       "scans": [
         {
-          "work": 1,
+          "work": 10,
           "scan_type": null,
           "name_override": null,
           "description_override": null,
           "warning_override": null,
           "applicable": {
-            "type": "RegExist",
-            "key": "HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\KunlunInput",
-            "value": null,
-            "reg_type": null,
-            "data": null,
-            "compare": null,
+            "type": "FileExist",
+            "file_path": "%LOCALAPPDATA%\\Microsoft\\Windows\\Clipboard\\HistoryData",
             "wow64": null
           },
           "named_applicables": {},
           "actions": [
             {
               "type": "General",
-              "root_path": "%SystemDrive%\\Users\\*\\AppData\\LocalLow\\",
-              "flags": "Directory",
+              "root_path": "%LOCALAPPDATA%\\Microsoft\\Windows\\Clipboard\\HistoryData",
+              "flags": "Directory|File",
               "id": null,
-              "queries": [
-                "KunlunInput"
-              ],
+              "queries": [],
               "excluded": []
             }
           ],
@@ -3426,7 +3498,7 @@
       },
       "group": {
         "zh": "临时文件",
-        "en": "Temprorary Files"
+        "en": "Temporary Files"
       },
       "description": {
         "zh": "百度网盘运行时产生的一些日志文件。",
@@ -3435,7 +3507,7 @@
       "warning": null,
       "level": 3,
       "work": null,
-      "source": "official-1002.2",
+      "source": "dismnext-core",
       "scans": [
         {
           "work": 1,
@@ -3485,38 +3557,69 @@
     {
       "id": "clean-050",
       "name": {
-        "zh": "飞信日志",
-        "en": "Fetion log"
+        "zh": "钉钉与飞书运行日志及更新缓存",
+        "en": "DingTalk & Lark Logs and Update Cache"
       },
       "group": {
         "zh": "临时文件",
-        "en": "Temprorary Files"
+        "en": "Temporary Files"
       },
       "description": {
-        "zh": "飞信运行时产生的一些日志文件。",
-        "en": "Logs created when Fetion is running."
+        "zh": "清理钉钉与飞书桌面端运行日志（Log）及自动更新包缓存，不影响本地聊天数据与登录信息。",
+        "en": "Clears runtime logs and update package caches for DingTalk and Lark without affecting chat data."
       },
       "warning": null,
       "level": 3,
       "work": null,
-      "source": "official-1002.2",
+      "source": "win11-modern",
       "scans": [
         {
-          "work": 1,
+          "work": 10,
           "scan_type": null,
           "name_override": null,
           "description_override": null,
           "warning_override": null,
           "applicable": {
-            "type": "FileExist",
-            "file_path": "%APPDATA%\\FetionV5",
-            "wow64": null
+            "type": "Or",
+            "children": [
+              {
+                "type": "FileExist",
+                "file_path": "%APPDATA%\\DingTalk\\Log",
+                "wow64": null
+              },
+              {
+                "type": "FileExist",
+                "file_path": "%LOCALAPPDATA%\\LarkShell\\aha\\logs",
+                "wow64": null
+              },
+              {
+                "type": "FileExist",
+                "file_path": "%APPDATA%\\LarkShell\\update",
+                "wow64": null
+              }
+            ]
           },
           "named_applicables": {},
           "actions": [
             {
               "type": "General",
-              "root_path": "%APPDATA%\\FetionV5\\",
+              "root_path": "%APPDATA%\\DingTalk\\Log",
+              "flags": "Directory|File",
+              "id": null,
+              "queries": [],
+              "excluded": []
+            },
+            {
+              "type": "General",
+              "root_path": "%LOCALAPPDATA%\\LarkShell\\aha\\logs",
+              "flags": "Directory|File",
+              "id": null,
+              "queries": [],
+              "excluded": []
+            },
+            {
+              "type": "General",
+              "root_path": "%APPDATA%\\LarkShell\\update",
               "flags": "Directory|File",
               "id": null,
               "queries": [],
@@ -3536,7 +3639,7 @@
       },
       "group": {
         "zh": "临时文件",
-        "en": "Temprorary Files"
+        "en": "Temporary Files"
       },
       "description": {
         "zh": "用于存放用户手动删除的文件目录。",
@@ -3545,7 +3648,7 @@
       "warning": null,
       "level": 3,
       "work": null,
-      "source": "official-1002.2",
+      "source": "dismnext-core",
       "scans": [
         {
           "work": 1,
@@ -3576,43 +3679,50 @@
     {
       "id": "clean-052",
       "name": {
-        "zh": "系统以及程序崩溃dmp文件（by YukiSakura）",
-        "en": "Dump Files of System and Applications (by YukiSakura)"
+        "zh": "系统蓝屏与内核崩溃转储",
+        "en": "System BSOD & Kernel Memory Dumps"
       },
       "group": {
         "zh": "临时文件",
-        "en": "Temprorary Files"
+        "en": "Temporary Files"
       },
       "description": {
-        "zh": "当系统蓝屏或者应用程序崩溃时产生的dmp文件。",
-        "en": "Memory dumps created by the system when it bluescreens or when an application crashes."
+        "zh": "清理系统蓝屏或内核异常时生成的 MEMORY.DMP、Minidump 及 LiveKernelReports 内核转储文件。",
+        "en": "Removes system kernel memory dumps (MEMORY.DMP, Minidump, and LiveKernelReports *.dmp) generated on crashes."
       },
       "warning": null,
       "level": 1,
       "work": null,
-      "source": "official-1002.2",
+      "source": "dismnext-core",
       "scans": [
         {
-          "work": 1,
+          "work": 10,
           "scan_type": null,
           "name_override": null,
           "description_override": null,
           "warning_override": null,
           "applicable": {
-            "type": "True"
+            "type": "Or",
+            "children": [
+              {
+                "type": "FileExist",
+                "file_path": "%SystemRoot%\\MEMORY.DMP",
+                "wow64": null
+              },
+              {
+                "type": "FileExist",
+                "file_path": "%SystemRoot%\\Minidump",
+                "wow64": null
+              },
+              {
+                "type": "FileExist",
+                "file_path": "%SystemRoot%\\LiveKernelReports",
+                "wow64": null
+              }
+            ]
           },
           "named_applicables": {},
           "actions": [
-            {
-              "type": "General",
-              "root_path": "%SystemDrive%\\users\\*\\appdata\\local",
-              "flags": "Directory",
-              "id": null,
-              "queries": [
-                "crashdumps"
-              ],
-              "excluded": []
-            },
             {
               "type": "General",
               "root_path": "%SystemRoot%",
@@ -3621,6 +3731,16 @@
               "queries": [
                 "MEMORY.DMP",
                 "Minidump"
+              ],
+              "excluded": []
+            },
+            {
+              "type": "General",
+              "root_path": "%SystemRoot%\\LiveKernelReports",
+              "flags": "File",
+              "id": null,
+              "queries": [
+                "*.dmp"
               ],
               "excluded": []
             }
@@ -3638,7 +3758,7 @@
       },
       "group": {
         "zh": "临时文件",
-        "en": "Temprorary Files"
+        "en": "Temporary Files"
       },
       "description": {
         "zh": "该项目清理WD，MSE，SCEP等微软系安软的无用文件",
@@ -3647,7 +3767,7 @@
       "warning": null,
       "level": 2,
       "work": null,
-      "source": "official-1002.2",
+      "source": "dismnext-core",
       "scans": [
         {
           "work": 1,
@@ -3734,7 +3854,7 @@
       },
       "group": {
         "zh": "临时文件",
-        "en": "Temprorary Files"
+        "en": "Temporary Files"
       },
       "description": {
         "zh": "使用Visual Studio所产生的日志",
@@ -3743,7 +3863,7 @@
       "warning": null,
       "level": 2,
       "work": null,
-      "source": "official-1002.2",
+      "source": "dismnext-core",
       "scans": [
         {
           "work": 1,
@@ -3775,12 +3895,12 @@
     {
       "id": "clean-055",
       "name": {
-        "zh": "IDM临时文件（by MS-PC2）",
-        "en": "Internet Download Manager temporary files (by MS-PC2)"
+        "zh": "IDM临时文件",
+        "en": "Internet Download Manager temporary files"
       },
       "group": {
         "zh": "临时文件",
-        "en": "Temprorary Files"
+        "en": "Temporary Files"
       },
       "description": {
         "zh": "Internet Download Manager临时下载文件。",
@@ -3792,7 +3912,7 @@
       },
       "level": 2,
       "work": null,
-      "source": "official-1002.2",
+      "source": "dismnext-core",
       "scans": [
         {
           "work": 1,
@@ -3854,16 +3974,16 @@
         "en": "System"
       },
       "description": {
-        "zh": "对单纯读取的文件进行哈夫曼压缩，在不影响性能的情况下，显著减少系统体积。特别感谢矿工以及所有Compact团队成员无私的支持与帮助。",
-        "en": "Compresses the read-only file with Huffman compression. This will not impact the performance while reducing the space of the system drastically. Special thanks to the miners and the selfless support and aid of the member of the Compact team."
+        "zh": "对只读系统二进制文件启用 CompactOS（XPRESS4K）透明压缩，在不影响运行性能的前提下显著减少系统盘占用。",
+        "en": "Applies Windows CompactOS transparent compression to system binaries to reduce OS disk footprint without noticeable performance impact."
       },
       "warning": {
-        "zh": "使用后可能导致某些程序无法正常运行甚至让系统无法启动，如果使用后出现问题，可以在PE中点击 恢复功能-->撤销Compact。",
-        "en": "After applying this, some programs may fail to function properly or may cause the system to fail to boot. You can later fix this by using \"Revovery\" > \"Never Compact\" in WinPE."
+        "zh": "压缩或解压过程中耗时较长且会占用磁盘 I/O；如有需要可随时在工具操作区一键撤销 CompactOS。",
+        "en": "Compression takes time and disk I/O; you can revert CompactOS compression anytime from the action panel."
       },
       "level": 0,
       "work": null,
-      "source": "official-1002.2",
+      "source": "dismnext-core",
       "scans": [
         {
           "work": 30,
@@ -3953,7 +4073,7 @@
       },
       "level": 0,
       "work": null,
-      "source": "official-1002.2",
+      "source": "dismnext-core",
       "scans": [
         {
           "work": 40,
@@ -3985,7 +4105,7 @@
       },
       "group": {
         "zh": "过期文件",
-        "en": "Expired files"
+        "en": "Expired Files"
       },
       "description": {
         "zh": "删除计算机中不使用的驱动程序以节省驱动存储池空间。",
@@ -3997,7 +4117,7 @@
       },
       "level": 0,
       "work": null,
-      "source": "official-1002.2",
+      "source": "dismnext-core",
       "scans": [
         {
           "work": 2,
@@ -4029,7 +4149,7 @@
       },
       "group": {
         "zh": "过期文件",
-        "en": "Expired files"
+        "en": "Expired Files"
       },
       "description": {
         "zh": "在Appx应用升级时，会留下老版本应用，该功能将删除那些不使用的老版本。",
@@ -4041,7 +4161,7 @@
       },
       "level": 0,
       "work": null,
-      "source": "official-1002.2",
+      "source": "dismnext-core",
       "scans": [
         {
           "work": 4,
@@ -4100,7 +4220,7 @@
       },
       "level": 0,
       "work": null,
-      "source": "official-1002.2",
+      "source": "dismnext-core",
       "scans": [
         {
           "work": 5,
@@ -4156,7 +4276,7 @@
       },
       "description": {
         "zh": "安装Office后产生的安装源，如果不需要卸载Office可以考虑删除，删除后能正常安装Office更新。",
-        "en": "Files created during the installation of Office. You may consider deleting this if you do not with to uninstall Office in the future. You may still install Office updates after deleting the files."
+        "en": "Files created during Office installation (MSOCache). Only remove if offline repair or uninstallation media is available."
       },
       "warning": {
         "zh": "清理后将无法卸载只能升级安装或者强行删除，Office 2007以下版本（包含）删除后还影响安装更新。",
@@ -4164,7 +4284,7 @@
       },
       "level": 0,
       "work": null,
-      "source": "official-1002.2",
+      "source": "dismnext-core",
       "scans": [
         {
           "work": 1,
@@ -4269,7 +4389,7 @@
       },
       "level": 0,
       "work": 3,
-      "source": "official-1002.2",
+      "source": "dismnext-core",
       "scans": [
         {
           "work": 1,
@@ -4321,7 +4441,7 @@
       },
       "level": 0,
       "work": null,
-      "source": "official-1002.2",
+      "source": "dismnext-core",
       "scans": [
         {
           "work": 1,
@@ -4357,16 +4477,16 @@
     {
       "id": "clean-064",
       "name": {
-        "zh": "瑞昱声卡驱动安装源缓存（by YukiSakura）",
-        "en": "Realtek Sound Driver Installation Cache (by YukiSakura)"
+        "zh": "瑞昱声卡驱动安装源缓存",
+        "en": "Realtek Sound Driver Installation Cache"
       },
       "group": {
         "zh": "缓存文件",
-        "en": "Cache files"
+        "en": "Cache Files"
       },
       "description": {
         "zh": "瑞昱声卡安装后留下的安装源缓存。",
-        "en": "Temprorary installation files created by Realtek when installing the sound driver."
+        "en": "Temporary installation files created by Realtek when installing the sound driver."
       },
       "warning": {
         "zh": "此条目可能影响瑞昱声卡驱动的卸载。",
@@ -4374,7 +4494,7 @@
       },
       "level": 0,
       "work": null,
-      "source": "official-1002.2",
+      "source": "dismnext-core",
       "scans": [
         {
           "work": 1,
@@ -4411,16 +4531,16 @@
     {
       "id": "clean-065",
       "name": {
-        "zh": "Java安装源缓存（by YukiSakura）",
-        "en": "Java Installation Cache (by YukiSakura)"
+        "zh": "Java安装源缓存",
+        "en": "Java Installation Cache"
       },
       "group": {
         "zh": "缓存文件",
-        "en": "Cache files"
+        "en": "Cache Files"
       },
       "description": {
         "zh": "Java安装后留下的安装源缓存。",
-        "en": "Temprorary installation files created when installing Java."
+        "en": "Temporary installation files created when installing Java."
       },
       "warning": {
         "zh": "此条目可能影响Java的卸载。",
@@ -4428,7 +4548,7 @@
       },
       "level": 0,
       "work": null,
-      "source": "official-1002.2",
+      "source": "dismnext-core",
       "scans": [
         {
           "work": 1,
@@ -4468,16 +4588,16 @@
     {
       "id": "clean-066",
       "name": {
-        "zh": "Intel驱动安装源缓存（by YukiSakura）",
-        "en": "Intel Driver Installation Cache (by YukiSakura)"
+        "zh": "Intel驱动安装源缓存",
+        "en": "Intel Driver Installation Cache"
       },
       "group": {
         "zh": "缓存文件",
-        "en": "Cache files"
+        "en": "Cache Files"
       },
       "description": {
         "zh": "Intel驱动安装后留下的安装源缓存。",
-        "en": "Temprorary installation files created when installing Intel drivers."
+        "en": "Temporary installation files created when installing Intel drivers."
       },
       "warning": {
         "zh": "此条目可能影响Intel驱动的卸载。",
@@ -4485,7 +4605,7 @@
       },
       "level": 0,
       "work": null,
-      "source": "official-1002.2",
+      "source": "dismnext-core",
       "scans": [
         {
           "work": 1,
@@ -4517,16 +4637,16 @@
     {
       "id": "clean-067",
       "name": {
-        "zh": "英伟达驱动安装源缓存（by YukiSakura）",
-        "en": "NVIDIA Driver Installation Cache (by YukiSakura)"
+        "zh": "英伟达驱动安装源缓存",
+        "en": "NVIDIA Driver Installation Cache"
       },
       "group": {
         "zh": "缓存文件",
-        "en": "Cache files"
+        "en": "Cache Files"
       },
       "description": {
         "zh": "英伟达驱动安装后留下的安装源缓存。",
-        "en": "Temprorary installation files created when installing NVIDIA drivers."
+        "en": "Temporary installation files created when installing NVIDIA drivers."
       },
       "warning": {
         "zh": "此条目可能影响英伟达驱动的卸载。",
@@ -4534,7 +4654,7 @@
       },
       "level": 0,
       "work": null,
-      "source": "official-1002.2",
+      "source": "dismnext-core",
       "scans": [
         {
           "work": 1,
@@ -4574,12 +4694,12 @@
     {
       "id": "clean-068",
       "name": {
-        "zh": "英伟达驱动安装包（by Ailick）",
-        "en": "NVIDIA Driver Installation Package (by Ailick)"
+        "zh": "英伟达驱动安装包",
+        "en": "NVIDIA Driver Installation Package"
       },
       "group": {
         "zh": "临时文件",
-        "en": "Temprorary Files"
+        "en": "Temporary Files"
       },
       "description": {
         "zh": "Nvidia Geforce Experience更新程序时产生的安装包。",
@@ -4591,7 +4711,7 @@
       },
       "level": 1,
       "work": null,
-      "source": "official-1002.2",
+      "source": "dismnext-core",
       "scans": [
         {
           "work": 1,
@@ -4623,24 +4743,24 @@
     {
       "id": "clean-069",
       "name": {
-        "zh": "Microsoft SQL Server更新缓存（by Honry、撕裂五维空间）",
-        "en": "Microsoft SQL Server Update Cache (by Honry, SiLieWuWeiKongJian)"
+        "zh": "Microsoft SQL Server更新缓存",
+        "en": "Microsoft SQL Server Update Cache"
       },
       "group": {
         "zh": "缓存文件",
-        "en": "Cache files"
+        "en": "Cache Files"
       },
       "description": {
         "zh": "安装Microsoft SQL Server补丁残留的安装缓存。",
-        "en": "Temprorary installation files created when installing Microsoft SQL Server updates."
+        "en": "Temporary setup update caches and bootstrap logs created when patching Microsoft SQL Server."
       },
       "warning": {
-        "zh": "此条目最新添加，可能引发意外问题！",
-        "en": "This feature is new and may cause issues!"
+        "zh": "清理 Update Cache 后若需卸载或修复旧版 SQL Server 补丁，可能需要重新提供原安装包。",
+        "en": "Removing SQL Server Update Cache may require original installation media when repairing or uninstalling patches."
       },
       "level": 0,
       "work": null,
-      "source": "official-1002.2",
+      "source": "dismnext-core",
       "scans": [
         {
           "work": 1,
@@ -4774,16 +4894,16 @@
     {
       "id": "clean-070",
       "name": {
-        "zh": "Adobe Acrobat安装源缓存（by Honry）",
-        "en": "Adobe Acrobat Installation Cache (by Honry)"
+        "zh": "Adobe Acrobat安装源缓存",
+        "en": "Adobe Acrobat Installation Cache"
       },
       "group": {
         "zh": "缓存文件",
-        "en": "Cache files"
+        "en": "Cache Files"
       },
       "description": {
         "zh": "安装Adobe Acrobat后留下的安装缓存。",
-        "en": "Temprorary installation files created when installing Adobe Acrobat."
+        "en": "Temporary installation files created when installing Adobe Acrobat."
       },
       "warning": {
         "zh": "删除此条目可能导致Adobe Acrobat无法正常卸载！",
@@ -4791,7 +4911,7 @@
       },
       "level": 0,
       "work": null,
-      "source": "official-1002.2",
+      "source": "dismnext-core",
       "scans": [
         {
           "work": 1,
@@ -4823,44 +4943,75 @@
     {
       "id": "clean-071",
       "name": {
-        "zh": "小红伞临时文件",
-        "en": "Avira Temporary Files"
+        "zh": "Rust Cargo 与 Go 构建缓存",
+        "en": "Rust Cargo & Go Build Cache"
       },
       "group": {
-        "zh": "临时文件",
-        "en": "Temprorary Files"
+        "zh": "开发者缓存",
+        "en": "Developer Cache"
       },
       "description": {
-        "zh": "小红伞在自动升级过程中残留的临时文件。",
-        "en": "Temprorary files created by Avira after an update."
+        "zh": "清理 Rust Cargo crate 下载归档缓存（registry\\cache）与 Go 编译器构建缓存（go-build）。",
+        "en": "Clears Rust Cargo crate archive caches (registry\\cache) and Go compiler build caches (go-build)."
       },
-      "warning": null,
-      "level": 0,
+      "warning": {
+        "zh": "清理后下次离线构建或首次重新编译相关依赖时将重新下载或生成构建缓存。",
+        "en": "Next build may need to re-download crate archives or rebuild Go packages."
+      },
+      "level": 1,
       "work": null,
-      "source": "official-1002.2",
+      "source": "win11-modern",
       "scans": [
         {
-          "work": 1,
+          "work": 10,
           "scan_type": null,
           "name_override": null,
           "description_override": null,
           "warning_override": null,
           "applicable": {
-            "type": "FileExist",
-            "file_path": "%ProgramData%\\Avira",
-            "wow64": null
+            "type": "Or",
+            "children": [
+              {
+                "type": "FileExist",
+                "file_path": "%USERPROFILE%\\.cargo\\registry\\cache",
+                "wow64": null
+              },
+              {
+                "type": "FileExist",
+                "file_path": "%CARGO_HOME%\\registry\\cache",
+                "wow64": null
+              },
+              {
+                "type": "FileExist",
+                "file_path": "%LOCALAPPDATA%\\go-build",
+                "wow64": null
+              }
+            ]
           },
           "named_applicables": {},
           "actions": [
             {
               "type": "General",
-              "root_path": "%ProgramData%\\Avira\\*\\",
-              "flags": "Directory",
+              "root_path": "%USERPROFILE%\\.cargo\\registry\\cache",
+              "flags": "Directory|File",
               "id": null,
-              "queries": [
-                "TEMP",
-                "BACKUP"
-              ],
+              "queries": [],
+              "excluded": []
+            },
+            {
+              "type": "General",
+              "root_path": "%CARGO_HOME%\\registry\\cache",
+              "flags": "Directory|File",
+              "id": null,
+              "queries": [],
+              "excluded": []
+            },
+            {
+              "type": "General",
+              "root_path": "%LOCALAPPDATA%\\go-build",
+              "flags": "Directory|File",
+              "id": null,
+              "queries": [],
               "excluded": []
             }
           ],
@@ -4872,24 +5023,24 @@
     {
       "id": "clean-072",
       "name": {
-        "zh": "Microsoft .NET安装缓存（by 撕裂五维空间）",
-        "en": "Microsoft .NET Installation Cache (by SiLieWuWeiKongJian)"
+        "zh": "Microsoft .NET安装缓存",
+        "en": "Microsoft .NET Installation Cache"
       },
       "group": {
         "zh": "缓存文件",
-        "en": "Cache files"
+        "en": "Cache Files"
       },
       "description": {
         "zh": "安装Microsoft .NET补丁残留的安装缓存。",
         "en": "Cache files created by the installer when installing or updating Microsoft .NET-related features."
       },
       "warning": {
-        "zh": "此条目最新添加，可能引发意外问题！",
-        "en": "This feature is new and may cause issues!"
+        "zh": "清理后如需线下修复对应 .NET Multi-Targeting Pack，可能需要重新下载安装包。",
+        "en": "Removing .NET SetupCache may require original installation media for offline repair."
       },
       "level": 0,
       "work": null,
-      "source": "official-1002.2",
+      "source": "dismnext-core",
       "scans": [
         {
           "work": 1,
@@ -4945,7 +5096,7 @@
           "warning_override": null,
           "applicable": {
             "type": "FileExist",
-            "file_path": "%ProgramFiles%\\Microsoft SQL Server",
+            "file_path": "%ProgramFiles%\\Microsoft.NET\\Multi-Targeting Pack",
             "wow64": null
           },
           "named_applicables": {},
@@ -4974,11 +5125,11 @@
       },
       "group": {
         "zh": "临时文件",
-        "en": "Temprorary Files"
+        "en": "Temporary Files"
       },
       "description": {
-        "zh": "Windows 11 22H2 起新增的 C:\\Windows\\SystemTemp，供系统组件与服务存放临时文件。官方 10.1.1002.2 规则尚未收录。",
-        "en": "System-level temporary directory introduced in Windows 11 22H2 (C:\\Windows\\SystemTemp) used by system components and services."
+        "zh": "清理 Windows 11 22H2 及以上版本引入的 C:\\Windows\\SystemTemp 系统级服务临时目录。",
+        "en": "Clears the system-level C:\\Windows\\SystemTemp directory introduced in Windows 11 22H2+ for Windows services and components."
       },
       "warning": null,
       "level": 3,
@@ -5020,7 +5171,7 @@
       },
       "group": {
         "zh": "缓存文件",
-        "en": "Cache files"
+        "en": "Cache Files"
       },
       "description": {
         "zh": "D3DSCache 存放 DirectX 编译后的着色器缓存，删除后游戏首次运行会重新编译（略慢），不影响存档。",
@@ -5061,12 +5212,12 @@
     {
       "id": "clean-075",
       "name": {
-        "zh": "应用崩溃转储（CrashDumps）",
+        "zh": "应用程序崩溃转储 (CrashDumps)",
         "en": "Application Crash Dumps (CrashDumps)"
       },
       "group": {
         "zh": "临时文件",
-        "en": "Temprorary Files"
+        "en": "Temporary Files"
       },
       "description": {
         "zh": "%LOCALAPPDATA%\\CrashDumps 存放应用程序崩溃时生成的 .dmp，单个文件可达数百 MB。",
@@ -5081,7 +5232,7 @@
       "source": "win11-modern",
       "scans": [
         {
-          "work": 1,
+          "work": 10,
           "scan_type": null,
           "name_override": null,
           "description_override": null,
@@ -5095,7 +5246,7 @@
           "actions": [
             {
               "type": "General",
-              "root_path": "%LOCALAPPDATA%\\CrashDumps",
+              "root_path": "%SystemDrive%\\Users\\*\\AppData\\Local\\CrashDumps",
               "flags": "File",
               "id": null,
               "queries": [
@@ -5117,7 +5268,7 @@
       },
       "group": {
         "zh": "缓存文件",
-        "en": "Cache files"
+        "en": "Cache Files"
       },
       "description": {
         "zh": "资源管理器把待删除的 thumbcache_*.db 移到 ThumbCacheToDelete 目录，系统不一定会清理，可安全删除。",
@@ -5163,7 +5314,7 @@
       },
       "group": {
         "zh": "缓存文件",
-        "en": "Cache files"
+        "en": "Cache Files"
       },
       "description": {
         "zh": "NVIDIA 驱动生成的 DirectX / OpenGL 着色器缓存，删除后游戏首次运行会重新编译。",
@@ -5175,61 +5326,33 @@
       "source": "win11-modern",
       "scans": [
         {
-          "work": 2,
+          "work": 10,
           "scan_type": null,
-          "name_override": {
-            "zh": "NVIDIA 着色器缓存（当前用户）",
-            "en": "NVIDIA Shader Cache (Current User)"
-          },
+          "name_override": null,
           "description_override": null,
           "warning_override": null,
           "applicable": {
-            "type": "FileExist",
-            "file_path": "%LOCALAPPDATA%\\NVIDIA\\DXCache",
-            "wow64": null
-          },
-          "named_applicables": {},
-          "actions": [
-            {
-              "type": "General",
-              "root_path": "%LOCALAPPDATA%\\NVIDIA\\DXCache",
-              "flags": "Directory",
-              "id": null,
-              "queries": [],
-              "excluded": []
-            },
-            {
-              "type": "General",
-              "root_path": "%LOCALAPPDATA%\\NVIDIA\\GLCache",
-              "flags": "Directory",
-              "id": null,
-              "queries": [],
-              "excluded": []
-            }
-          ],
-          "rescan": false,
-          "restart": null
-        },
-        {
-          "work": 2,
-          "scan_type": null,
-          "name_override": {
-            "zh": "NVIDIA 着色器缓存（32位）",
-            "en": "NVIDIA Shader Cache (System Profile)"
-          },
-          "description_override": null,
-          "warning_override": null,
-          "applicable": {
-            "type": "And",
+            "type": "Or",
             "children": [
               {
                 "type": "FileExist",
                 "file_path": "%LOCALAPPDATA%\\NVIDIA\\DXCache",
-                "wow64": "All"
+                "wow64": null
               },
               {
-                "type": "Arch",
-                "arch": 9
+                "type": "FileExist",
+                "file_path": "%LOCALAPPDATA%\\NVIDIA\\GLCache",
+                "wow64": null
+              },
+              {
+                "type": "FileExist",
+                "file_path": "%LOCALAPPDATA%\\NVIDIA Corporation\\NV_Cache",
+                "wow64": null
+              },
+              {
+                "type": "FileExist",
+                "file_path": "%SystemRoot%\\System32\\config\\systemprofile\\AppData\\Local\\NVIDIA\\DXCache",
+                "wow64": null
               }
             ]
           },
@@ -5237,8 +5360,32 @@
           "actions": [
             {
               "type": "General",
+              "root_path": "%LOCALAPPDATA%\\NVIDIA\\DXCache",
+              "flags": "Directory|File",
+              "id": null,
+              "queries": [],
+              "excluded": []
+            },
+            {
+              "type": "General",
+              "root_path": "%LOCALAPPDATA%\\NVIDIA\\GLCache",
+              "flags": "Directory|File",
+              "id": null,
+              "queries": [],
+              "excluded": []
+            },
+            {
+              "type": "General",
+              "root_path": "%LOCALAPPDATA%\\NVIDIA Corporation\\NV_Cache",
+              "flags": "Directory|File",
+              "id": null,
+              "queries": [],
+              "excluded": []
+            },
+            {
+              "type": "General",
               "root_path": "%SystemRoot%\\System32\\config\\systemprofile\\AppData\\Local\\NVIDIA\\DXCache",
-              "flags": "Directory",
+              "flags": "Directory|File",
               "id": null,
               "queries": [],
               "excluded": []
@@ -5257,7 +5404,7 @@
       },
       "group": {
         "zh": "缓存文件",
-        "en": "Cache files"
+        "en": "Cache Files"
       },
       "description": {
         "zh": "清理新版 Chromium 内核 Edge 浏览器的页面缓存、JS 代码缓存与 GPU 缓存，不影响书签、密码与登录状态。",
@@ -5304,6 +5451,14 @@
               "id": null,
               "queries": [],
               "excluded": []
+            },
+            {
+              "type": "General",
+              "root_path": "%LOCALAPPDATA%\\Microsoft\\Edge\\User Data\\*\\Service Worker\\CacheStorage",
+              "flags": "Directory|File",
+              "id": null,
+              "queries": [],
+              "excluded": []
             }
           ],
           "rescan": false,
@@ -5319,7 +5474,7 @@
       },
       "group": {
         "zh": "缓存文件",
-        "en": "Cache files"
+        "en": "Cache Files"
       },
       "description": {
         "zh": "清理 Google Chrome 的页面缓存、JS 代码缓存与 GPU 缓存，不影响书签、扩展与登录状态。",
@@ -5366,6 +5521,14 @@
               "id": null,
               "queries": [],
               "excluded": []
+            },
+            {
+              "type": "General",
+              "root_path": "%LOCALAPPDATA%\\Google\\Chrome\\User Data\\*\\Service Worker\\CacheStorage",
+              "flags": "Directory|File",
+              "id": null,
+              "queries": [],
+              "excluded": []
             }
           ],
           "rescan": false,
@@ -5381,7 +5544,7 @@
       },
       "group": {
         "zh": "临时文件",
-        "en": "Temprorary Files"
+        "en": "Temporary Files"
       },
       "description": {
         "zh": "清理现代桌面应用（*-updater 目录及 SquirrelTemp）自动更新后残留的旧安装包缓存。",
@@ -5445,7 +5608,7 @@
       },
       "group": {
         "zh": "缓存文件",
-        "en": "Cache files"
+        "en": "Cache Files"
       },
       "description": {
         "zh": "清理 AMD 显卡驱动生成的 DxCache / GLCache / VkCache 着色器缓存，游戏首次运行会重新编译。",
@@ -5522,7 +5685,7 @@
       },
       "group": {
         "zh": "缓存文件",
-        "en": "Cache files"
+        "en": "Cache Files"
       },
       "description": {
         "zh": "清理 Intel 核显/锐炫显卡生成的 ShaderCache 着色器缓存。",
@@ -5563,16 +5726,16 @@
     {
       "id": "clean-083",
       "name": {
-        "zh": "Windows 大版本升级与诊断日志（Panther / USOShared）",
-        "en": "Windows Upgrade & Diagnostic Logs (Panther / USOShared)"
+        "zh": "Windows 升级迁移与更新诊断日志",
+        "en": "Windows Upgrade & Update Diagnostic Logs"
       },
       "group": {
         "zh": "系统相关",
         "en": "System"
       },
       "description": {
-        "zh": "清理系统升级迁移阶段留在 C:\\Windows\\Panther、USOShared\\Logs 的日志以及 LiveKernelReports 核崩溃转储。",
-        "en": "Clears Windows feature upgrade logs in Panther/USOShared and LiveKernelReports dumps."
+        "zh": "清理系统大版本升级迁移及 Windows Update 在 Panther、Logs\\MoSetup 与 USOShared\\Logs 留下的安装诊断日志。",
+        "en": "Clears Windows feature upgrade and update diagnostic logs in Panther, Logs\\MoSetup, and USOShared\\Logs."
       },
       "warning": null,
       "level": 2,
@@ -5580,38 +5743,28 @@
       "source": "win11-modern",
       "scans": [
         {
-          "work": 1,
+          "work": 10,
           "scan_type": null,
           "name_override": null,
           "description_override": null,
           "warning_override": null,
           "applicable": {
-            "type": "And",
+            "type": "Or",
             "children": [
               {
-                "type": "OSVersion",
-                "compare": ">=",
-                "version": "10.0"
+                "type": "FileExist",
+                "file_path": "%SystemRoot%\\Panther",
+                "wow64": null
               },
               {
-                "type": "Or",
-                "children": [
-                  {
-                    "type": "FileExist",
-                    "file_path": "%SystemRoot%\\Panther",
-                    "wow64": null
-                  },
-                  {
-                    "type": "FileExist",
-                    "file_path": "%ProgramData%\\USOShared\\Logs",
-                    "wow64": null
-                  },
-                  {
-                    "type": "FileExist",
-                    "file_path": "%SystemRoot%\\LiveKernelReports",
-                    "wow64": null
-                  }
-                ]
+                "type": "FileExist",
+                "file_path": "%ProgramData%\\USOShared\\Logs",
+                "wow64": null
+              },
+              {
+                "type": "FileExist",
+                "file_path": "%SystemRoot%\\Logs\\MoSetup",
+                "wow64": null
               }
             ]
           },
@@ -5640,12 +5793,10 @@
             },
             {
               "type": "General",
-              "root_path": "%SystemRoot%\\LiveKernelReports",
-              "flags": "File",
+              "root_path": "%SystemRoot%\\Logs\\MoSetup",
+              "flags": "Directory|File",
               "id": null,
-              "queries": [
-                "*.dmp"
-              ],
+              "queries": [],
               "excluded": []
             }
           ],
@@ -5662,7 +5813,7 @@
       },
       "group": {
         "zh": "临时文件",
-        "en": "Temprorary Files"
+        "en": "Temporary Files"
       },
       "description": {
         "zh": "清理桌面软件内置浏览器组件（CEF/WebView）缓存及 CrashReportClient / Crashpad 崩溃日志。",
@@ -5897,7 +6048,7 @@
             "en": "Choose how the Cortana is shown on taskbar"
           },
           "item_type": "Combo",
-          "source": "official-1002.2",
+          "source": "dismnext-core",
           "applicable": {
             "type": "OSVersion",
             "compare": ">=",
@@ -6161,7 +6312,7 @@
             "en": "Hide \"Task View\" button"
           },
           "item_type": "CheckBox",
-          "source": "official-1002.2",
+          "source": "dismnext-core",
           "applicable": {
             "type": "OSVersion",
             "compare": ">=",
@@ -6270,11 +6421,11 @@
         {
           "id": "opt-003",
           "name": {
-            "zh": "隐藏操作中心任务栏托盘（by Windows 10优化辅助工具）",
-            "en": "Hide Action Center tray (by Windows 10 optimization aids)"
+            "zh": "隐藏操作中心任务栏托盘",
+            "en": "Hide Action Center tray"
           },
           "item_type": "CheckBox",
-          "source": "official-1002.2",
+          "source": "dismnext-core",
           "applicable": {
             "type": "And",
             "children": [
@@ -6373,11 +6524,11 @@
         {
           "id": "opt-004",
           "name": {
-            "zh": "隐藏操作中心任务栏托盘（by 巧木）",
-            "en": "Hide Action Center tray (by QiaoMu)"
+            "zh": "隐藏操作中心任务栏托盘",
+            "en": "Hide Action Center tray"
           },
           "item_type": "CheckBox",
-          "source": "official-1002.2",
+          "source": "dismnext-core",
           "applicable": {
             "type": "OSVersion",
             "compare": ">=",
@@ -6473,7 +6624,7 @@
             "en": "Always show all icons and notifications on the taskbar"
           },
           "item_type": "CheckBox",
-          "source": "official-1002.2",
+          "source": "dismnext-core",
           "applicable": {
             "type": "True"
           },
@@ -6566,7 +6717,7 @@
             "en": "When the taskbar is filled"
           },
           "item_type": "Combo",
-          "source": "official-1002.2",
+          "source": "dismnext-core",
           "applicable": {
             "type": "OSVersion",
             "compare": ">=",
@@ -6830,7 +6981,7 @@
             "en": "Lock Taskbar"
           },
           "item_type": "CheckBox",
-          "source": "official-1002.2",
+          "source": "dismnext-core",
           "applicable": {
             "type": "True"
           },
@@ -6951,7 +7102,7 @@
             "en": "Use small icons on the taskbar"
           },
           "item_type": "CheckBox",
-          "source": "official-1002.2",
+          "source": "dismnext-core",
           "applicable": {
             "type": "True"
           },
@@ -7058,11 +7209,11 @@
         {
           "id": "opt-009",
           "name": {
-            "zh": "隐藏任务栏上的人脉（by 、Cloud.）",
-            "en": "Hide People on Task Bar (by 、Cloud)"
+            "zh": "隐藏任务栏上的人脉",
+            "en": "Hide People on Task Bar"
           },
           "item_type": "CheckBox",
-          "source": "official-1002.2",
+          "source": "dismnext-core",
           "applicable": {
             "type": "OSVersion",
             "compare": ">=",
@@ -7184,11 +7335,11 @@
         {
           "id": "opt-010",
           "name": {
-            "zh": "*隐藏某些SATA硬盘任务栏图标（by 原罪）",
-            "en": "*Hide taskbar icons of some SATA hard disks (by YZ)"
+            "zh": "*隐藏某些SATA硬盘任务栏图标",
+            "en": "*Hide taskbar icons of some SATA hard disks"
           },
           "item_type": "CheckBox",
-          "source": "official-1002.2",
+          "source": "dismnext-core",
           "applicable": {
             "type": "RegExist",
             "key": "HKEY_LOCAL_MACHINE\\SYSTEM\\CurrentControlSet\\Services\\nvata",
@@ -7244,11 +7395,11 @@
         {
           "id": "opt-011",
           "name": {
-            "zh": "任务栏时钟精确到秒（by Luupw3d）",
-            "en": "Taskbar clock did display seconds (by Luupw3d)"
+            "zh": "任务栏时钟精确到秒",
+            "en": "Taskbar clock did display seconds"
           },
           "item_type": "CheckBox",
-          "source": "official-1002.2",
+          "source": "dismnext-core",
           "applicable": {
             "type": "OSVersion",
             "compare": ">=",
@@ -7444,11 +7595,11 @@
         {
           "id": "opt-012",
           "name": {
-            "zh": "显示开始菜单、任务栏、操作中心和标题栏的颜色（by Rambin）",
-            "en": "Show color on Start Menu, Taskbar, Action Center, and Title bar (by Rambin)"
+            "zh": "显示开始菜单、任务栏、操作中心和标题栏的颜色",
+            "en": "Show color on Start Menu, Taskbar, Action Center, and Title bar"
           },
           "item_type": "CheckBox",
-          "source": "official-1002.2",
+          "source": "dismnext-core",
           "applicable": {
             "type": "OSVersion",
             "compare": ">=",
@@ -7629,7 +7780,7 @@
             "en": "Make Start Menu, Taskbar, and Action Center transparent"
           },
           "item_type": "CheckBox",
-          "source": "official-1002.2",
+          "source": "dismnext-core",
           "applicable": {
             "type": "OSVersion",
             "compare": ">=",
@@ -7720,11 +7871,11 @@
         {
           "id": "opt-014",
           "name": {
-            "zh": "使任务栏更透明（by 518516.net）",
-            "en": "Make taskbar more transparent (by 518516.net)"
+            "zh": "使任务栏更透明",
+            "en": "Make taskbar more transparent"
           },
           "item_type": "CheckBox",
-          "source": "official-1002.2",
+          "source": "dismnext-core",
           "applicable": {
             "type": "And",
             "children": [
@@ -7803,11 +7954,11 @@
         {
           "id": "opt-015",
           "name": {
-            "zh": "优化非活动窗口标题栏颜色（by IT之家）",
-            "en": "Optimize the color of the inactive window title bar (by IT Home)"
+            "zh": "优化非活动窗口标题栏颜色",
+            "en": "Optimize the color of the inactive window title bar"
           },
           "item_type": "CheckBox",
-          "source": "official-1002.2",
+          "source": "dismnext-core",
           "applicable": {
             "type": "OSVersion",
             "compare": "==",
@@ -7914,11 +8065,11 @@
         {
           "id": "opt-016",
           "name": {
-            "zh": "*桌面壁纸质量调整为（by IT之家）",
-            "en": "*Change desktop wallpaper quality to (by ITHome)"
+            "zh": "*桌面壁纸质量调整为",
+            "en": "*Change desktop wallpaper quality to"
           },
           "item_type": "Combo",
-          "source": "official-1002.2",
+          "source": "dismnext-core",
           "applicable": {
             "type": "OSVersion",
             "compare": ">=",
@@ -8177,7 +8328,7 @@
             "en": "Change User Account Control (UAC) Behaviour"
           },
           "item_type": "Combo",
-          "source": "official-1002.2",
+          "source": "dismnext-core",
           "applicable": {
             "type": "OSVersion",
             "compare": ">=",
@@ -8463,11 +8614,11 @@
         {
           "id": "opt-018",
           "name": {
-            "zh": "用于内置管理员帐户的管理员批准模式 (by 坏坏小生)",
-            "en": "Administrator approval mode for built-in administrator account (by HuaiHuaiXiaoSheng)"
+            "zh": "用于内置管理员帐户的管理员批准模式",
+            "en": "Administrator approval mode for built-in administrator account"
           },
           "item_type": "CheckBox",
-          "source": "official-1002.2",
+          "source": "dismnext-core",
           "applicable": {
             "type": "True"
           },
@@ -8516,11 +8667,11 @@
         {
           "id": "opt-019",
           "name": {
-            "zh": "关闭Smartscreen应用筛选器（by Windows 10优化辅助工具）",
-            "en": "Disable Smartscreen Filters (by Windows 10 optimization aids)"
+            "zh": "关闭Smartscreen应用筛选器",
+            "en": "Disable Smartscreen Filters"
           },
           "item_type": "CheckBox",
-          "source": "official-1002.2",
+          "source": "dismnext-core",
           "applicable": {
             "type": "And",
             "children": [
@@ -8586,11 +8737,11 @@
         {
           "id": "opt-020",
           "name": {
-            "zh": "关闭Smartscreen应用筛选器（by 、Cloud）",
-            "en": "Disable Smartscreen Filters (by 、Cloud)"
+            "zh": "关闭Smartscreen应用筛选器",
+            "en": "Disable Smartscreen Filters"
           },
           "item_type": "CheckBox",
-          "source": "official-1002.2",
+          "source": "dismnext-core",
           "applicable": {
             "type": "OSVersion",
             "compare": ">=",
@@ -8675,11 +8826,11 @@
         {
           "id": "opt-021",
           "name": {
-            "zh": "关闭打开程序的“安全警告”（by 莫失莫忘）",
-            "en": "Disable safety warning when opening programs (by MoWangMoShi)"
+            "zh": "关闭打开程序的“安全警告”",
+            "en": "Disable safety warning when opening programs"
           },
           "item_type": "CheckBox",
-          "source": "official-1002.2",
+          "source": "dismnext-core",
           "applicable": {
             "type": "True"
           },
@@ -8804,11 +8955,11 @@
         {
           "id": "opt-022",
           "name": {
-            "zh": "禁用Windows Defender（by Windows 10优化辅助工具）",
-            "en": "Disable Windows Defender (by Windows 10 optimization aids)"
+            "zh": "禁用Windows Defender",
+            "en": "Disable Windows Defender"
           },
           "item_type": "CheckBox",
-          "source": "official-1002.2",
+          "source": "dismnext-core",
           "applicable": {
             "type": "True"
           },
@@ -9158,10 +9309,10 @@
           "id": "opt-023",
           "name": {
             "zh": "不允许在开始菜单显示建议",
-            "en": "Disable suggestions in Start Menu"
+            "en": "Disable suggestions in Start Menu"
           },
           "item_type": "CheckBox",
-          "source": "official-1002.2",
+          "source": "dismnext-core",
           "applicable": {
             "type": "And",
             "children": [
@@ -9262,11 +9413,11 @@
         {
           "id": "opt-024",
           "name": {
-            "zh": "不允许在开始菜单显示建议（by powerxing04）",
-            "en": "Disable suggestions in Start Menu (by powerxing04)"
+            "zh": "不允许在开始菜单显示建议",
+            "en": "Disable suggestions in Start Menu"
           },
           "item_type": "CheckBox",
-          "source": "official-1002.2",
+          "source": "dismnext-core",
           "applicable": {
             "type": "OSVersion",
             "compare": ">=",
@@ -9393,11 +9544,11 @@
         {
           "id": "opt-025",
           "name": {
-            "zh": "关闭在应用商店中查找关联应用（by Asoft）",
-            "en": "Disable search for associated applications in Windows Store (by Asoft)"
+            "zh": "关闭在应用商店中查找关联应用",
+            "en": "Disable search for associated applications in Windows Store"
           },
           "item_type": "CheckBox",
-          "source": "official-1002.2",
+          "source": "dismnext-core",
           "applicable": {
             "type": "OSVersion",
             "compare": ">=",
@@ -9448,11 +9599,11 @@
         {
           "id": "opt-026",
           "name": {
-            "zh": "关闭商店应用推广（by 、Cloud.）",
-            "en": "Disable ads from Windows Store (by 、Cloud.)"
+            "zh": "关闭商店应用推广",
+            "en": "Disable ads from Windows Store"
           },
           "item_type": "CheckBox",
-          "source": "official-1002.2",
+          "source": "dismnext-core",
           "applicable": {
             "type": "OSVersion",
             "compare": ">=",
@@ -9581,11 +9732,11 @@
         {
           "id": "opt-027",
           "name": {
-            "zh": "关闭锁屏时的Windows 聚焦推广（by 、Cloud.）",
-            "en": "Disable Windows Focus on lock screen (by 、Cloud.)"
+            "zh": "关闭锁屏时的Windows 聚焦推广",
+            "en": "Disable Windows Focus on lock screen"
           },
           "item_type": "CheckBox",
-          "source": "official-1002.2",
+          "source": "dismnext-core",
           "applicable": {
             "type": "OSVersion",
             "compare": ">=",
@@ -9714,11 +9865,11 @@
         {
           "id": "opt-028",
           "name": {
-            "zh": "关闭“使用Windows时获取技巧和建议”（by 、Cloud.）",
-            "en": "Disable \"Get suggestions when using Windows\" (by 、Cloud.)"
+            "zh": "关闭“使用Windows时获取技巧和建议”",
+            "en": "Disable \"Get suggestions when using Windows\""
           },
           "item_type": "CheckBox",
-          "source": "official-1002.2",
+          "source": "dismnext-core",
           "applicable": {
             "type": "OSVersion",
             "compare": ">=",
@@ -9828,11 +9979,11 @@
         {
           "id": "opt-029",
           "name": {
-            "zh": "关闭“突出显示新安装的程序”（by 溯汐潮）",
-            "en": "Disable \"Highlight newly installed programs\" (by Hell Cabrite)"
+            "zh": "关闭“突出显示新安装的程序”",
+            "en": "Disable \"Highlight newly installed programs\""
           },
           "item_type": "CheckBox",
-          "source": "official-1002.2",
+          "source": "dismnext-core",
           "applicable": {
             "type": "True"
           },
@@ -9939,11 +10090,11 @@
         {
           "id": "opt-030",
           "name": {
-            "zh": "禁止自动安装推荐的应用程序（by IT之家）",
-            "en": "Disable automatic installation of recommended apps (by ITHome)"
+            "zh": "禁止自动安装推荐的应用程序",
+            "en": "Disable automatic installation of recommended apps"
           },
           "item_type": "CheckBox",
-          "source": "official-1002.2",
+          "source": "dismnext-core",
           "applicable": {
             "type": "OSVersion",
             "compare": ">=",
@@ -10071,11 +10222,11 @@
         {
           "id": "opt-031",
           "name": {
-            "zh": "关闭游戏录制工具（by 、Cloud.）",
-            "en": "Disable game recorder (by 、Cloud.)"
+            "zh": "关闭游戏录制工具",
+            "en": "Disable game recorder"
           },
           "item_type": "CheckBox",
-          "source": "official-1002.2",
+          "source": "dismnext-core",
           "applicable": {
             "type": "OSVersion",
             "compare": ">=",
@@ -10230,11 +10381,11 @@
         {
           "id": "opt-032",
           "name": {
-            "zh": "登录界面默认打开小键盘（by IT之家）",
-            "en": "Enable keypad when login (by ITHome)"
+            "zh": "登录界面默认打开小键盘",
+            "en": "Enable keypad when login"
           },
           "item_type": "CheckBox",
-          "source": "official-1002.2",
+          "source": "dismnext-core",
           "applicable": {
             "type": "True"
           },
@@ -10284,11 +10435,11 @@
         {
           "id": "opt-033",
           "name": {
-            "zh": "关闭OneDrive（by Rambin）",
-            "en": "Disable OneDrive (by Rambin)"
+            "zh": "关闭OneDrive",
+            "en": "Disable OneDrive"
           },
           "item_type": "CheckBox",
-          "source": "official-1002.2",
+          "source": "dismnext-core",
           "applicable": {
             "type": "OSVersion",
             "compare": ">=",
@@ -10343,11 +10494,11 @@
         {
           "id": "opt-034",
           "name": {
-            "zh": "关闭多嘴的小娜（by 朽木）",
-            "en": "Disable Cortana (by XiuMu)"
+            "zh": "关闭多嘴的小娜",
+            "en": "Disable Cortana"
           },
           "item_type": "CheckBox",
-          "source": "official-1002.2",
+          "source": "dismnext-core",
           "applicable": {
             "type": "OSVersion",
             "compare": ">=",
@@ -10398,11 +10549,11 @@
         {
           "id": "opt-035",
           "name": {
-            "zh": "显示首次登录动画（by intionwun & 组策略编辑器）",
-            "en": "Show-Enable First Logon Animation (by intionwun & Group Policy Editor)"
+            "zh": "显示首次登录动画",
+            "en": "Show-Enable First Logon Animation"
           },
           "item_type": "CheckBox",
-          "source": "official-1002.2",
+          "source": "dismnext-core",
           "applicable": {
             "type": "OSVersion",
             "compare": ">=",
@@ -11063,7 +11214,7 @@
             "en": "Open File Explorer to This PC"
           },
           "item_type": "CheckBox",
-          "source": "official-1002.2",
+          "source": "dismnext-core",
           "applicable": {
             "type": "OSVersion",
             "compare": ">=",
@@ -11196,7 +11347,7 @@
             "en": "Show extensions for all file types"
           },
           "item_type": "CheckBox",
-          "source": "official-1002.2",
+          "source": "dismnext-core",
           "applicable": {
             "type": "True"
           },
@@ -11307,7 +11458,7 @@
             "en": "Show all Hide files"
           },
           "item_type": "CheckBox",
-          "source": "official-1002.2",
+          "source": "dismnext-core",
           "applicable": {
             "type": "True"
           },
@@ -11486,7 +11637,7 @@
             "en": "Remove Arrows on Shortcut Icons"
           },
           "item_type": "CheckBox",
-          "source": "official-1002.2",
+          "source": "dismnext-core",
           "applicable": {
             "type": "True"
           },
@@ -11544,7 +11695,7 @@
             "en": "Hide UAC buckler"
           },
           "item_type": "CheckBox",
-          "source": "official-1002.2",
+          "source": "dismnext-core",
           "applicable": {
             "type": "True"
           },
@@ -11616,11 +11767,11 @@
         {
           "id": "opt-041",
           "name": {
-            "zh": "隐藏NTFS蓝色双箭头压缩标识（by IT之家）",
-            "en": "Hide NTFS compression blue double arrow icon overlay (by IT Home)"
+            "zh": "隐藏NTFS蓝色双箭头压缩标识",
+            "en": "Hide NTFS compression blue double arrow icon overlay"
           },
           "item_type": "CheckBox",
-          "source": "official-1002.2",
+          "source": "dismnext-core",
           "applicable": {
             "type": "OSVersion",
             "compare": ">=",
@@ -11694,11 +11845,11 @@
         {
           "id": "opt-042",
           "name": {
-            "zh": "shift右击时显示在此处打开命令窗口（by sandtechnology）",
+            "zh": "shift右击时显示在此处打开命令窗口",
             "en": "Show 'Open command window here' on Shift+Right Click"
           },
           "item_type": "CheckBox",
-          "source": "official-1002.2",
+          "source": "dismnext-core",
           "applicable": {
             "type": "OSVersion",
             "compare": ">=",
@@ -11780,11 +11931,11 @@
         {
           "id": "opt-043",
           "name": {
-            "zh": "创建快捷方式时不添\"快捷方式\"文字（by 518516.net）",
-            "en": "Prevent adding the suffix \"Shortcut\" when you create a shortcut (by 518516.net)"
+            "zh": "创建快捷方式时不添\"快捷方式\"文字",
+            "en": "Prevent adding the suffix \"Shortcut\" when you create a shortcut"
           },
           "item_type": "CheckBox",
-          "source": "official-1002.2",
+          "source": "dismnext-core",
           "applicable": {
             "type": "True"
           },
@@ -11875,7 +12026,7 @@
             "en": "Hide Desktop, Documents, Downloads, Music, Pictures, Videos folders in This PC"
           },
           "item_type": "CheckBox",
-          "source": "official-1002.2",
+          "source": "dismnext-core",
           "applicable": {
             "type": "And",
             "children": [
@@ -12325,7 +12476,7 @@
             "en": "Hide Desktop, Documents, Downloads, Music, Pictures, Videos folders in This PC"
           },
           "item_type": "CheckBox",
-          "source": "official-1002.2",
+          "source": "dismnext-core",
           "applicable": {
             "type": "And",
             "children": [
@@ -12792,11 +12943,11 @@
         {
           "id": "opt-046",
           "name": {
-            "zh": "隐藏此电脑中视频、图片、文档、下载、音乐、桌面、3D对象七个文件夹（by 、Cloud.）",
-            "en": "Hide 3D Objects, Desktop, Documents, Download, Music, Pictures, Videos in Computer (by 、Cloud)"
+            "zh": "隐藏此电脑中视频、图片、文档、下载、音乐、桌面、3D对象七个文件夹",
+            "en": "Hide 3D Objects, Desktop, Documents, Download, Music, Pictures, Videos in Computer"
           },
           "item_type": "CheckBox",
-          "source": "official-1002.2",
+          "source": "dismnext-core",
           "applicable": {
             "type": "And",
             "children": [
@@ -13320,7 +13471,7 @@
             "en": "*Remove the watermark of Education Edition"
           },
           "item_type": "CheckBox",
-          "source": "official-1002.2",
+          "source": "dismnext-core",
           "applicable": {
             "type": "And",
             "children": [
@@ -13439,11 +13590,11 @@
         {
           "id": "opt-048",
           "name": {
-            "zh": "收起资源管理器功能区（by Rambin）",
-            "en": "Minimize the Ribbon (by Rambin)"
+            "zh": "收起资源管理器功能区",
+            "en": "Minimize the Ribbon"
           },
           "item_type": "CheckBox",
-          "source": "official-1002.2",
+          "source": "dismnext-core",
           "applicable": {
             "type": "OSVersion",
             "compare": ">=",
@@ -13589,11 +13740,11 @@
         {
           "id": "opt-049",
           "name": {
-            "zh": "禁止自动播放（by Rambin）",
-            "en": "Disable AutoPlay (by Rambin)"
+            "zh": "禁止自动播放",
+            "en": "Disable AutoPlay"
           },
           "item_type": "CheckBox",
-          "source": "official-1002.2",
+          "source": "dismnext-core",
           "applicable": {
             "type": "True"
           },
@@ -13700,11 +13851,11 @@
         {
           "id": "opt-050",
           "name": {
-            "zh": "在单独的进程中打开文件夹窗口（by 一叶微风TM）",
-            "en": "Launch folder windows in a separate process (by YiYieWeiFeng TM)"
+            "zh": "在单独的进程中打开文件夹窗口",
+            "en": "Launch folder windows in a separate process"
           },
           "item_type": "CheckBox",
-          "source": "official-1002.2",
+          "source": "dismnext-core",
           "applicable": {
             "type": "True"
           },
@@ -13793,11 +13944,11 @@
         {
           "id": "opt-051",
           "name": {
-            "zh": "始终显示菜单栏（by 一叶微风TM）",
-            "en": "Always show the menu bar (by YiYieWeiFeng TM)"
+            "zh": "始终显示菜单栏",
+            "en": "Always show the menu bar"
           },
           "item_type": "CheckBox",
-          "source": "official-1002.2",
+          "source": "dismnext-core",
           "applicable": {
             "type": "OSVersion",
             "compare": "<=",
@@ -13906,11 +14057,11 @@
         {
           "id": "opt-052",
           "name": {
-            "zh": "资源管理器窗口最小化时显示完整路径（by 原罪）",
-            "en": "Show the complete path if Windows Explorer is minimized (by YZ)"
+            "zh": "资源管理器窗口最小化时显示完整路径",
+            "en": "Show the complete path if Windows Explorer is minimized"
           },
           "item_type": "CheckBox",
-          "source": "official-1002.2",
+          "source": "dismnext-core",
           "applicable": {
             "type": "True"
           },
@@ -13999,11 +14150,11 @@
         {
           "id": "opt-053",
           "name": {
-            "zh": "关闭视频文件预览，提高资源管理器响应速度（by ‍莫失莫忘）",
-            "en": "Disable video file preview to improve the overall response time of Windows Explorer (by MoWangMoShi)"
+            "zh": "关闭视频文件预览，提高资源管理器响应速度",
+            "en": "Disable video file preview to improve the overall response time of Windows Explorer"
           },
           "item_type": "CheckBox",
-          "source": "official-1002.2",
+          "source": "dismnext-core",
           "applicable": {
             "type": "Or",
             "children": [
@@ -14576,11 +14727,11 @@
         {
           "id": "opt-054",
           "name": {
-            "zh": "关闭音乐文件图片预览，提高资源管理器响应速度（by ‍莫失莫忘）",
-            "en": "Disable audio file preview to improve the overall response time of Windows Explorer (by MoWangMoShi)"
+            "zh": "关闭音乐文件图片预览，提高资源管理器响应速度",
+            "en": "Disable audio file preview to improve the overall response time of Windows Explorer"
           },
           "item_type": "CheckBox",
-          "source": "official-1002.2",
+          "source": "dismnext-core",
           "applicable": {
             "type": "Or",
             "children": [
@@ -14748,11 +14899,11 @@
         {
           "id": "opt-055",
           "name": {
-            "zh": "快速访问不显示常用文件夹（by 溯汐潮）",
-            "en": "Do not display Frequently Used Folders in Quick Access (by Hell Cabrite)"
+            "zh": "快速访问不显示常用文件夹",
+            "en": "Do not display Frequently Used Folders in Quick Access"
           },
           "item_type": "CheckBox",
-          "source": "official-1002.2",
+          "source": "dismnext-core",
           "applicable": {
             "type": "OSVersion",
             "compare": ">=",
@@ -14859,11 +15010,11 @@
         {
           "id": "opt-056",
           "name": {
-            "zh": "快速访问不显示最近使用的文件（by 溯汐潮）",
-            "en": "Do not display Recently Used Files in Quick Access (by Hell Cabrite)"
+            "zh": "快速访问不显示最近使用的文件",
+            "en": "Do not display Recently Used Files in Quick Access"
           },
           "item_type": "CheckBox",
-          "source": "official-1002.2",
+          "source": "dismnext-core",
           "applicable": {
             "type": "OSVersion",
             "compare": ">=",
@@ -14970,11 +15121,11 @@
         {
           "id": "opt-057",
           "name": {
-            "zh": "将语言栏隐藏到任务栏（by 溯汐潮）",
-            "en": "Hide Language Bar to taskbar (by Hell Cabrite)"
+            "zh": "将语言栏隐藏到任务栏",
+            "en": "Hide Language Bar to taskbar"
           },
           "item_type": "CheckBox",
-          "source": "official-1002.2",
+          "source": "dismnext-core",
           "applicable": {
             "type": "True"
           },
@@ -15109,11 +15260,11 @@
         {
           "id": "opt-058",
           "name": {
-            "zh": "隐藏语言栏上的帮助按钮（by 溯汐潮）",
-            "en": "Hide Help button on Language Bar (by Hell Cabrite)"
+            "zh": "隐藏语言栏上的帮助按钮",
+            "en": "Hide Help button on Language Bar"
           },
           "item_type": "CheckBox",
-          "source": "official-1002.2",
+          "source": "dismnext-core",
           "applicable": {
             "type": "True"
           },
@@ -15200,11 +15351,11 @@
         {
           "id": "opt-059",
           "name": {
-            "zh": "禁用Win11加入的新右键菜单，默认显示更多选项（by LittleCircleOO）",
+            "zh": "禁用Win11加入的新右键菜单，默认显示更多选项",
             "en": "Restore Classic Context Menu on Windows 11 (Show More Options)"
           },
           "item_type": "CheckBox",
-          "source": "official-1002.2",
+          "source": "dismnext-core",
           "applicable": {
             "type": "OSVersion",
             "compare": ">=",
@@ -15452,11 +15603,11 @@
         {
           "id": "opt-060",
           "name": {
-            "zh": "将桌面右键菜单“显示设置”调整为Windows 7模式（by 大胖子技术员）",
-            "en": "Change \"Display Settings\" in desktop right click menu to Windows 7 mode (by dpzjsy)"
+            "zh": "将桌面右键菜单“显示设置”调整为Windows 7模式",
+            "en": "Change \"Display Settings\" in desktop right click menu to Windows 7 mode"
           },
           "item_type": "CheckBox",
-          "source": "official-1002.2",
+          "source": "dismnext-core",
           "applicable": {
             "type": "And",
             "children": [
@@ -15574,11 +15725,11 @@
         {
           "id": "opt-061",
           "name": {
-            "zh": "将桌面右键菜单“个性化”调整为Windows 7模式（by 大胖子技术员）",
-            "en": "Change \"Personalize\" in desktop right click menu to Windows 7 mode (by dpzjsy)"
+            "zh": "将桌面右键菜单“个性化”调整为Windows 7模式",
+            "en": "Change \"Personalize\" in desktop right click menu to Windows 7 mode"
           },
           "item_type": "CheckBox",
-          "source": "official-1002.2",
+          "source": "dismnext-core",
           "applicable": {
             "type": "And",
             "children": [
@@ -15677,11 +15828,11 @@
         {
           "id": "opt-062",
           "name": {
-            "zh": "将“音量调节”调整为Windows 7模式（by 溯汐潮）",
-            "en": "Change \"Volume Adjustment\" to Windows 7 mode (by Hell Cabrite)"
+            "zh": "将“音量调节”调整为Windows 7模式",
+            "en": "Change \"Volume Adjustment\" to Windows 7 mode"
           },
           "item_type": "CheckBox",
-          "source": "official-1002.2",
+          "source": "dismnext-core",
           "applicable": {
             "type": "True"
           },
@@ -15730,11 +15881,11 @@
         {
           "id": "opt-063",
           "name": {
-            "zh": "将“右键菜单”调整为Windows 7模式（by Silence）",
-            "en": "Change right click menu to Windows 7 mode (by Silence)"
+            "zh": "将“右键菜单”调整为Windows 7模式",
+            "en": "Change right click menu to Windows 7 mode"
           },
           "item_type": "CheckBox",
-          "source": "official-1002.2",
+          "source": "dismnext-core",
           "applicable": {
             "type": "OSVersion",
             "compare": ">=",
@@ -15797,11 +15948,11 @@
         {
           "id": "opt-064",
           "name": {
-            "zh": "在桌面显示我的电脑（by Rambin）",
-            "en": "Display My Computer on the desktop (by Rambin)"
+            "zh": "在桌面显示我的电脑",
+            "en": "Display My Computer on the desktop"
           },
           "item_type": "Combo",
-          "source": "official-1002.2",
+          "source": "dismnext-core",
           "applicable": {
             "type": "True"
           },
@@ -16114,11 +16265,11 @@
         {
           "id": "opt-065",
           "name": {
-            "zh": "在桌面显示回收站（by Rambin）",
-            "en": "Display Recycle Bin on the desktop (by Rambin)"
+            "zh": "在桌面显示回收站",
+            "en": "Display Recycle Bin on the desktop"
           },
           "item_type": "Combo",
-          "source": "official-1002.2",
+          "source": "dismnext-core",
           "applicable": {
             "type": "True"
           },
@@ -16431,11 +16582,11 @@
         {
           "id": "opt-066",
           "name": {
-            "zh": "在桌面显示控制面板（by Rambin）",
-            "en": "Display Control Panel on the desktop (by Rambin)"
+            "zh": "在桌面显示控制面板",
+            "en": "Display Control Panel on the desktop"
           },
           "item_type": "Combo",
-          "source": "official-1002.2",
+          "source": "dismnext-core",
           "applicable": {
             "type": "True"
           },
@@ -16748,11 +16899,11 @@
         {
           "id": "opt-067",
           "name": {
-            "zh": "在桌面显示用户文件夹（by Rambin）",
-            "en": "Display User Folders on the desktop (by Rambin)"
+            "zh": "在桌面显示用户文件夹",
+            "en": "Display User Folders on the desktop"
           },
           "item_type": "Combo",
-          "source": "official-1002.2",
+          "source": "dismnext-core",
           "applicable": {
             "type": "True"
           },
@@ -17065,11 +17216,11 @@
         {
           "id": "opt-068",
           "name": {
-            "zh": "在桌面显示网络（by Rambin）",
-            "en": "Display Network on the desktop (by Rambin)"
+            "zh": "在桌面显示网络",
+            "en": "Display Network on the desktop"
           },
           "item_type": "Combo",
-          "source": "official-1002.2",
+          "source": "dismnext-core",
           "applicable": {
             "type": "True"
           },
@@ -17382,11 +17533,11 @@
         {
           "id": "opt-069",
           "name": {
-            "zh": "在桌面显示库（by Rambin）",
-            "en": "Display Library on the desktop (by Rambin)"
+            "zh": "在桌面显示库",
+            "en": "Display Library on the desktop"
           },
           "item_type": "Combo",
-          "source": "official-1002.2",
+          "source": "dismnext-core",
           "applicable": {
             "type": "True"
           },
@@ -17715,7 +17866,7 @@
             "en": "Hide \"Library\" from Windows Explorer sidetab"
           },
           "item_type": "CheckBox",
-          "source": "official-1002.2",
+          "source": "dismnext-core",
           "applicable": {
             "type": "RegExist",
             "key": "HKEY_CLASSES_ROOT\\CLSID\\{031E4825-7B94-4dc3-B131-E946B44C8DD5}\\ShellFolder",
@@ -17809,7 +17960,7 @@
             "en": "Hide \"Quick Access\" from Windows Explorer sidetab"
           },
           "item_type": "CheckBox",
-          "source": "official-1002.2",
+          "source": "dismnext-core",
           "applicable": {
             "type": "RegExist",
             "key": "HKEY_CLASSES_ROOT\\CLSID\\{323CA680-C24D-4099-B94D-446DD2D7249E}\\ShellFolder",
@@ -17903,7 +18054,7 @@
             "en": "Hide \"Family Group\" from Windows Explorer sidetab"
           },
           "item_type": "CheckBox",
-          "source": "official-1002.2",
+          "source": "dismnext-core",
           "applicable": {
             "type": "And",
             "children": [
@@ -18007,7 +18158,7 @@
             "en": "Hide \"Network\" from Windows Explorer sidetab"
           },
           "item_type": "CheckBox",
-          "source": "official-1002.2",
+          "source": "dismnext-core",
           "applicable": {
             "type": "RegExist",
             "key": "HKEY_CLASSES_ROOT\\CLSID\\{F02C1A0D-BE21-4350-88B0-7367FC96EF3C}\\ShellFolder",
@@ -18097,11 +18248,11 @@
         {
           "id": "opt-074",
           "name": {
-            "zh": "隐藏资源管理器导航窗口中的可移动设备（by 莫失莫忘）",
-            "en": "Hide removable devices in navigation pane of Windows Explorer (by MoWangMoShi)"
+            "zh": "隐藏资源管理器导航窗口中的可移动设备",
+            "en": "Hide removable devices in navigation pane of Windows Explorer"
           },
           "item_type": "CheckBox",
-          "source": "official-1002.2",
+          "source": "dismnext-core",
           "applicable": {
             "type": "RegExist",
             "key": "HKEY_CLASSES_ROOT\\CLSID\\{F5FB2C77-0E2F-4A16-A381-3E560C68BC83}\\ShellFolder",
@@ -18191,11 +18342,11 @@
         {
           "id": "opt-075",
           "name": {
-            "zh": "隐藏资源管理器导航窗口中的OneDrive（by 莫失莫忘）",
-            "en": "Hide OneDrive in navigation pane of Windows Explorer (by MoWangMoShi)"
+            "zh": "隐藏资源管理器导航窗口中的OneDrive",
+            "en": "Hide OneDrive in navigation pane of Windows Explorer"
           },
           "item_type": "CheckBox",
-          "source": "official-1002.2",
+          "source": "dismnext-core",
           "applicable": {
             "type": "RegExist",
             "key": "HKEY_CLASSES_ROOT\\CLSID\\{018D5C66-4533-4307-9B53-224DE2ED1FE6}\\ShellFolder",
@@ -18285,11 +18436,11 @@
         {
           "id": "opt-076",
           "name": {
-            "zh": "隐藏资源管理器导航窗口中的快速访问（by starP）",
-            "en": "Hide Quick Access in navigation pane of Windows Explorer (by starP)"
+            "zh": "隐藏资源管理器导航窗口中的快速访问",
+            "en": "Hide Quick Access in navigation pane of Windows Explorer"
           },
           "item_type": "CheckBox",
-          "source": "official-1002.2",
+          "source": "dismnext-core",
           "applicable": {
             "type": "RegExist",
             "key": "HKEY_CLASSES_ROOT\\CLSID\\{679f85cb-0220-4080-b29b-5540cc05aab6}\\ShellFolder",
@@ -18460,11 +18611,11 @@
         {
           "id": "opt-077",
           "name": {
-            "zh": "禁用桌面的英特尔集显右键菜单（by 莫失莫忘）",
-            "en": "Disable Intel integrated graphics context menu (by MoWangMoShi)"
+            "zh": "禁用桌面的英特尔集显右键菜单",
+            "en": "Disable Intel integrated graphics context menu"
           },
           "item_type": "CheckBox",
-          "source": "official-1002.2",
+          "source": "dismnext-core",
           "applicable": {
             "type": "Or",
             "children": [
@@ -18632,11 +18783,11 @@
         {
           "id": "opt-078",
           "name": {
-            "zh": "禁用可执行文件的“兼容性疑难解答”右键菜单（by 莫失莫忘）",
-            "en": "Disable \"Compatibility troubleshooting\" context menu on execuables (by MoWangMoShi)"
+            "zh": "禁用可执行文件的“兼容性疑难解答”右键菜单",
+            "en": "Disable \"Compatibility troubleshooting\" context menu on execuables"
           },
           "item_type": "CheckBox",
-          "source": "official-1002.2",
+          "source": "dismnext-core",
           "applicable": {
             "type": "Or",
             "children": [
@@ -18894,11 +19045,11 @@
         {
           "id": "opt-079",
           "name": {
-            "zh": "禁用文件、文件夹以及磁盘的“使用Windows Defender扫描”右键菜单（by 莫失莫忘）",
-            "en": "Disable \"Scan by Windows Defender\" context menu on files, folders and disks (by MoWangMoShi)"
+            "zh": "禁用文件、文件夹以及磁盘的“使用Windows Defender扫描”右键菜单",
+            "en": "Disable \"Scan by Windows Defender\" context menu on files, folders and disks"
           },
           "item_type": "CheckBox",
-          "source": "official-1002.2",
+          "source": "dismnext-core",
           "applicable": {
             "type": "Or",
             "children": [
@@ -19066,11 +19217,11 @@
         {
           "id": "opt-080",
           "name": {
-            "zh": "禁用磁盘的“启用Bitlocker”右键菜单（by 莫失莫忘）",
-            "en": "Disable the \"Enable Bitlocker\" context menu on disks (by MoWangMoShi)"
+            "zh": "禁用磁盘的“启用Bitlocker”右键菜单",
+            "en": "Disable the \"Enable Bitlocker\" context menu on disks"
           },
           "item_type": "CheckBox",
-          "source": "official-1002.2",
+          "source": "dismnext-core",
           "applicable": {
             "type": "Or",
             "children": [
@@ -19193,11 +19344,11 @@
         {
           "id": "opt-081",
           "name": {
-            "zh": "禁用磁盘的“以便携式方式打开”右键菜单（by 莫失莫忘）",
-            "en": "Disable the \"Open as portable device\" context menu on disks (by MoWangMoShi)"
+            "zh": "禁用磁盘的“以便携式方式打开”右键菜单",
+            "en": "Disable the \"Open as portable device\" context menu on disks"
           },
           "item_type": "CheckBox",
-          "source": "official-1002.2",
+          "source": "dismnext-core",
           "applicable": {
             "type": "Or",
             "children": [
@@ -19274,7 +19425,7 @@
             "en": "Disable the \"Disk Copy\" context menu on disks"
           },
           "item_type": "CheckBox",
-          "source": "official-1002.2",
+          "source": "dismnext-core",
           "applicable": {
             "type": "Or",
             "children": [
@@ -19347,11 +19498,11 @@
         {
           "id": "opt-083",
           "name": {
-            "zh": "禁用新建的“联系人”右键菜单（by 莫失莫忘）",
-            "en": "Disable \"New contact\" context menu (by MoWangMoShi)"
+            "zh": "禁用新建的“联系人”右键菜单",
+            "en": "Disable \"New contact\" context menu"
           },
           "item_type": "CheckBox",
-          "source": "official-1002.2",
+          "source": "dismnext-core",
           "applicable": {
             "type": "Or",
             "children": [
@@ -19428,7 +19579,7 @@
             "en": "Disable \"Briefcase\" context menu on new, files and folders"
           },
           "item_type": "CheckBox",
-          "source": "official-1002.2",
+          "source": "dismnext-core",
           "applicable": {
             "type": "Or",
             "children": [
@@ -19596,11 +19747,11 @@
         {
           "id": "opt-085",
           "name": {
-            "zh": "禁用新建“ZIP/RAR文件”右键菜单（by 莫失莫忘）",
-            "en": "Disable \"New ZIP/RAR file\" context menu (by MoWangMoShi)"
+            "zh": "禁用新建“ZIP/RAR文件”右键菜单",
+            "en": "Disable \"New ZIP/RAR file\" context menu"
           },
           "item_type": "CheckBox",
-          "source": "official-1002.2",
+          "source": "dismnext-core",
           "applicable": {
             "type": "Or",
             "children": [
@@ -19723,11 +19874,11 @@
         {
           "id": "opt-086",
           "name": {
-            "zh": "禁用文件、磁盘以及属性的“还原以前版本”右键菜单（by 莫失莫忘）",
-            "en": "Disable \"Revert to previous version\" context menu on files, disks and properties (by MoWangMoShi)"
+            "zh": "禁用文件、磁盘以及属性的“还原以前版本”右键菜单",
+            "en": "Disable \"Revert to previous version\" context menu on files, disks and properties"
           },
           "item_type": "CheckBox",
-          "source": "official-1002.2",
+          "source": "dismnext-core",
           "applicable": {
             "type": "Or",
             "children": [
@@ -20214,7 +20365,7 @@
             "en": "Disable \"Widget\" context menu"
           },
           "item_type": "CheckBox",
-          "source": "official-1002.2",
+          "source": "dismnext-core",
           "applicable": {
             "type": "Or",
             "children": [
@@ -20336,7 +20487,7 @@
             "en": "Disable \"Sync Shared Folders\" context menu on files, folders, desktop and all objects"
           },
           "item_type": "CheckBox",
-          "source": "official-1002.2",
+          "source": "dismnext-core",
           "applicable": {
             "type": "Or",
             "children": [
@@ -20598,7 +20749,7 @@
             "en": "Disable the \"Burn to CD\" context menu on disks"
           },
           "item_type": "CheckBox",
-          "source": "official-1002.2",
+          "source": "dismnext-core",
           "applicable": {
             "type": "Or",
             "children": [
@@ -20675,7 +20826,7 @@
             "en": "Disable the \"Share\" context menu on all objects"
           },
           "item_type": "CheckBox",
-          "source": "official-1002.2",
+          "source": "dismnext-core",
           "applicable": {
             "type": "Or",
             "children": [
@@ -20752,7 +20903,7 @@
             "en": "Disable \"Share\" context menu on files, folders, desktop, disks and libraries"
           },
           "item_type": "CheckBox",
-          "source": "official-1002.2",
+          "source": "dismnext-core",
           "applicable": {
             "type": "And",
             "children": [
@@ -21033,7 +21184,7 @@
             "en": "Disable \"Grant Access\" context menu on files, folders, desktop, disks and libraries"
           },
           "item_type": "CheckBox",
-          "source": "official-1002.2",
+          "source": "dismnext-core",
           "applicable": {
             "type": "And",
             "children": [
@@ -21309,7 +21460,7 @@
             "en": "Disable the \"Enable off-line use\" context menu on folders and all objects"
           },
           "item_type": "CheckBox",
-          "source": "official-1002.2",
+          "source": "dismnext-core",
           "applicable": {
             "type": "Or",
             "children": [
@@ -21481,7 +21632,7 @@
             "en": "Disable \"Pin To Quick Access\" context menu on directory"
           },
           "item_type": "CheckBox",
-          "source": "official-1002.2",
+          "source": "dismnext-core",
           "applicable": {
             "type": "Or",
             "children": [
@@ -21558,7 +21709,7 @@
             "en": "Disable \"OneDrive File Syncing\" context menu on file"
           },
           "item_type": "CheckBox",
-          "source": "official-1002.2",
+          "source": "dismnext-core",
           "applicable": {
             "type": "Or",
             "children": [
@@ -21635,7 +21786,7 @@
             "en": "Disable \"Working folder\" context menu on file, directory, desktop, all objects"
           },
           "item_type": "CheckBox",
-          "source": "official-1002.2",
+          "source": "dismnext-core",
           "applicable": {
             "type": "Or",
             "children": [
@@ -21848,11 +21999,11 @@
         {
           "id": "opt-097",
           "name": {
-            "zh": "禁用文件的“View 3D”右键菜单（by Cloud）",
-            "en": "Disable file context menu item \"View 3D\" (by Cloud)"
+            "zh": "禁用文件的“View 3D”右键菜单",
+            "en": "Disable file context menu item \"View 3D\""
           },
           "item_type": "CheckBox",
-          "source": "official-1002.2",
+          "source": "dismnext-core",
           "applicable": {
             "type": "Or",
             "children": [
@@ -22020,11 +22171,11 @@
         {
           "id": "opt-098",
           "name": {
-            "zh": "禁用文件的“画图 3D”右键菜单（by Cloud）",
-            "en": "Disable file context menu item \"Paint 3D\" (by Cloud)"
+            "zh": "禁用文件的“画图 3D”右键菜单",
+            "en": "Disable file context menu item \"Paint 3D\""
           },
           "item_type": "CheckBox",
-          "source": "official-1002.2",
+          "source": "dismnext-core",
           "applicable": {
             "type": "Or",
             "children": [
@@ -22552,11 +22703,11 @@
         {
           "id": "opt-099",
           "name": {
-            "zh": "禁用文件夹的“包含到库中”右键菜单（by choyri）",
-            "en": "Disable \"Included in the library\" context menu on directory (by choyri)"
+            "zh": "禁用文件夹的“包含到库中”右键菜单",
+            "en": "Disable \"Included in the library\" context menu on directory"
           },
           "item_type": "CheckBox",
-          "source": "official-1002.2",
+          "source": "dismnext-core",
           "applicable": {
             "type": "Or",
             "children": [
@@ -22629,11 +22780,11 @@
         {
           "id": "opt-100",
           "name": {
-            "zh": "禁用桌面的“NVIDIA 控制面板”右键菜单（by choyri）",
-            "en": "Disable \"NVIDIA Control Panel\" context menu on desktop (by choyri)"
+            "zh": "禁用桌面的“NVIDIA 控制面板”右键菜单",
+            "en": "Disable \"NVIDIA Control Panel\" context menu on desktop"
           },
           "item_type": "CheckBox",
-          "source": "official-1002.2",
+          "source": "dismnext-core",
           "applicable": {
             "type": "Or",
             "children": [
@@ -22730,11 +22881,11 @@
         {
           "id": "opt-101",
           "name": {
-            "zh": "阻止Microsoft Edge“首次运行”欢迎页面（by IT之家）",
-            "en": "Prevent Microsoft Edge from opening \"First Running\" (by ITHome)"
+            "zh": "阻止Microsoft Edge“首次运行”欢迎页面",
+            "en": "Prevent Microsoft Edge from opening \"First Running\""
           },
           "item_type": "CheckBox",
-          "source": "official-1002.2",
+          "source": "dismnext-core",
           "applicable": {
             "type": "True"
           },
@@ -22787,7 +22938,7 @@
             "en": "Disable Adobe Flash right click"
           },
           "item_type": "CheckBox",
-          "source": "official-1002.2",
+          "source": "dismnext-core",
           "applicable": {
             "type": "OSVersion",
             "compare": ">=",
@@ -22853,11 +23004,11 @@
         {
           "id": "opt-103",
           "name": {
-            "zh": "关闭多个选项卡时不发出警告（by 一叶微风TM）",
-            "en": "Don't warn me when closing multiple tabs (by YiYieWeiFeng TM)"
+            "zh": "关闭多个选项卡时不发出警告",
+            "en": "Don't warn me when closing multiple tabs"
           },
           "item_type": "CheckBox",
-          "source": "official-1002.2",
+          "source": "dismnext-core",
           "applicable": {
             "type": "True"
           },
@@ -22946,11 +23097,11 @@
         {
           "id": "opt-104",
           "name": {
-            "zh": "当创建新选项卡时，始终切换到新选项卡（by 一叶微风TM）",
-            "en": "Always switch to new tabs when they are created (by YiYieWeiFeng TM)"
+            "zh": "当创建新选项卡时，始终切换到新选项卡",
+            "en": "Always switch to new tabs when they are created"
           },
           "item_type": "CheckBox",
-          "source": "official-1002.2",
+          "source": "dismnext-core",
           "applicable": {
             "type": "True"
           },
@@ -23039,11 +23190,11 @@
         {
           "id": "opt-105",
           "name": {
-            "zh": "其他程序从当前窗口的新选项卡打开连接（by 一叶微风TM）",
-            "en": "Open links from other programs in a new tab in the current window (by YiYieWeiFeng TM)"
+            "zh": "其他程序从当前窗口的新选项卡打开连接",
+            "en": "Open links from other programs in a new tab in the current window"
           },
           "item_type": "CheckBox",
-          "source": "official-1002.2",
+          "source": "dismnext-core",
           "applicable": {
             "type": "True"
           },
@@ -23132,11 +23283,11 @@
         {
           "id": "opt-106",
           "name": {
-            "zh": "以兼容性视图中显示所有网站（by 一叶微风TM）",
-            "en": "Display all websites in Compatibility view (by YiYieWeiFeng TM)"
+            "zh": "以兼容性视图中显示所有网站",
+            "en": "Display all websites in Compatibility view"
           },
           "item_type": "CheckBox",
-          "source": "official-1002.2",
+          "source": "dismnext-core",
           "applicable": {
             "type": "True"
           },
@@ -23225,11 +23376,11 @@
         {
           "id": "opt-107",
           "name": {
-            "zh": "启用表单的自动完成功能（by 原罪）",
-            "en": "Enable AutoComplete (by YZ)"
+            "zh": "启用表单的自动完成功能",
+            "en": "Enable AutoComplete"
           },
           "item_type": "CheckBox",
-          "source": "official-1002.2",
+          "source": "dismnext-core",
           "applicable": {
             "type": "True"
           },
@@ -23318,11 +23469,11 @@
         {
           "id": "opt-108",
           "name": {
-            "zh": "关闭建议的网站（by 原罪）",
-            "en": "Turn off Suggested Sites (by YZ)"
+            "zh": "关闭建议的网站",
+            "en": "Turn off Suggested Sites"
           },
           "item_type": "CheckBox",
-          "source": "official-1002.2",
+          "source": "dismnext-core",
           "applicable": {
             "type": "True"
           },
@@ -23411,11 +23562,11 @@
         {
           "id": "opt-109",
           "name": {
-            "zh": "跳过IE首次运行自定义设置（by 原罪、恋人の共鸣）",
-            "en": "Prevent running First Run wizard (by YZ, Lovers vibes)"
+            "zh": "跳过IE首次运行自定义设置",
+            "en": "Prevent running First Run wizard"
           },
           "item_type": "CheckBox",
-          "source": "official-1002.2",
+          "source": "dismnext-core",
           "applicable": {
             "type": "True"
           },
@@ -23627,11 +23778,11 @@
         {
           "id": "opt-110",
           "name": {
-            "zh": "不保存附件的区域信息（by 古畑任三郎）",
-            "en": "Regional information does not save attachments (by niphor)"
+            "zh": "不保存附件的区域信息",
+            "en": "Regional information does not save attachments"
           },
           "item_type": "CheckBox",
-          "source": "official-1002.2",
+          "source": "dismnext-core",
           "applicable": {
             "type": "OSVersion",
             "compare": ">",
@@ -23724,7 +23875,7 @@
             "en": "Enable Enhanced Protected Mode"
           },
           "item_type": "CheckBox",
-          "source": "official-1002.2",
+          "source": "dismnext-core",
           "applicable": {
             "type": "RegExist",
             "key": "HKEY_CURRENT_USER\\Software\\Microsoft\\Internet Explorer\\Main",
@@ -23822,7 +23973,7 @@
             "en": "Enable 64-bit processes for Enhanced Protected Mode"
           },
           "item_type": "CheckBox",
-          "source": "official-1002.2",
+          "source": "dismnext-core",
           "applicable": {
             "type": "And",
             "children": [
@@ -23925,11 +24076,11 @@
         {
           "id": "opt-113",
           "name": {
-            "zh": "锁定Internet Explorer工具栏（by 溯汐潮）",
-            "en": "Lock Internet Explorer toolbar (by Hell Cabrite)"
+            "zh": "锁定Internet Explorer工具栏",
+            "en": "Lock Internet Explorer toolbar"
           },
           "item_type": "CheckBox",
-          "source": "official-1002.2",
+          "source": "dismnext-core",
           "applicable": {
             "type": "True"
           },
@@ -24018,11 +24169,11 @@
         {
           "id": "opt-114",
           "name": {
-            "zh": "将同时可用下载数目调整到 10（by 溯汐潮）",
-            "en": "Adjust number of simultaneous downloads to 10 (by Hell Cabrite)"
+            "zh": "将同时可用下载数目调整到 10",
+            "en": "Adjust number of simultaneous downloads to 10"
           },
           "item_type": "CheckBox",
-          "source": "official-1002.2",
+          "source": "dismnext-core",
           "applicable": {
             "type": "True"
           },
@@ -24175,11 +24326,11 @@
         {
           "id": "opt-115",
           "name": {
-            "zh": "遇到弹出窗口时始终在新选项卡中打开弹出窗口（by 溯汐潮）",
-            "en": "Always display pop-up windows in new tab (by Hell Cabrite)"
+            "zh": "遇到弹出窗口时始终在新选项卡中打开弹出窗口",
+            "en": "Always display pop-up windows in new tab"
           },
           "item_type": "CheckBox",
-          "source": "official-1002.2",
+          "source": "dismnext-core",
           "applicable": {
             "type": "True"
           },
@@ -24266,11 +24417,11 @@
         {
           "id": "opt-116",
           "name": {
-            "zh": "关闭自动更新（by 溯汐潮）",
-            "en": "Disable automatic updates (by Hell Cabrite)"
+            "zh": "关闭自动更新",
+            "en": "Disable automatic updates"
           },
           "item_type": "CheckBox",
-          "source": "official-1002.2",
+          "source": "dismnext-core",
           "applicable": {
             "type": "True"
           },
@@ -24357,11 +24508,11 @@
         {
           "id": "opt-117",
           "name": {
-            "zh": "隐藏Internet Explorer右上角的笑脸反馈按钮（by IT之家）",
-            "en": "Hide feedback smile face top-right in Internet Explorer (by ITHome)"
+            "zh": "隐藏Internet Explorer右上角的笑脸反馈按钮",
+            "en": "Hide feedback smile face top-right in Internet Explorer"
           },
           "item_type": "CheckBox",
-          "source": "official-1002.2",
+          "source": "dismnext-core",
           "applicable": {
             "type": "OSVersion",
             "compare": ">=",
@@ -24468,11 +24619,11 @@
         {
           "id": "opt-118",
           "name": {
-            "zh": "微软拼音默认为英语输入（by Rambin）",
-            "en": "Make IME default mode English (by Rambin)"
+            "zh": "微软拼音默认为英语输入",
+            "en": "Make IME default mode English"
           },
           "item_type": "CheckBox",
-          "source": "official-1002.2",
+          "source": "dismnext-core",
           "applicable": {
             "type": "OSVersion",
             "compare": ">=",
@@ -24563,11 +24714,11 @@
         {
           "id": "opt-119",
           "name": {
-            "zh": "关闭微软拼音云计算（by Rambin）",
-            "en": "Disable Cloud input method (by Rambin)"
+            "zh": "关闭微软拼音云计算",
+            "en": "Disable Cloud input method"
           },
           "item_type": "CheckBox",
-          "source": "official-1002.2",
+          "source": "dismnext-core",
           "applicable": {
             "type": "True"
           },
@@ -24656,11 +24807,11 @@
         {
           "id": "opt-120",
           "name": {
-            "zh": "开启模糊音（by 朽木）",
-            "en": "Enable fuzzy support (by XiuMu)"
+            "zh": "开启模糊音",
+            "en": "Enable fuzzy support"
           },
           "item_type": "CheckBox",
-          "source": "official-1002.2",
+          "source": "dismnext-core",
           "applicable": {
             "type": "True"
           },
@@ -24767,11 +24918,11 @@
         {
           "id": "opt-121",
           "name": {
-            "zh": "默认输入模式（by iliGPU）：",
+            "zh": "默认输入模式：",
             "en": "Default IME Input Mode"
           },
           "item_type": "Combo",
-          "source": "official-1002.2",
+          "source": "dismnext-core",
           "applicable": {
             "type": "RegExist",
             "key": "HKEY_CURRENT_USER\\Software\\Microsoft\\IME\\15.0\\IMETC",
@@ -24862,11 +25013,11 @@
         {
           "id": "opt-122",
           "name": {
-            "zh": "自动安装无需重启的更新（by Rambin）",
-            "en": "Allow Automatic Updates immediate installation (by Rambin)"
+            "zh": "自动安装无需重启的更新",
+            "en": "Allow Automatic Updates immediate installation"
           },
           "item_type": "CheckBox",
-          "source": "official-1002.2",
+          "source": "dismnext-core",
           "applicable": {
             "type": "True"
           },
@@ -24916,11 +25067,11 @@
         {
           "id": "opt-123",
           "name": {
-            "zh": "更新挂起时如果有用户登录不自动重启计算机（by Rambin）",
-            "en": "No auto-restart when logged on users for scheduled automatic updates installations (by Rambin)"
+            "zh": "更新挂起时如果有用户登录不自动重启计算机",
+            "en": "No auto-restart when logged on users for scheduled automatic updates installations"
           },
           "item_type": "CheckBox",
-          "source": "official-1002.2",
+          "source": "dismnext-core",
           "applicable": {
             "type": "True"
           },
@@ -24974,7 +25125,7 @@
             "en": "Windows Update don't include the drivers"
           },
           "item_type": "CheckBox",
-          "source": "official-1002.2",
+          "source": "dismnext-core",
           "applicable": {
             "type": "OSVersion",
             "compare": ">=",
@@ -25025,11 +25176,11 @@
         {
           "id": "opt-125",
           "name": {
-            "zh": "Windows更新不包括恶意软件删除工具（by ‍Winaero）",
-            "en": "Windows Update doesn't include malware removal tools (by ‍Winaero)"
+            "zh": "Windows更新不包括恶意软件删除工具",
+            "en": "Windows Update doesn't include malware removal tools"
           },
           "item_type": "CheckBox",
-          "source": "official-1002.2",
+          "source": "dismnext-core",
           "applicable": {
             "type": "True"
           },
@@ -25082,7 +25233,7 @@
             "en": "*Windows Update will automatically adjust the update"
           },
           "item_type": "Combo",
-          "source": "official-1002.2",
+          "source": "dismnext-core",
           "applicable": {
             "type": "And",
             "children": [
@@ -25297,7 +25448,7 @@
             "en": "*Windows Update will automatically adjust the update"
           },
           "item_type": "Combo",
-          "source": "official-1002.2",
+          "source": "dismnext-core",
           "applicable": {
             "type": "Or",
             "children": [
@@ -25503,7 +25654,7 @@
             "en": "Disable the automatic update to Internet Explorer 9"
           },
           "item_type": "CheckBox",
-          "source": "official-1002.2",
+          "source": "dismnext-core",
           "applicable": {
             "type": "RegExist",
             "key": "HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Internet Explorer",
@@ -25562,7 +25713,7 @@
             "en": "Disable the automatic update to Internet Explorer 10"
           },
           "item_type": "CheckBox",
-          "source": "official-1002.2",
+          "source": "dismnext-core",
           "applicable": {
             "type": "Or",
             "children": [
@@ -25631,11 +25782,11 @@
         {
           "id": "opt-130",
           "name": {
-            "zh": "禁止自动更新到Internet Explorer 11（by Rambin）",
-            "en": "Disable the automatic update to Internet Explorer 11 (by Rambin)"
+            "zh": "禁止自动更新到Internet Explorer 11",
+            "en": "Disable the automatic update to Internet Explorer 11"
           },
           "item_type": "CheckBox",
-          "source": "official-1002.2",
+          "source": "dismnext-core",
           "applicable": {
             "type": "Or",
             "children": [
@@ -25725,11 +25876,11 @@
         {
           "id": "opt-131",
           "name": {
-            "zh": "启用自动换行（by 一叶微风TM）",
-            "en": "Enable Word Wrap (by YiYieWeiFeng TM)"
+            "zh": "启用自动换行",
+            "en": "Enable Word Wrap"
           },
           "item_type": "CheckBox",
-          "source": "official-1002.2",
+          "source": "dismnext-core",
           "applicable": {
             "type": "True"
           },
@@ -25818,11 +25969,11 @@
         {
           "id": "opt-132",
           "name": {
-            "zh": "始终显示状态栏（by 一叶微风TM）",
-            "en": "Show Status Bar (by YiYieWeiFeng TM)"
+            "zh": "始终显示状态栏",
+            "en": "Show Status Bar"
           },
           "item_type": "CheckBox",
-          "source": "official-1002.2",
+          "source": "dismnext-core",
           "applicable": {
             "type": "True"
           },
@@ -25923,11 +26074,11 @@
         {
           "id": "opt-133",
           "name": {
-            "zh": "*关闭默认共享（by 518516.net）",
-            "en": "*Turn off default sharing (by 518516.net)"
+            "zh": "*关闭默认共享",
+            "en": "*Turn off default sharing"
           },
           "item_type": "CheckBox",
-          "source": "official-1002.2",
+          "source": "dismnext-core",
           "applicable": {
             "type": "True"
           },
@@ -26009,11 +26160,11 @@
         {
           "id": "opt-134",
           "name": {
-            "zh": "*关闭防火墙（by 一叶微风TM）",
-            "en": "*Turn off Windows Firewall (by YiYieWeiFeng TM)"
+            "zh": "*关闭防火墙",
+            "en": "*Turn off Windows Firewall"
           },
           "item_type": "CheckBox",
-          "source": "official-1002.2",
+          "source": "dismnext-core",
           "applicable": {
             "type": "True"
           },
@@ -26129,11 +26280,11 @@
         {
           "id": "opt-135",
           "name": {
-            "zh": "*关闭远程协助（by 原罪）",
-            "en": "*Disallow Remote Assistance connections (by YZ)"
+            "zh": "*关闭远程协助",
+            "en": "*Disallow Remote Assistance connections"
           },
           "item_type": "CheckBox",
-          "source": "official-1002.2",
+          "source": "dismnext-core",
           "applicable": {
             "type": "True"
           },
@@ -26183,11 +26334,11 @@
         {
           "id": "opt-136",
           "name": {
-            "zh": "*禁用SMB1网络协议（by MS-PC2）",
-            "en": "*Disallow SMB1 network protocol (by MS-PC2)"
+            "zh": "*禁用SMB1网络协议",
+            "en": "*Disallow SMB1 network protocol"
           },
           "item_type": "CheckBox",
-          "source": "official-1002.2",
+          "source": "dismnext-core",
           "applicable": {
             "type": "OSVersion",
             "compare": "<=",
@@ -26251,11 +26402,11 @@
         {
           "id": "opt-137",
           "name": {
-            "zh": "禁用程序兼容性助手（by 一叶微风TM）",
-            "en": "Disable Program Compatibility Assistant Service (by YiYieWeiFeng TM)"
+            "zh": "禁用程序兼容性助手",
+            "en": "Disable Program Compatibility Assistant Service"
           },
           "item_type": "CheckBox",
-          "source": "official-1002.2",
+          "source": "dismnext-core",
           "applicable": {
             "type": "QueryServiceStart",
             "name": "PcaSvc",
@@ -26293,11 +26444,11 @@
         {
           "id": "opt-138",
           "name": {
-            "zh": "禁用远程修改注册表（by 一叶微风TM）",
-            "en": "Disable Remote Registry Service (by YiYieWeiFeng TM)"
+            "zh": "禁用远程修改注册表",
+            "en": "Disable Remote Registry Service"
           },
           "item_type": "CheckBox",
-          "source": "official-1002.2",
+          "source": "dismnext-core",
           "applicable": {
             "type": "QueryServiceStart",
             "name": "RemoteRegistry",
@@ -26339,7 +26490,7 @@
             "en": "Disable the Diagnostic Service"
           },
           "item_type": "CheckBox",
-          "source": "official-1002.2",
+          "source": "dismnext-core",
           "applicable": {
             "type": "QueryServiceStart",
             "name": "DPS",
@@ -26381,7 +26532,7 @@
             "en": "Disable IP Helper Service"
           },
           "item_type": "CheckBox",
-          "source": "official-1002.2",
+          "source": "dismnext-core",
           "applicable": {
             "type": "QueryServiceStart",
             "name": "iphlpsvc",
@@ -26426,7 +26577,7 @@
             "en": "Disable Windows Search"
           },
           "item_type": "CheckBox",
-          "source": "official-1002.2",
+          "source": "dismnext-core",
           "applicable": {
             "type": "QueryServiceStart",
             "name": "WSearch",
@@ -26471,7 +26622,7 @@
             "en": "Disable Windows Error Reporting"
           },
           "item_type": "CheckBox",
-          "source": "official-1002.2",
+          "source": "dismnext-core",
           "applicable": {
             "type": "QueryServiceStart",
             "name": "WerSvc",
@@ -26513,7 +26664,7 @@
             "en": "Disable Homegroup"
           },
           "item_type": "CheckBox",
-          "source": "official-1002.2",
+          "source": "dismnext-core",
           "applicable": {
             "type": "And",
             "children": [
@@ -26561,11 +26712,11 @@
         {
           "id": "opt-144",
           "name": {
-            "zh": "禁用客户体验改善计划（by Windows 10优化辅助工具）",
-            "en": "Disable the Customer Experience Improvement Program (by Windows 10 optimization aids)"
+            "zh": "禁用客户体验改善计划",
+            "en": "Disable the Customer Experience Improvement Program"
           },
           "item_type": "CheckBox",
-          "source": "official-1002.2",
+          "source": "dismnext-core",
           "applicable": {
             "type": "True"
           },
@@ -26614,11 +26765,11 @@
         {
           "id": "opt-145",
           "name": {
-            "zh": "禁用NTFS链接跟踪服务（by 某宅）",
-            "en": "Disable Homegroup NTFS Link Tracking Service (by Stotaku)"
+            "zh": "禁用NTFS链接跟踪服务",
+            "en": "Disable Homegroup NTFS Link Tracking Service"
           },
           "item_type": "CheckBox",
-          "source": "official-1002.2",
+          "source": "dismnext-core",
           "applicable": {
             "type": "QueryServiceStart",
             "name": "TrkWks",
@@ -26666,11 +26817,11 @@
         {
           "id": "opt-146",
           "name": {
-            "zh": "禁止自动维护计划（by Lux ferre）",
-            "en": "Disable Auto Maintenance Task (by Lux ferre)"
+            "zh": "禁止自动维护计划",
+            "en": "Disable Auto Maintenance Task"
           },
           "item_type": "CheckBox",
-          "source": "official-1002.2",
+          "source": "dismnext-core",
           "applicable": {
             "type": "True"
           },
@@ -26740,11 +26891,11 @@
         {
           "id": "opt-147",
           "name": {
-            "zh": "锁定WinRAR工具栏（by 原罪）",
-            "en": "Lock WinRAR's toolbar (by YZ)"
+            "zh": "锁定WinRAR工具栏",
+            "en": "Lock WinRAR's toolbar"
           },
           "item_type": "CheckBox",
-          "source": "official-1002.2",
+          "source": "dismnext-core",
           "applicable": {
             "type": "True"
           },
@@ -26833,11 +26984,11 @@
         {
           "id": "opt-148",
           "name": {
-            "zh": "隐藏WinRAR 在右键菜单中添加的\"压缩并 E-mail...\"（by 原罪）",
-            "en": "Hide \"Compression and E-mail...\" context menu which added by WinRAR (by YZ)"
+            "zh": "隐藏WinRAR 在右键菜单中添加的\"压缩并 E-mail...\"",
+            "en": "Hide \"Compression and E-mail...\" context menu which added by WinRAR"
           },
           "item_type": "CheckBox",
-          "source": "official-1002.2",
+          "source": "dismnext-core",
           "applicable": {
             "type": "True"
           },
@@ -27006,11 +27157,11 @@
         {
           "id": "opt-149",
           "name": {
-            "zh": "不显示首次使用对话框（by 原罪）",
-            "en": "Hide First Run Wizard (by YZ)"
+            "zh": "不显示首次使用对话框",
+            "en": "Hide First Run Wizard"
           },
           "item_type": "CheckBox",
-          "source": "official-1002.2",
+          "source": "dismnext-core",
           "applicable": {
             "type": "True"
           },
@@ -27071,11 +27222,11 @@
         {
           "id": "opt-150",
           "name": {
-            "zh": "启用 Windows 照片查看器（by 心之所向）",
-            "en": "Enable Windows Photo Viewer (by XingZhiSuoXiang)"
+            "zh": "启用 Windows 照片查看器",
+            "en": "Enable Windows Photo Viewer"
           },
           "item_type": "CheckBox",
-          "source": "official-1002.2",
+          "source": "dismnext-core",
           "applicable": {
             "type": "And",
             "children": [
@@ -27413,7 +27564,7 @@
             "en": "*Hide Windows 10 Upgrade Assistant (GWX)"
           },
           "item_type": "CheckBox",
-          "source": "official-1002.2",
+          "source": "dismnext-core",
           "applicable": {
             "type": "FileExist",
             "file_path": "%SystemDrive%\\Windows\\System32\\GWX",
@@ -27469,7 +27620,7 @@
             "en": "*Do not expand VHD Dynamic to maximum size when initiating VHD (to use less storage)"
           },
           "item_type": "CheckBox",
-          "source": "official-1002.2",
+          "source": "dismnext-core",
           "applicable": {
             "type": "RegExist",
             "key": "HKEY_LOCAL_MACHINE\\SYSTEM\\CurrentControlSet\\services\\FsDepends\\Parameters",
@@ -27528,11 +27679,11 @@
         {
           "id": "opt-153",
           "name": {
-            "zh": "蓝屏时自动重启（by 原罪）",
-            "en": "Automatically restart when BSOD (by YZ)"
+            "zh": "蓝屏时自动重启",
+            "en": "Automatically restart when BSOD"
           },
           "item_type": "CheckBox",
-          "source": "official-1002.2",
+          "source": "dismnext-core",
           "applicable": {
             "type": "True"
           },
@@ -27586,7 +27737,7 @@
             "en": "Disable Hiberboot"
           },
           "item_type": "CheckBox",
-          "source": "official-1002.2",
+          "source": "dismnext-core",
           "applicable": {
             "type": "And",
             "children": [
@@ -27697,11 +27848,11 @@
         {
           "id": "opt-155",
           "name": {
-            "zh": "关闭休眠（by powerxing04）",
-            "en": "Disable Hibernate (by powerxing04)"
+            "zh": "关闭休眠",
+            "en": "Disable Hibernate"
           },
           "item_type": "CheckBox",
-          "source": "official-1002.2",
+          "source": "dismnext-core",
           "applicable": {
             "type": "Not",
             "children": [
@@ -27786,7 +27937,7 @@
             "en": "Disable Component Based Servicing log"
           },
           "item_type": "CheckBox",
-          "source": "official-1002.2",
+          "source": "dismnext-core",
           "applicable": {
             "type": "True"
           },
@@ -27840,7 +27991,7 @@
             "en": "Disable Delta Package Expander log"
           },
           "item_type": "CheckBox",
-          "source": "official-1002.2",
+          "source": "dismnext-core",
           "applicable": {
             "type": "True"
           },
@@ -27890,11 +28041,11 @@
         {
           "id": "opt-158",
           "name": {
-            "zh": "禁用系统日志（by Windows 10优化辅助工具）",
-            "en": "Disable system log (by Windows 10 optimization aids)"
+            "zh": "禁用系统日志",
+            "en": "Disable system log"
           },
           "item_type": "CheckBox",
-          "source": "official-1002.2",
+          "source": "dismnext-core",
           "applicable": {
             "type": "True"
           },
@@ -28023,7 +28174,7 @@
             "en": "Disable Component Based Servicing Backup"
           },
           "item_type": "CheckBox",
-          "source": "official-1002.2",
+          "source": "dismnext-core",
           "applicable": {
             "type": "True"
           },
@@ -28076,7 +28227,7 @@
             "en": "Write debug info when the system crashes"
           },
           "item_type": "Combo",
-          "source": "official-1002.2",
+          "source": "dismnext-core",
           "applicable": {
             "type": "True"
           },
@@ -28178,11 +28329,11 @@
         {
           "id": "opt-161",
           "name": {
-            "zh": "禁用账号登录日志报告（by 溯汐潮）",
-            "en": "Disable account login logging (by Hell Cabrite)"
+            "zh": "禁用账号登录日志报告",
+            "en": "Disable account login logging"
           },
           "item_type": "CheckBox",
-          "source": "official-1002.2",
+          "source": "dismnext-core",
           "applicable": {
             "type": "True"
           },
@@ -28232,11 +28383,11 @@
         {
           "id": "opt-162",
           "name": {
-            "zh": "禁用WfpDiag.ETL日志（by powerxing04）",
-            "en": "Disable WfpDiag ETL log (by powerxing04)"
+            "zh": "禁用WfpDiag.ETL日志",
+            "en": "Disable WfpDiag ETL log"
           },
           "item_type": "CheckBox",
-          "source": "official-1002.2",
+          "source": "dismnext-core",
           "applicable": {
             "type": "True"
           },
@@ -28303,11 +28454,11 @@
         {
           "id": "opt-163",
           "name": {
-            "zh": "Windows To Go标记(关闭以允许大版本更新)(By 玩火)",
+            "zh": "Windows To Go标记(关闭以允许大版本更新)",
             "en": "Windows To Go Flag (Disable to allow feature updates)"
           },
           "item_type": "CheckBox",
-          "source": "official-1002.2",
+          "source": "dismnext-core",
           "applicable": {
             "type": "True"
           },

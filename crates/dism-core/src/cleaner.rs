@@ -692,7 +692,7 @@ fn handle_custom_proc(
         "BuiltinComponentCleanup" => {
             for p in [
                 r"%SystemRoot%\WinSxS\Temp\PendingDeletes",
-                r"%SystemRoot%\WinSxS\ManifestCache",
+                r"%SystemRoot%\WinSxS\Temp\PendingRenames",
             ] {
                 collect_general_action(p, "File", &[], &[], sys, files, seen_paths, removable_dirs, probe_budget);
             }
@@ -768,7 +768,8 @@ fn handle_custom_proc(
         "BuiltinAppxCleanup" | "BuiltinCorruptedAppxCleanup" => {
             for p in [
                 r"%ProgramFiles%\WindowsApps\DeletedAllUserPackages",
-                r"%LOCALAPPDATA%\Packages\*\AC\Temp",
+                r"%ProgramFiles%\WindowsApps\Deleted",
+                r"%LOCALAPPDATA%\Packages\*\TempState",
             ] {
                 collect_general_action(p, "Directory|File", &[], &[], sys, files, seen_paths, removable_dirs, probe_budget);
             }
@@ -1087,5 +1088,76 @@ mod tests {
         assert!(base.exists()); // root folder preserved when queries empty
 
         let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn test_catalog_hygiene_no_author_credits_or_empty_descriptions() {
+        let catalog = crate::catalog::Catalog::load(None).expect("embedded catalog should load");
+        assert_eq!(catalog.base_version, "DismNext 2.0");
+        assert_eq!(catalog.cleanup_rules.len(), 86);
+
+        let contains_by_credit = |s: &str| -> bool {
+            let lower = s.to_ascii_lowercase();
+            lower.contains("(by ") || lower.contains("（by ") || lower.contains("1002.2")
+        };
+
+        for r in &catalog.cleanup_rules {
+            assert!(
+                r.source == "dismnext-core" || r.source == "win11-modern",
+                "Unexpected source '{}' on rule {}",
+                r.source,
+                r.id
+            );
+            assert!(
+                !r.name.zh.trim().is_empty() && !r.name.en.trim().is_empty(),
+                "Rule {} has empty localized name",
+                r.id
+            );
+            assert!(
+                !r.description.zh.trim().is_empty() && !r.description.en.trim().is_empty(),
+                "Rule {} has empty description",
+                r.id
+            );
+            assert!(
+                !contains_by_credit(&r.name.zh)
+                    && !contains_by_credit(&r.name.en)
+                    && !contains_by_credit(&r.description.zh)
+                    && !contains_by_credit(&r.description.en),
+                "Rule {} still contains third-party credit or legacy version string",
+                r.id
+            );
+            for s in &r.scans {
+                if let Some(ref ov) = s.name_override {
+                    assert!(
+                        !contains_by_credit(&ov.zh) && !contains_by_credit(&ov.en),
+                        "Rule {} scan name_override contains credit",
+                        r.id
+                    );
+                }
+            }
+        }
+
+        for g in &catalog.optimization_groups {
+            for it in &g.items {
+                assert!(
+                    it.source == "dismnext-core" || it.source == "win11-modern",
+                    "Unexpected source '{}' on opt {}",
+                    it.source,
+                    it.id
+                );
+                assert!(
+                    !it.name.zh.trim().is_empty() && !it.name.en.trim().is_empty(),
+                    "Opt {} has empty localized name",
+                    it.id
+                );
+                assert!(
+                    !contains_by_credit(&it.name.zh) && !contains_by_credit(&it.name.en),
+                    "Opt {} still contains third-party credit: {} / {}",
+                    it.id,
+                    it.name.zh,
+                    it.name.en
+                );
+            }
+        }
     }
 }
