@@ -9,13 +9,14 @@ use std::path::Path;
 use std::time::Instant;
 
 const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
-const MAX_CHILDREN_PER_NODE: usize = 36;
+const MAX_CHILDREN_PER_NODE: usize = 60;
 const MAX_LARGEST_FILES: usize = 100;
-const MAX_EXTENSIONS: usize = 30;
+const MAX_EXTENSIONS: usize = 40;
 
 const PALETTE: &[&str] = &[
-    "#0078D4", "#00B7C3", "#8764B8", "#107C10", "#D83B01", "#E3008C", "#038387", "#CA5010",
+    "#0078D4", "#107C10", "#D83B01", "#8764B8", "#00B7C3", "#E3008C", "#CA5010", "#038387",
     "#498205", "#C239B3", "#004E8C", "#5C2D91", "#8E562E", "#0099BC", "#E74856", "#7A7574",
+    "#4F6BED", "#0B6A0B", "#9A0089", "#B4009E",
 ];
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -24,6 +25,7 @@ pub struct DiskTreeNode {
     pub path: String,
     pub is_dir: bool,
     pub is_aggregate: bool,
+    pub is_cache_hint: bool,
     pub aggregate_count: usize,
     pub size_bytes: u64,
     pub file_count: usize,
@@ -35,6 +37,7 @@ pub struct DiskTreeNode {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExtensionStat {
     pub ext: String,
+    pub description: LocalizedText,
     pub size_bytes: u64,
     pub file_count: usize,
     pub color: String,
@@ -122,7 +125,7 @@ pub fn get_presets(sys: &SystemInfo) -> Vec<DiskPreset> {
     presets
 }
 
-/// Performs a parallel WinDirStat-style directory tree & extension analysis without following NTFS reparse points.
+/// Performs a parallel directory tree & extension analysis without following NTFS reparse points.
 pub fn analyze_path(root: &Path, max_depth: usize) -> Result<DiskAnalysisReport> {
     if !root.exists() {
         return Err(anyhow!("Path does not exist: {}", root.display()));
@@ -149,8 +152,10 @@ pub fn analyze_path(root: &Path, max_depth: usize) -> Result<DiskAnalysisReport>
     let mut other_count = 0usize;
     for (i, (ext, sz, cnt)) in ext_vec.into_iter().enumerate() {
         if i < MAX_EXTENSIONS {
+            let description = describe_extension(&ext);
             extensions.push(ExtensionStat {
                 ext,
+                description,
                 size_bytes: sz,
                 file_count: cnt,
                 color: PALETTE[i % PALETTE.len()].to_string(),
@@ -163,6 +168,10 @@ pub fn analyze_path(root: &Path, max_depth: usize) -> Result<DiskAnalysisReport>
     if other_count > 0 {
         extensions.push(ExtensionStat {
             ext: "(other)".to_string(),
+            description: LocalizedText {
+                zh: "其他扩展名汇总".to_string(),
+                en: "Other Extensions".to_string(),
+            },
             size_bytes: other_bytes,
             file_count: other_count,
             color: "#8A8886".to_string(),
@@ -233,10 +242,7 @@ fn scan_recursive(path: &Path) -> ScanAccumulator {
 
     let child_paths: Vec<_> = rd.flatten().map(|e| e.path()).collect();
     let child_accs: Vec<ScanAccumulator> = if child_paths.len() >= 2 {
-        child_paths
-            .par_iter()
-            .map(|p| scan_recursive(p))
-            .collect()
+        child_paths.par_iter().map(|p| scan_recursive(p)).collect()
     } else {
         child_paths.iter().map(|p| scan_recursive(p)).collect()
     };
@@ -307,7 +313,105 @@ fn extract_ext(path: &Path) -> String {
         .unwrap_or_else(|| "(no ext)".to_string())
 }
 
+fn is_cache_folder_name(name: &str, path: &str) -> bool {
+    let n = name.to_ascii_lowercase();
+    let p = path.to_ascii_lowercase();
+    if n == "cache"
+        || n == "code cache"
+        || n == "gpucache"
+        || n == "dxcache"
+        || n == "glcache"
+        || n == "vkcache"
+        || n == "shadercache"
+        || n == "temp"
+        || n == "systemtemp"
+        || n == "squirreltemp"
+        || n == "crashdumps"
+        || n == "crashpad"
+        || n == "npm-cache"
+        || n == "pnpm-cache"
+        || n == "v3-cache"
+        || n.ends_with("-updater")
+    {
+        return true;
+    }
+    p.ends_with(r"\uv\cache") || p.ends_with(r"\pip\cache") || p.ends_with(r"\package cache")
+}
+
+fn describe_extension(ext: &str) -> LocalizedText {
+    let (zh, en) = match ext {
+        "(no ext)" => ("无扩展名", "No Extension"),
+        ".dll" => ("应用程序扩展", "Application Extension"),
+        ".exe" => ("应用程序", "Executable Application"),
+        ".sys" => ("系统驱动程序", "System Driver"),
+        ".msi" => ("Windows 安装程序包", "Windows Installer Package"),
+        ".msp" => ("Windows 安装补丁", "Windows Installer Patch"),
+        ".msix" | ".appx" => ("现代应用安装包", "Windows App Package"),
+        ".vsix" => ("Visual Studio 扩展包", "Visual Studio Extension"),
+        ".cab" => ("Windows 压缩包", "Cabinet Archive"),
+        ".vhdx" | ".vhd" => ("虚拟硬盘映像", "Virtual Hard Disk Image"),
+        ".wim" | ".esd" => ("Windows 系统映像", "Windows Imaging Format"),
+        ".iso" => ("光盘镜像文件", "ISO Disc Image"),
+        ".zip" => ("ZIP 压缩归档", "ZIP Archive"),
+        ".7z" => ("7-Zip 压缩归档", "7-Zip Archive"),
+        ".rar" => ("RAR 压缩归档", "RAR Archive"),
+        ".zst" => ("ZSTD 压缩文件", "Zstandard Compressed File"),
+        ".gz" | ".tgz" | ".tar" => ("Tar / GZip 归档", "Tar / GZip Archive"),
+        ".pak" => ("打包资源文件", "Packed Resource File"),
+        ".asar" => ("桌面应用打包归档", "ASAR Application Archive"),
+        ".bin" => ("二进制数据文件", "Binary Data File"),
+        ".dat" => ("数据存储文件", "Data File"),
+        ".db" | ".sqlite" | ".mdb" => ("数据库文件", "Database File"),
+        ".etl" => ("系统事件跟踪日志", "Event Trace Log"),
+        ".evtx" => ("Windows 事件日志", "Windows Event Log"),
+        ".log" => ("文本日志文件", "Log File"),
+        ".dmp" | ".mdmp" => ("崩溃内存转储", "Crash Memory Dump"),
+        ".tmp" => ("临时文件", "Temporary File"),
+        ".bak" => ("备份文件", "Backup File"),
+        ".pdb" => ("调试符号数据库", "Program Debug Database"),
+        ".lib" => ("静态链接库", "Static Library"),
+        ".obj" | ".o" => ("编译目标文件", "Compiled Object File"),
+        ".rlib" => ("Rust 编译库", "Rust Compiled Library"),
+        ".node" => ("Node.js 原生扩展", "Node.js Native Addon"),
+        ".js" | ".mjs" | ".cjs" => ("JavaScript 脚本", "JavaScript Source"),
+        ".ts" | ".tsx" => ("TypeScript 源码", "TypeScript Source"),
+        ".jsx" => ("React JSX 源码", "React JSX Source"),
+        ".json" => ("JSON 配置文件", "JSON Data File"),
+        ".xml" | ".xaml" => ("XML 结构化文件", "XML Document"),
+        ".yaml" | ".yml" | ".toml" | ".ini" => ("配置清单文件", "Configuration File"),
+        ".html" | ".htm" | ".css" | ".scss" => ("网页与样式文件", "Web Document / Stylesheet"),
+        ".wasm" => ("WebAssembly 模块", "WebAssembly Module"),
+        ".py" | ".pyc" | ".whl" => ("Python 脚本 / Wheel 包", "Python Script / Wheel"),
+        ".rs" | ".c" | ".cpp" | ".h" | ".hpp" | ".cs" | ".go" | ".java" => ("编程语言源码", "Source Code"),
+        ".jar" => ("Java 归档包", "Java Archive"),
+        ".ttf" | ".otf" | ".woff" | ".woff2" => ("字体文件", "Font File"),
+        ".png" | ".jpg" | ".jpeg" | ".webp" | ".gif" | ".bmp" | ".ico" | ".svg" => ("图像 / 图标资源", "Image / Icon"),
+        ".mp4" | ".mkv" | ".avi" | ".mov" | ".webm" => ("视频媒体文件", "Video Media"),
+        ".mp3" | ".wav" | ".flac" | ".ogg" => ("音频媒体文件", "Audio Media"),
+        ".pdf" => ("PDF 文档", "PDF Document"),
+        ".docx" | ".xlsx" | ".pptx" => ("Office 文档", "Office Document"),
+        ".txt" | ".md" => ("纯文本 / Markdown", "Text / Markdown"),
+        ".onnx" | ".safetensors" | ".pt" | ".gguf" => ("AI 模型权重文件", "AI Model Weights"),
+        ".nvph" => ("显卡着色器缓存", "GPU Shader Cache"),
+        ".pri" => ("Windows 资源索引", "Windows Resource Index"),
+        ".mui" => ("多语言界面资源", "Multilingual UI Resource"),
+        ".so" => ("共享动态库", "Shared Object Library"),
+        _ => {
+            let clean = ext.trim_start_matches('.').to_ascii_uppercase();
+            return LocalizedText {
+                zh: format!("{} 文件", clean),
+                en: format!("{} File", clean),
+            };
+        }
+    };
+    LocalizedText {
+        zh: zh.to_string(),
+        en: en.to_string(),
+    }
+}
+
 fn prune_node(mut raw: RawNode, depth: usize, max_depth: usize) -> DiskTreeNode {
+    let cache_hint = raw.is_dir && is_cache_folder_name(&raw.name, &raw.path);
     let children = if !raw.is_dir || depth >= max_depth {
         Vec::new()
     } else {
@@ -337,6 +441,7 @@ fn prune_node(mut raw: RawNode, depth: usize, max_depth: usize) -> DiskTreeNode 
                 path: raw.path.clone(),
                 is_dir: false,
                 is_aggregate: true,
+                is_cache_hint: false,
                 aggregate_count: rest_count,
                 size_bytes: rest_bytes,
                 file_count: rest_files,
@@ -353,6 +458,7 @@ fn prune_node(mut raw: RawNode, depth: usize, max_depth: usize) -> DiskTreeNode 
         path: raw.path,
         is_dir: raw.is_dir,
         is_aggregate: false,
+        is_cache_hint: cache_hint,
         aggregate_count: 0,
         size_bytes: raw.size_bytes,
         file_count: raw.file_count,
@@ -372,7 +478,7 @@ mod tests {
     fn test_diskmap_aggregation_extensions_and_pruning() {
         let base = std::env::temp_dir().join(format!("dismnext_diskmap_test_{}", std::process::id()));
         let _ = fs::remove_dir_all(&base);
-        let sub_a = base.join("alpha");
+        let sub_a = base.join("Cache");
         let sub_b = base.join("beta");
         fs::create_dir_all(&sub_a).unwrap();
         fs::create_dir_all(&sub_b).unwrap();
@@ -394,8 +500,10 @@ mod tests {
         assert_eq!(report.total_bytes, 4096 + 1024 + 256);
         assert_eq!(report.total_files, 3);
         assert_eq!(report.total_dirs, 2);
-        assert_eq!(report.tree.children[0].name, "alpha");
+        assert_eq!(report.tree.children[0].name, "Cache");
+        assert!(report.tree.children[0].is_cache_hint);
         assert_eq!(report.extensions[0].ext, ".bin");
+        assert_eq!(report.extensions[0].description.en, "Binary Data File");
         assert_eq!(report.extensions[0].size_bytes, 4096);
         assert_eq!(report.largest_files[0].name, "big.bin");
         assert!(report.extensions.iter().any(|e| e.ext == "(no ext)"));

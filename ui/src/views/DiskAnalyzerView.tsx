@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Badge,
   Button,
@@ -13,11 +13,16 @@ import {
   tokens,
 } from '@fluentui/react-components';
 import {
-  ArrowUp24Regular,
-  Document20Regular,
-  Folder20Regular,
-  FolderOpen20Regular,
+  ArrowUp20Regular,
+  ChevronDown16Regular,
+  ChevronRight16Regular,
+  Copy16Regular,
+  Document16Regular,
+  Folder16Regular,
+  FolderOpen16Regular,
   Search20Regular,
+  ZoomIn16Regular,
+  ZoomOut16Regular,
 } from '@fluentui/react-icons';
 import {
   DiskAnalysisReport,
@@ -33,25 +38,34 @@ interface Props {
   lang: Lang;
 }
 
-interface LayoutRect {
+interface FlatTreeRow {
   node: DiskTreeNode;
+  depth: number;
+  parentBytes: number;
+  hasChildren: boolean;
+  isExpanded: boolean;
+  isLoading: boolean;
+}
+
+interface PaintedLeaf {
+  node: DiskTreeNode;
+  ancestorPaths: string[];
   x: number;
   y: number;
   w: number;
   h: number;
-  depth: number;
-  children: LayoutRect[];
+  color: string;
 }
 
-const FALLBACK_DIR_COLORS = [
-  '#2B579A',
-  '#217346',
-  '#B7472A',
-  '#742774',
-  '#038387',
-  '#4F6BED',
-  '#8E562E',
-  '#5C2D91',
+const DIR_FALLBACK_COLORS = [
+  '#2E74B5',
+  '#388E3C',
+  '#C85A32',
+  '#7E57C2',
+  '#00838F',
+  '#AD1457',
+  '#D84315',
+  '#455A64',
 ];
 
 const useStyles = makeStyles({
@@ -59,17 +73,18 @@ const useStyles = makeStyles({
     display: 'flex',
     flexDirection: 'column',
     height: '100%',
-    gap: '10px',
+    gap: '8px',
     overflow: 'hidden',
   },
   toolbar: {
     display: 'flex',
     flexDirection: 'column',
-    gap: '8px',
-    padding: '10px 14px',
+    gap: '6px',
+    padding: '8px 12px',
     borderRadius: tokens.borderRadiusLarge,
     backgroundColor: tokens.colorNeutralBackground2,
     border: `1px solid ${tokens.colorNeutralStroke2}`,
+    flexShrink: 0,
   },
   presetRow: {
     display: 'flex',
@@ -84,94 +99,162 @@ const useStyles = makeStyles({
     gap: '10px',
     flexWrap: 'wrap',
   },
+  workspaceSplit: {
+    flex: 1,
+    minHeight: 0,
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '0px',
+    overflow: 'hidden',
+  },
   topSplit: {
     display: 'grid',
-    gridTemplateColumns: '1.2fr 1fr',
-    gap: '10px',
-    height: '220px',
-    minHeight: '190px',
-    flexShrink: 0,
+    gridTemplateColumns: '1.45fr 1fr',
+    gap: '8px',
+    minHeight: '160px',
+    overflow: 'hidden',
   },
-  panel: {
+  paneCard: {
     display: 'flex',
     flexDirection: 'column',
     borderRadius: tokens.borderRadiusLarge,
     backgroundColor: tokens.colorNeutralBackground2,
     border: `1px solid ${tokens.colorNeutralStroke2}`,
-    padding: '10px',
-    gap: '6px',
-    minHeight: 0,
     overflow: 'hidden',
+    minHeight: 0,
   },
-  scrollList: {
+  tableHeader: {
+    display: 'grid',
+    alignItems: 'center',
+    padding: '6px 10px',
+    fontSize: '12px',
+    fontWeight: 600,
+    color: tokens.colorNeutralForeground2,
+    backgroundColor: tokens.colorNeutralBackground3,
+    borderBottom: `1px solid ${tokens.colorNeutralStroke2}`,
+    flexShrink: 0,
+    userSelect: 'none',
+  },
+  treeGridCols: {
+    gridTemplateColumns: 'minmax(180px, 1fr) 92px 54px 76px 56px',
+    gap: '6px',
+  },
+  extGridCols: {
+    gridTemplateColumns: '74px 26px minmax(90px, 1fr) 74px 50px 54px',
+    gap: '6px',
+  },
+  largeFileCols: {
+    gridTemplateColumns: 'minmax(180px, 1fr) 68px 78px 40px',
+    gap: '6px',
+  },
+  scrollBody: {
     flex: 1,
     overflowY: 'auto',
-    display: 'flex',
-    flexDirection: 'column',
-    gap: '4px',
+    minHeight: 0,
   },
-  treeRow: {
-    display: 'flex',
+  gridRow: {
+    display: 'grid',
     alignItems: 'center',
-    justifyContent: 'space-between',
-    gap: '8px',
-    padding: '5px 8px',
-    borderRadius: tokens.borderRadiusSmall,
+    padding: '4px 10px',
+    fontSize: '12px',
+    borderBottom: `1px solid ${tokens.colorNeutralStroke3}`,
     cursor: 'pointer',
     ':hover': {
       backgroundColor: tokens.colorNeutralBackground1Hover,
     },
   },
-  extRow: {
+  gridRowSelected: {
+    backgroundColor: tokens.colorNeutralBackground1Selected,
+  },
+  leftPaneFooter: {
     display: 'flex',
     alignItems: 'center',
     justifyContent: 'space-between',
-    gap: '8px',
-    padding: '5px 8px',
-    borderRadius: tokens.borderRadiusSmall,
-    cursor: 'pointer',
+    padding: '2px 8px',
+    borderTop: `1px solid ${tokens.colorNeutralStroke2}`,
+    backgroundColor: tokens.colorNeutralBackground3,
+    flexShrink: 0,
+  },
+  resizer: {
+    height: '8px',
+    cursor: 'row-resize',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    flexShrink: 0,
     ':hover': {
-      backgroundColor: tokens.colorNeutralBackground1Hover,
+      backgroundColor: tokens.colorNeutralBackground3,
     },
   },
-  bottomCanvasCard: {
+  resizerPill: {
+    width: '48px',
+    height: '3px',
+    borderRadius: '2px',
+    backgroundColor: tokens.colorNeutralStroke1,
+  },
+  treemapCard: {
     flex: 1,
+    minHeight: '140px',
     display: 'flex',
     flexDirection: 'column',
     borderRadius: tokens.borderRadiusLarge,
     backgroundColor: tokens.colorNeutralBackground2,
     border: `1px solid ${tokens.colorNeutralStroke2}`,
-    padding: '10px',
-    gap: '8px',
-    minHeight: 0,
     overflow: 'hidden',
   },
-  treemapHost: {
+  treemapToolbar: {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    padding: '4px 10px',
+    backgroundColor: tokens.colorNeutralBackground3,
+    borderBottom: `1px solid ${tokens.colorNeutralStroke2}`,
+    flexShrink: 0,
+    gap: '8px',
+  },
+  canvasWrap: {
     position: 'relative',
     flex: 1,
-    minHeight: '180px',
-    borderRadius: tokens.borderRadiusMedium,
-    backgroundColor: tokens.colorNeutralBackground4,
+    minHeight: 0,
+    backgroundColor: '#111418',
     overflow: 'hidden',
-    userSelect: 'none',
+  },
+  statusBar: {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: '10px',
+    padding: '6px 12px',
+    borderRadius: tokens.borderRadiusMedium,
+    backgroundColor: tokens.colorNeutralBackground2,
+    border: `1px solid ${tokens.colorNeutralStroke2}`,
+    flexShrink: 0,
   },
 });
 
-/**
- * Bruls–Huizing–van Wijk Squarified Treemap layout algorithm.
- * Minimizes rectangle aspect ratios so blocks are as close to squares as possible.
- */
-function squarifyLayout(
+function adjustHexColor(hex: string, factor: number): string {
+  const clean = hex.replace('#', '');
+  if (clean.length !== 6) return hex;
+  const r = parseInt(clean.slice(0, 2), 16);
+  const g = parseInt(clean.slice(2, 4), 16);
+  const b = parseInt(clean.slice(4, 6), 16);
+  const clamp = (v: number) => Math.max(0, Math.min(255, Math.round(v)));
+  const apply = (c: number) => (factor >= 0 ? clamp(c + (255 - c) * factor) : clamp(c * (1 + factor)));
+  const nr = apply(r).toString(16).padStart(2, '0');
+  const ng = apply(g).toString(16).padStart(2, '0');
+  const nb = apply(b).toString(16).padStart(2, '0');
+  return `#${nr}${ng}${nb}`;
+}
+
+function squarifyRects(
   nodes: DiskTreeNode[],
   x: number,
   y: number,
   w: number,
-  h: number,
-  depth = 0
-): LayoutRect[] {
+  h: number
+): { node: DiskTreeNode; x: number; y: number; w: number; h: number }[] {
   const valid = nodes.filter((n) => n.size_bytes > 0);
-  if (valid.length === 0 || w <= 2 || h <= 2) return [];
-
+  if (valid.length === 0 || w < 1.5 || h < 1.5) return [];
   const total = valid.reduce((a, b) => a + b.size_bytes, 0);
   if (total <= 0) return [];
 
@@ -181,19 +264,20 @@ function squarifyLayout(
     area: (node.size_bytes / total) * area,
   }));
 
-  const rects: LayoutRect[] = [];
+  const out: { node: DiskTreeNode; x: number; y: number; w: number; h: number }[] = [];
   let cx = x;
   let cy = y;
   let cw = w;
   let ch = h;
   let row: { node: DiskTreeNode; area: number }[] = [];
 
-  const worstRatio = (r: { area: number }[], side: number): number => {
+  const worst = (r: { area: number }[], side: number): number => {
     if (r.length === 0 || side <= 0) return Infinity;
-    const sum = r.reduce((a, b) => a + b.area, 0);
+    let sum = 0;
     let maxA = 0;
     let minA = Infinity;
     for (const it of r) {
+      sum += it.area;
       if (it.area > maxA) maxA = it.area;
       if (it.area < minA) minA = it.area;
     }
@@ -202,7 +286,7 @@ function squarifyLayout(
     return Math.max((s2 * maxA) / sum2, sum2 / (s2 * Math.max(minA, 0.0001)));
   };
 
-  const commitRow = (r: { node: DiskTreeNode; area: number }[]) => {
+  const commit = (r: { node: DiskTreeNode; area: number }[]) => {
     const sum = r.reduce((a, b) => a + b.area, 0);
     if (sum <= 0) return;
     if (cw >= ch) {
@@ -210,19 +294,7 @@ function squarifyLayout(
       let oy = cy;
       for (const it of r) {
         const ih = it.area / stripW;
-        const inner =
-          depth < 1 && it.node.is_dir && it.node.children.length > 0 && stripW >= 54 && ih >= 46
-            ? squarifyLayout(it.node.children, cx + 2, oy + 16, stripW - 4, ih - 18, depth + 1)
-            : [];
-        rects.push({
-          node: it.node,
-          x: cx,
-          y: oy,
-          w: stripW,
-          h: ih,
-          depth,
-          children: inner,
-        });
+        out.push({ node: it.node, x: cx, y: oy, w: stripW, h: ih });
         oy += ih;
       }
       cx += stripW;
@@ -232,19 +304,7 @@ function squarifyLayout(
       let ox = cx;
       for (const it of r) {
         const iw = it.area / stripH;
-        const inner =
-          depth < 1 && it.node.is_dir && it.node.children.length > 0 && iw >= 54 && stripH >= 46
-            ? squarifyLayout(it.node.children, ox + 2, cy + 16, iw - 4, stripH - 18, depth + 1)
-            : [];
-        rects.push({
-          node: it.node,
-          x: ox,
-          y: cy,
-          w: iw,
-          h: stripH,
-          depth,
-          children: inner,
-        });
+        out.push({ node: it.node, x: ox, y: cy, w: iw, h: stripH });
         ox += iw;
       }
       cy += stripH;
@@ -258,16 +318,102 @@ function squarifyLayout(
       row.push(item);
       continue;
     }
-    const candidate = [...row, item];
-    if (worstRatio(candidate, side) <= worstRatio(row, side)) {
-      row = candidate;
+    const cand = [...row, item];
+    if (worst(cand, side) <= worst(row, side)) {
+      row = cand;
     } else {
-      commitRow(row);
+      commit(row);
       row = [item];
     }
   }
-  if (row.length > 0) commitRow(row);
-  return rects;
+  if (row.length > 0) commit(row);
+  return out;
+}
+
+function collectTreemapLeaves(
+  node: DiskTreeNode,
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  ancestors: string[],
+  extColorMap: Map<string, string>,
+  fallbackIdx: number,
+  out: PaintedLeaf[]
+): void {
+  if (w < 1.2 || h < 1.2 || node.size_bytes <= 0) return;
+  if (!node.is_dir || node.children.length === 0 || (w < 6 && h < 6)) {
+    const color =
+      node.is_aggregate
+        ? '#595959'
+        : node.ext
+        ? extColorMap.get(node.ext) || '#0078D4'
+        : DIR_FALLBACK_COLORS[fallbackIdx % DIR_FALLBACK_COLORS.length];
+    out.push({
+      node,
+      ancestorPaths: ancestors,
+      x,
+      y,
+      w,
+      h,
+      color,
+    });
+    return;
+  }
+
+  const nextAncestors = [...ancestors, node.path];
+  const pad = w > 18 && h > 18 ? 1 : 0;
+  const rects = squarifyRects(node.children, x + pad, y + pad, w - pad * 2, h - pad * 2);
+  rects.forEach((r, idx) => {
+    collectTreemapLeaves(
+      r.node,
+      r.x,
+      r.y,
+      r.w,
+      r.h,
+      nextAncestors,
+      extColorMap,
+      fallbackIdx + idx + 1,
+      out
+    );
+  });
+}
+
+function spliceTreeChildren(
+  root: DiskTreeNode,
+  targetPath: string,
+  children: DiskTreeNode[]
+): DiskTreeNode {
+  if (root.path === targetPath && root.is_dir) {
+    return { ...root, children };
+  }
+  if (!root.children.length) return root;
+  return {
+    ...root,
+    children: root.children.map((c) => spliceTreeChildren(c, targetPath, children)),
+  };
+}
+
+function findNodeAndAncestors(
+  node: DiskTreeNode,
+  targetPath: string,
+  trail: string[] = []
+): string[] | null {
+  if (node.path === targetPath) return trail;
+  for (const ch of node.children) {
+    const found = findNodeAndAncestors(ch, targetPath, [...trail, node.path]);
+    if (found) return found;
+  }
+  return null;
+}
+
+function findNodeByPath(node: DiskTreeNode, targetPath: string): DiskTreeNode | null {
+  if (node.path === targetPath) return node;
+  for (const ch of node.children) {
+    const f = findNodeByPath(ch, targetPath);
+    if (f) return f;
+  }
+  return null;
 }
 
 export const DiskAnalyzerView: React.FC<Props> = ({ lang }) => {
@@ -276,13 +422,22 @@ export const DiskAnalyzerView: React.FC<Props> = ({ lang }) => {
   const [targetPath, setTargetPath] = useState('');
   const [loading, setLoading] = useState(false);
   const [report, setReport] = useState<DiskAnalysisReport | null>(null);
-  const [navStack, setNavStack] = useState<DiskTreeNode[]>([]);
-  const [bottomTab, setBottomTab] = useState<'treemap' | 'files'>('treemap');
+  const [expandedPaths, setExpandedPaths] = useState<Set<string>>(new Set());
+  const [loadingDirs, setLoadingDirs] = useState<Set<string>>(new Set());
+  const [selectedPath, setSelectedPath] = useState<string | null>(null);
+  const [zoomStack, setZoomStack] = useState<string[]>([]);
+  const [leftTab, setLeftTab] = useState<'tree' | 'files'>('tree');
   const [activeExt, setActiveExt] = useState<string | null>(null);
-  const [hoveredNode, setHoveredNode] = useState<DiskTreeNode | null>(null);
+  const [hoveredLeaf, setHoveredLeaf] = useState<PaintedLeaf | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
-  const hostRef = useRef<HTMLDivElement | null>(null);
-  const [boxSize, setBoxSize] = useState({ w: 800, h: 320 });
+  const [topHeightPct, setTopHeightPct] = useState(54);
+  const [copiedNotice, setCopiedNotice] = useState(false);
+
+  const splitRef = useRef<HTMLDivElement | null>(null);
+  const canvasWrapRef = useRef<HTMLDivElement | null>(null);
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const [canvasSize, setCanvasSize] = useState({ w: 800, h: 260 });
+  const rowRefs = useRef<Map<string, HTMLDivElement>>(new Map());
 
   useEffect(() => {
     api
@@ -297,19 +452,19 @@ export const DiskAnalyzerView: React.FC<Props> = ({ lang }) => {
   }, []);
 
   useEffect(() => {
-    const el = hostRef.current;
+    const el = canvasWrapRef.current;
     if (!el) return;
     const ro = new ResizeObserver((entries) => {
       for (const entry of entries) {
         const { width, height } = entry.contentRect;
-        if (width > 10 && height > 10) {
-          setBoxSize({ w: width, h: height });
+        if (width > 20 && height > 20) {
+          setCanvasSize({ w: Math.floor(width), h: Math.floor(height) });
         }
       }
     });
     ro.observe(el);
     return () => ro.disconnect();
-  }, [report, bottomTab]);
+  }, [report]);
 
   const runAnalyze = async (pathToScan: string) => {
     const trimmed = pathToScan.trim();
@@ -317,12 +472,14 @@ export const DiskAnalyzerView: React.FC<Props> = ({ lang }) => {
     setLoading(true);
     setErrorMsg(null);
     setActiveExt(null);
-    setHoveredNode(null);
+    setHoveredLeaf(null);
     try {
-      const res = await api.analyzeDisk(trimmed, 3);
+      const res = await api.analyzeDisk(trimmed, 4);
       setReport(res);
       setTargetPath(res.root_path);
-      setNavStack([res.tree]);
+      setExpandedPaths(new Set([res.tree.path]));
+      setSelectedPath(res.tree.path);
+      setZoomStack([res.tree.path]);
     } catch (e) {
       setErrorMsg(String(e));
     } finally {
@@ -330,7 +487,62 @@ export const DiskAnalyzerView: React.FC<Props> = ({ lang }) => {
     }
   };
 
-  const currentNode = navStack.length > 0 ? navStack[navStack.length - 1] : report?.tree || null;
+  const toggleExpand = async (node: DiskTreeNode) => {
+    if (!node.is_dir || node.is_aggregate) return;
+    const p = node.path;
+    if (expandedPaths.has(p)) {
+      setExpandedPaths((prev) => {
+        const next = new Set(prev);
+        next.delete(p);
+        return next;
+      });
+      return;
+    }
+
+    if (node.children.length === 0 && node.file_count + node.dir_count > 0) {
+      setLoadingDirs((prev) => new Set(prev).add(p));
+      try {
+        const sub = await api.analyzeDisk(p, 2);
+        setReport((prev) =>
+          prev ? { ...prev, tree: spliceTreeChildren(prev.tree, p, sub.tree.children) } : prev
+        );
+      } catch (e) {
+        setErrorMsg(String(e));
+      } finally {
+        setLoadingDirs((prev) => {
+          const next = new Set(prev);
+          next.delete(p);
+          return next;
+        });
+      }
+    }
+
+    setExpandedPaths((prev) => new Set(prev).add(p));
+  };
+
+  const flatRows = useMemo(() => {
+    if (!report) return [];
+    const rows: FlatTreeRow[] = [];
+    const walk = (node: DiskTreeNode, depth: number, parentBytes: number) => {
+      const hasChildren = node.is_dir && (node.children.length > 0 || node.file_count + node.dir_count > 0);
+      const isExpanded = expandedPaths.has(node.path);
+      rows.push({
+        node,
+        depth,
+        parentBytes,
+        hasChildren,
+        isExpanded,
+        isLoading: loadingDirs.has(node.path),
+      });
+      if (node.is_dir && isExpanded) {
+        for (const ch of node.children) {
+          walk(ch, depth + 1, node.size_bytes);
+        }
+      }
+    };
+    walk(report.tree, 0, report.total_bytes);
+    return rows;
+  }, [report, expandedPaths, loadingDirs]);
 
   const extColorMap = useMemo(() => {
     const map = new Map<string, string>();
@@ -338,41 +550,219 @@ export const DiskAnalyzerView: React.FC<Props> = ({ lang }) => {
     return map;
   }, [report]);
 
-  const treemapRects = useMemo(() => {
-    if (!currentNode || bottomTab !== 'treemap') return [];
-    return squarifyLayout(currentNode.children, 0, 0, boxSize.w, boxSize.h, 0);
-  }, [currentNode, boxSize, bottomTab]);
+  const extDescMap = useMemo(() => {
+    const map = new Map<string, string>();
+    report?.extensions.forEach((e) => map.set(e.ext, pickText(e.description, lang)));
+    return map;
+  }, [report, lang]);
 
-  const handleDrillDown = (node: DiskTreeNode) => {
-    if (node.is_aggregate || !node.is_dir) return;
-    if (node.children.length > 0) {
-      setNavStack((prev) => [...prev, node]);
-    } else {
-      // Pruned leaf directory: launch a targeted deep scan from this path
-      runAnalyze(node.path);
+  const zoomRootNode = useMemo(() => {
+    if (!report) return null;
+    const zPath = zoomStack[zoomStack.length - 1] || report.tree.path;
+    return findNodeByPath(report.tree, zPath) || report.tree;
+  }, [report, zoomStack]);
+
+  const paintedLeaves = useMemo(() => {
+    if (!zoomRootNode) return [];
+    const leaves: PaintedLeaf[] = [];
+    collectTreemapLeaves(
+      zoomRootNode,
+      0,
+      0,
+      canvasSize.w,
+      canvasSize.h,
+      [],
+      extColorMap,
+      0,
+      leaves
+    );
+    return leaves;
+  }, [zoomRootNode, canvasSize, extColorMap]);
+
+  // Draw 3D Cushion Treemap onto HiDPI canvas
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const dpr = window.devicePixelRatio || 1;
+    canvas.width = Math.max(1, Math.floor(canvasSize.w * dpr));
+    canvas.height = Math.max(1, Math.floor(canvasSize.h * dpr));
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.fillStyle = '#14171c';
+    ctx.fillRect(0, 0, canvasSize.w, canvasSize.h);
+
+    for (const leaf of paintedLeaves) {
+      if (leaf.w < 1 || leaf.h < 1) continue;
+      const isExtDimmed =
+        activeExt !== null && (leaf.node.is_dir ? true : leaf.node.ext !== activeExt);
+      const isSelected =
+        selectedPath !== null &&
+        (leaf.node.path === selectedPath || leaf.ancestorPaths.includes(selectedPath));
+
+      ctx.save();
+      if (isExtDimmed) {
+        ctx.globalAlpha = 0.18;
+      }
+
+      if (leaf.w >= 4 && leaf.h >= 4) {
+        const grad = ctx.createLinearGradient(leaf.x, leaf.y, leaf.x + leaf.w, leaf.y + leaf.h);
+        grad.addColorStop(0, adjustHexColor(leaf.color, 0.36));
+        grad.addColorStop(0.32, leaf.color);
+        grad.addColorStop(1, adjustHexColor(leaf.color, -0.45));
+        ctx.fillStyle = grad;
+        ctx.fillRect(leaf.x, leaf.y, leaf.w, leaf.h);
+
+        // Specular top-left bevel & dark bottom-right seam for crisp 3D cushion effect
+        ctx.strokeStyle = 'rgba(255,255,255,0.28)';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(leaf.x + 0.5, leaf.y + leaf.h - 0.5);
+        ctx.lineTo(leaf.x + 0.5, leaf.y + 0.5);
+        ctx.lineTo(leaf.x + leaf.w - 0.5, leaf.y + 0.5);
+        ctx.stroke();
+
+        ctx.strokeStyle = 'rgba(0,0,0,0.45)';
+        ctx.beginPath();
+        ctx.moveTo(leaf.x + leaf.w - 0.5, leaf.y + 0.5);
+        ctx.lineTo(leaf.x + leaf.w - 0.5, leaf.y + leaf.h - 0.5);
+        ctx.lineTo(leaf.x + 0.5, leaf.y + leaf.h - 0.5);
+        ctx.stroke();
+      } else {
+        ctx.fillStyle = leaf.color;
+        ctx.fillRect(leaf.x, leaf.y, leaf.w, leaf.h);
+      }
+
+      if (isSelected) {
+        ctx.globalAlpha = 1;
+        ctx.strokeStyle = '#FFFFFF';
+        ctx.lineWidth = 1.6;
+        ctx.strokeRect(leaf.x + 1, leaf.y + 1, Math.max(1, leaf.w - 2), Math.max(1, leaf.h - 2));
+      }
+
+      if (leaf.w >= 58 && leaf.h >= 20 && !isExtDimmed) {
+        ctx.fillStyle = 'rgba(255,255,255,0.92)';
+        ctx.font = '11px "Segoe UI", "Microsoft YaHei UI", sans-serif';
+        ctx.shadowColor = 'rgba(0,0,0,0.75)';
+        ctx.shadowBlur = 2;
+        const label = leaf.node.is_aggregate
+          ? `+${leaf.node.aggregate_count}`
+          : leaf.node.name;
+        ctx.save();
+        ctx.beginPath();
+        ctx.rect(leaf.x + 3, leaf.y + 2, leaf.w - 6, leaf.h - 4);
+        ctx.clip();
+        ctx.fillText(label, leaf.x + 4, leaf.y + 13);
+        ctx.restore();
+      }
+
+      ctx.restore();
+    }
+
+    if (hoveredLeaf) {
+      ctx.save();
+      ctx.strokeStyle = '#60CDFF';
+      ctx.lineWidth = 2;
+      ctx.strokeRect(
+        hoveredLeaf.x + 1,
+        hoveredLeaf.y + 1,
+        Math.max(1, hoveredLeaf.w - 2),
+        Math.max(1, hoveredLeaf.h - 2)
+      );
+      ctx.restore();
+    }
+  }, [paintedLeaves, canvasSize, activeExt, selectedPath, hoveredLeaf]);
+
+  const hitTest = useCallback(
+    (clientX: number, clientY: number): PaintedLeaf | null => {
+      const canvas = canvasRef.current;
+      if (!canvas) return null;
+      const rect = canvas.getBoundingClientRect();
+      const x = clientX - rect.left;
+      const y = clientY - rect.top;
+      for (let i = paintedLeaves.length - 1; i >= 0; i--) {
+        const lf = paintedLeaves[i];
+        if (x >= lf.x && x <= lf.x + lf.w && y >= lf.y && y <= lf.y + lf.h) {
+          return lf;
+        }
+      }
+      return null;
+    },
+    [paintedLeaves]
+  );
+
+  const selectAndRevealInTree = (path: string) => {
+    setSelectedPath(path);
+    if (!report) return;
+    const ancestors = findNodeAndAncestors(report.tree, path);
+    if (ancestors) {
+      setExpandedPaths((prev) => {
+        const next = new Set(prev);
+        ancestors.forEach((p) => next.add(p));
+        return next;
+      });
+      setTimeout(() => {
+        rowRefs.current.get(path)?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+      }, 40);
     }
   };
 
-  const formatNodeTitle = (node: DiskTreeNode) => {
-    if (!node.is_aggregate) return node.name;
-    return lang === 'zh'
-      ? `[其余 ${node.aggregate_count} 个较小项]`
-      : `[+${node.aggregate_count} smaller items]`;
-  };
-
-  const nodeColor = (node: DiskTreeNode, idx: number) => {
-    if (node.is_aggregate) return '#605E5C';
-    if (!node.is_dir && node.ext) {
-      return extColorMap.get(node.ext) || '#0078D4';
+  const handleCanvasClick = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    const leaf = hitTest(e.clientX, e.clientY);
+    if (!leaf) return;
+    selectAndRevealInTree(leaf.node.path);
+    if (!leaf.node.is_dir && leaf.node.ext) {
+      setActiveExt((prev) => (prev === leaf.node.ext ? prev : null));
     }
-    return FALLBACK_DIR_COLORS[idx % FALLBACK_DIR_COLORS.length];
   };
 
-  const matchesActiveExt = (node: DiskTreeNode): boolean => {
-    if (!activeExt) return true;
-    if (!node.is_dir) return node.ext === activeExt;
-    return node.children.some((c) => matchesActiveExt(c));
+  const handleCanvasDoubleClick = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    const leaf = hitTest(e.clientX, e.clientY);
+    if (!leaf || !report) return;
+    const targetDir = leaf.node.is_dir
+      ? leaf.node.path
+      : leaf.ancestorPaths[leaf.ancestorPaths.length - 1];
+    if (targetDir && targetDir !== zoomStack[zoomStack.length - 1]) {
+      const targetNode = findNodeByPath(report.tree, targetDir);
+      if (targetNode && targetNode.children.length > 0) {
+        setZoomStack((prev) => [...prev, targetDir]);
+      } else {
+        runAnalyze(targetDir);
+      }
+    }
   };
+
+  const startResize = (e: React.MouseEvent) => {
+    e.preventDefault();
+    const container = splitRef.current;
+    if (!container) return;
+    const onMove = (ev: MouseEvent) => {
+      const box = container.getBoundingClientRect();
+      const pct = ((ev.clientY - box.top) / box.height) * 100;
+      setTopHeightPct(Math.max(25, Math.min(78, pct)));
+    };
+    const onUp = () => {
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+    };
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+  };
+
+  const selectedNode = useMemo(() => {
+    if (!report || !selectedPath) return report?.tree || null;
+    return findNodeByPath(report.tree, selectedPath) || report.tree;
+  }, [report, selectedPath]);
+
+  const activeDisplayNode = hoveredLeaf?.node || selectedNode;
+
+  const formatNodeTitle = (node: DiskTreeNode) =>
+    node.is_aggregate
+      ? lang === 'zh'
+        ? `[其余 ${node.aggregate_count} 个较小项]`
+        : `[+${node.aggregate_count} smaller items]`
+      : node.name;
 
   return (
     <div className={styles.root}>
@@ -385,7 +775,7 @@ export const DiskAnalyzerView: React.FC<Props> = ({ lang }) => {
       <div className={styles.toolbar}>
         <div className={styles.presetRow}>
           <Text size={200} weight="semibold">
-            {lang === 'zh' ? '快捷目标：' : 'Presets:'}
+            {lang === 'zh' ? '扫描位置：' : 'Target:'}
           </Text>
           {presets.map((p) => (
             <Button
@@ -401,14 +791,15 @@ export const DiskAnalyzerView: React.FC<Props> = ({ lang }) => {
         </div>
 
         <div className={styles.inputRow}>
-          <div style={{ display: 'flex', gap: 8, flex: 1, minWidth: 300 }}>
+          <div style={{ display: 'flex', gap: 8, flex: 1, minWidth: 280 }}>
             <Input
+              size="small"
               style={{ flex: 1 }}
               contentBefore={<Search20Regular />}
               placeholder={
                 lang === 'zh'
-                  ? '输入任意目录或盘符路径（例如 C:\\Users）'
-                  : 'Enter any folder or drive path (e.g. C:\\Users)'
+                  ? '输入任意目录或盘符（例如 C:\\ 或 C:\\Users）'
+                  : 'Enter any drive or folder path (e.g. C:\\)'
               }
               value={targetPath}
               onChange={(_, d) => setTargetPath(d.value)}
@@ -417,30 +808,33 @@ export const DiskAnalyzerView: React.FC<Props> = ({ lang }) => {
               }}
             />
             <Button
+              size="small"
               appearance="primary"
               disabled={loading || !targetPath.trim()}
               onClick={() => runAnalyze(targetPath)}
             >
               {loading
                 ? lang === 'zh'
-                  ? '并行扫描中...'
-                  : 'Analyzing...'
+                  ? '扫描中...'
+                  : 'Scanning...'
                 : lang === 'zh'
-                ? '开始空间分析'
-                : 'Analyze Space'}
+                ? '开始分析'
+                : 'Analyze'}
             </Button>
           </div>
 
           {report && (
-            <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-              <Badge appearance="tint" color="brand">
+            <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
+              <Badge size="small" appearance="tint" color="brand">
                 {formatBytes(report.total_bytes)}
               </Badge>
-              <Badge appearance="outline">
-                {report.total_files.toLocaleString()} {lang === 'zh' ? '文件' : 'files'} /{' '}
+              <Badge size="small" appearance="outline">
+                {report.total_files.toLocaleString()} {lang === 'zh' ? '文件' : 'files'}
+              </Badge>
+              <Badge size="small" appearance="outline">
                 {report.total_dirs.toLocaleString()} {lang === 'zh' ? '目录' : 'dirs'}
               </Badge>
-              <Badge appearance="tint" color="success">
+              <Badge size="small" appearance="tint" color="success">
                 {report.elapsed_ms} ms
               </Badge>
             </div>
@@ -449,337 +843,461 @@ export const DiskAnalyzerView: React.FC<Props> = ({ lang }) => {
       </div>
 
       {loading ? (
-        <div
-          style={{
-            flex: 1,
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-          }}
-        >
+        <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
           <Spinner
             label={
               lang === 'zh'
-                ? '正在使用并行工作窃取扫描目录树并构建扩展名分布...'
-                : 'Scanning directory tree in parallel...'
+                ? '正在并行扫描目录树并构建立体空间分布图...'
+                : 'Scanning directory tree and computing layout...'
             }
           />
         </div>
-      ) : !report || !currentNode ? (
+      ) : !report ? (
         <div
-          className={styles.panel}
-          style={{ flex: 1, alignItems: 'center', justifyContent: 'center' }}
+          className={styles.paneCard}
+          style={{ flex: 1, alignItems: 'center', justifyContent: 'center', gap: 8, padding: 24 }}
         >
           <Text size={400} weight="semibold">
-            {lang === 'zh'
-              ? 'WinDirStat 风格空间分析器'
-              : 'WinDirStat-Style Disk Space Analyzer'}
+            {lang === 'zh' ? '高速磁盘空间透视分析' : 'High-Speed Disk Space Visualizer'}
           </Text>
           <Text size={200} style={{ color: tokens.colorNeutralForeground3 }}>
             {lang === 'zh'
-              ? '点击上方快捷目录（如 AppData\\Local 或 C:\\）即可可视化定位大文件与目录占比。'
-              : 'Select a preset path or enter a folder above to visualize space usage.'}
+              ? '点击上方快捷目录或盘符，通过可展开目录树、文件类型分布与 3D 曲面树图三栏联动快速定位大文件与冗余缓存。'
+              : 'Select a target folder or drive above to inspect directories, file types, and 3D cushion treemap.'}
           </Text>
         </div>
       ) : (
         <>
-          <div className={styles.topSplit}>
-            {/* Top Left: Directory Tree Breakdown */}
-            <div className={styles.panel}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
-                  <Button
-                    size="small"
-                    icon={<ArrowUp24Regular />}
-                    disabled={navStack.length <= 1}
-                    onClick={() => setNavStack((prev) => prev.slice(0, -1))}
-                  />
-                  <Text size={300} weight="bold" truncate>
-                    {currentNode.path} ({formatBytes(currentNode.size_bytes)})
-                  </Text>
-                </div>
-                <Button
-                  size="small"
-                  appearance="subtle"
-                  icon={<FolderOpen20Regular />}
-                  onClick={() => api.revealInExplorer(currentNode.path)}
-                >
-                  {lang === 'zh' ? '打开目录' : 'Reveal'}
-                </Button>
-              </div>
-
-              <div className={styles.scrollList}>
-                {currentNode.children.map((ch) => {
-                  const pct =
-                    currentNode.size_bytes > 0
-                      ? (ch.size_bytes / currentNode.size_bytes) * 100
-                      : 0;
-                  return (
-                    <div
-                      key={`${ch.path}-${ch.name}`}
-                      className={styles.treeRow}
-                      onClick={() => handleDrillDown(ch)}
-                      onMouseEnter={() => setHoveredNode(ch)}
-                    >
-                      <div style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0, flex: 1 }}>
-                        {ch.is_dir ? (
-                          <Folder20Regular style={{ color: tokens.colorPaletteDarkOrangeForeground1, flexShrink: 0 }} />
-                        ) : (
-                          <Document20Regular style={{ color: tokens.colorBrandForeground1, flexShrink: 0 }} />
-                        )}
-                        <Text size={200} truncate>
-                          {formatNodeTitle(ch)}
-                        </Text>
-                      </div>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
-                        <div
-                          style={{
-                            width: 72,
-                            height: 6,
-                            borderRadius: 4,
-                            backgroundColor: tokens.colorNeutralBackground4,
-                            overflow: 'hidden',
-                          }}
-                        >
-                          <div
-                            style={{
-                              width: `${Math.max(2, pct)}%`,
-                              height: '100%',
-                              backgroundColor: tokens.colorBrandBackground,
-                            }}
-                          />
-                        </div>
-                        <Text size={200} style={{ width: 42, textAlign: 'right' }}>
-                          {pct.toFixed(1)}%
-                        </Text>
-                        <Text size={200} weight="semibold" style={{ width: 68, textAlign: 'right' }}>
-                          {formatBytes(ch.size_bytes)}
-                        </Text>
-                      </div>
+          <div ref={splitRef} className={styles.workspaceSplit}>
+            {/* Top Split: Left TreeGrid / Largest Files + Right Extension Breakdown */}
+            <div className={styles.topSplit} style={{ height: `${topHeightPct}%` }}>
+              {/* Left Pane */}
+              <div className={styles.paneCard}>
+                {leftTab === 'tree' ? (
+                  <>
+                    <div className={`${styles.tableHeader} ${styles.treeGridCols}`}>
+                      <span>{lang === 'zh' ? '名称' : 'Name'}</span>
+                      <span>{lang === 'zh' ? '占比条' : 'Subtree %'}</span>
+                      <span style={{ textAlign: 'right' }}>{lang === 'zh' ? '比例' : '%'}</span>
+                      <span style={{ textAlign: 'right' }}>{lang === 'zh' ? '大小' : 'Size'}</span>
+                      <span style={{ textAlign: 'right' }}>{lang === 'zh' ? '文件' : 'Files'}</span>
                     </div>
-                  );
-                })}
-              </div>
-            </div>
-
-            {/* Top Right: Extension Legend Breakdown */}
-            <div className={styles.panel}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                <Text size={300} weight="bold">
-                  {lang === 'zh' ? '文件扩展名统计（点击高亮色块）' : 'Extensions (Click to Highlight)'}
-                </Text>
-                {activeExt && (
-                  <Button size="small" appearance="subtle" onClick={() => setActiveExt(null)}>
-                    {lang === 'zh' ? '取消高亮' : 'Clear'}
-                  </Button>
-                )}
-              </div>
-
-              <div className={styles.scrollList}>
-                {report.extensions.map((ext) => {
-                  const pct =
-                    report.total_bytes > 0 ? (ext.size_bytes / report.total_bytes) * 100 : 0;
-                  const isActive = activeExt === ext.ext;
-                  return (
-                    <div
-                      key={ext.ext}
-                      className={styles.extRow}
-                      style={{
-                        backgroundColor: isActive ? tokens.colorNeutralBackground1Selected : undefined,
-                      }}
-                      onClick={() => setActiveExt(isActive ? null : ext.ext)}
-                    >
-                      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                        <span
-                          style={{
-                            width: 12,
-                            height: 12,
-                            borderRadius: 3,
-                            backgroundColor: ext.color,
-                            display: 'inline-block',
-                          }}
-                        />
-                        <Text size={200} weight="semibold">
-                          {ext.ext}
-                        </Text>
-                        <Text size={100} style={{ color: tokens.colorNeutralForeground3 }}>
-                          ({ext.file_count.toLocaleString()})
-                        </Text>
-                      </div>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                        <Text size={200}>{pct.toFixed(1)}%</Text>
-                        <Text size={200} weight="semibold" style={{ width: 70, textAlign: 'right' }}>
-                          {formatBytes(ext.size_bytes)}
-                        </Text>
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            </div>
-          </div>
-
-          {/* Bottom: Squarified Treemap or Top 100 Largest Files */}
-          <div className={styles.bottomCanvasCard}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 10 }}>
-              <TabList
-                selectedValue={bottomTab}
-                onTabSelect={(_, d) => setBottomTab(d.value as 'treemap' | 'files')}
-                size="small"
-              >
-                <Tab value="treemap">
-                  {lang === 'zh' ? 'Squarified Treemap 矩形树图' : 'Squarified Treemap'}
-                </Tab>
-                <Tab value="files">
-                  {lang === 'zh'
-                    ? `Top ${report.largest_files.length} 最大单文件`
-                    : `Top ${report.largest_files.length} Largest Files`}
-                </Tab>
-              </TabList>
-
-              {hoveredNode && (
-                <Text size={200} truncate style={{ color: tokens.colorNeutralForeground2 }}>
-                  {hoveredNode.path} · <strong>{formatBytes(hoveredNode.size_bytes)}</strong>
-                </Text>
-              )}
-            </div>
-
-            {bottomTab === 'treemap' ? (
-              <div ref={hostRef} className={styles.treemapHost}>
-                {treemapRects.map((rect, idx) => {
-                  const bg = nodeColor(rect.node, idx);
-                  const dimmed = activeExt && !matchesActiveExt(rect.node);
-                  return (
-                    <div
-                      key={`${rect.node.path}-${rect.node.name}-${idx}`}
-                      title={`${formatNodeTitle(rect.node)}\n${rect.node.path}\n${formatBytes(rect.node.size_bytes)}`}
-                      onMouseEnter={() => setHoveredNode(rect.node)}
-                      onClick={() => handleDrillDown(rect.node)}
-                      style={{
-                        position: 'absolute',
-                        left: rect.x + 1,
-                        top: rect.y + 1,
-                        width: Math.max(0, rect.w - 2),
-                        height: Math.max(0, rect.h - 2),
-                        backgroundColor: rect.children.length > 0 ? '#1F242D' : bg,
-                        border:
-                          rect.children.length > 0
-                            ? `1px solid ${bg}`
-                            : '1px solid rgba(255,255,255,0.22)',
-                        boxSizing: 'border-box',
-                        borderRadius: 3,
-                        overflow: 'hidden',
-                        cursor: rect.node.is_dir && !rect.node.is_aggregate ? 'pointer' : 'default',
-                        opacity: dimmed ? 0.25 : 0.94,
-                        transition: 'opacity 120ms ease',
-                      }}
-                    >
-                      {rect.w >= 44 && rect.h >= 18 && (
-                        <div
-                          style={{
-                            padding: '1px 4px',
-                            fontSize: '11px',
-                            lineHeight: '14px',
-                            color: '#FFFFFF',
-                            textShadow: '0 1px 2px rgba(0,0,0,0.75)',
-                            whiteSpace: 'nowrap',
-                            overflow: 'hidden',
-                            textOverflow: 'ellipsis',
-                            fontWeight: rect.children.length > 0 ? 600 : 400,
-                          }}
-                        >
-                          {formatNodeTitle(rect.node)} ({formatBytes(rect.node.size_bytes)})
-                        </div>
-                      )}
-                      {rect.children.map((ch, cIdx) => {
-                        const cBg = nodeColor(ch.node, cIdx + 3);
-                        const cDimmed = activeExt && !matchesActiveExt(ch.node);
+                    <div className={styles.scrollBody}>
+                      {flatRows.map((row) => {
+                        const pct =
+                          row.parentBytes > 0
+                            ? (row.node.size_bytes / row.parentBytes) * 100
+                            : 100;
+                        const isSel = selectedPath === row.node.path;
                         return (
                           <div
-                            key={`${ch.node.path}-${ch.node.name}-${cIdx}`}
-                            title={`${formatNodeTitle(ch.node)}\n${ch.node.path}\n${formatBytes(ch.node.size_bytes)}`}
-                            onMouseEnter={(e) => {
-                              e.stopPropagation();
-                              setHoveredNode(ch.node);
+                            key={`${row.node.path}-${row.depth}-${row.node.name}`}
+                            ref={(el) => {
+                              if (el) rowRefs.current.set(row.node.path, el);
                             }}
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              handleDrillDown(ch.node);
-                            }}
-                            style={{
-                              position: 'absolute',
-                              left: ch.x - rect.x,
-                              top: ch.y - rect.y,
-                              width: Math.max(0, ch.w - 1),
-                              height: Math.max(0, ch.h - 1),
-                              backgroundColor: cBg,
-                              border: '1px solid rgba(255,255,255,0.2)',
-                              boxSizing: 'border-box',
-                              borderRadius: 2,
-                              overflow: 'hidden',
-                              opacity: cDimmed ? 0.22 : 0.96,
+                            className={`${styles.gridRow} ${styles.treeGridCols} ${
+                              isSel ? styles.gridRowSelected : ''
+                            }`}
+                            onClick={() => setSelectedPath(row.node.path)}
+                            onDoubleClick={() => {
+                              if (row.node.is_dir && !row.node.is_aggregate) {
+                                toggleExpand(row.node);
+                              }
                             }}
                           >
-                            {ch.w >= 46 && ch.h >= 16 && (
-                              <div
+                            <div
+                              style={{
+                                display: 'flex',
+                                alignItems: 'center',
+                                gap: 4,
+                                paddingLeft: row.depth * 14,
+                                minWidth: 0,
+                              }}
+                            >
+                              {row.hasChildren ? (
+                                <span
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    toggleExpand(row.node);
+                                  }}
+                                  style={{
+                                    display: 'inline-flex',
+                                    alignItems: 'center',
+                                    width: 16,
+                                    flexShrink: 0,
+                                  }}
+                                >
+                                  {row.isLoading ? (
+                                    <Spinner size="extra-tiny" />
+                                  ) : row.isExpanded ? (
+                                    <ChevronDown16Regular />
+                                  ) : (
+                                    <ChevronRight16Regular />
+                                  )}
+                                </span>
+                              ) : (
+                                <span style={{ width: 16, flexShrink: 0 }} />
+                              )}
+                              {row.node.is_dir ? (
+                                <Folder16Regular
+                                  style={{
+                                    color: tokens.colorPaletteDarkOrangeForeground1,
+                                    flexShrink: 0,
+                                  }}
+                                />
+                              ) : (
+                                <Document16Regular
+                                  style={{ color: tokens.colorBrandForeground1, flexShrink: 0 }}
+                                />
+                              )}
+                              <span
                                 style={{
-                                  padding: '1px 3px',
-                                  fontSize: '10px',
-                                  color: '#FFFFFF',
-                                  textShadow: '0 1px 2px rgba(0,0,0,0.8)',
-                                  whiteSpace: 'nowrap',
                                   overflow: 'hidden',
                                   textOverflow: 'ellipsis',
+                                  whiteSpace: 'nowrap',
                                 }}
+                                title={row.node.path}
                               >
-                                {formatNodeTitle(ch.node)}
-                              </div>
-                            )}
+                                {formatNodeTitle(row.node)}
+                              </span>
+                              {row.node.is_cache_hint && (
+                                <Badge size="extra-small" appearance="tint" color="warning">
+                                  {lang === 'zh' ? '缓存' : 'Cache'}
+                                </Badge>
+                              )}
+                            </div>
+
+                            <div
+                              style={{
+                                height: 7,
+                                borderRadius: 3,
+                                backgroundColor: tokens.colorNeutralBackground4,
+                                overflow: 'hidden',
+                              }}
+                            >
+                              <div
+                                style={{
+                                  width: `${Math.max(1.5, pct)}%`,
+                                  height: '100%',
+                                  backgroundColor: row.node.is_cache_hint
+                                    ? tokens.colorPaletteDarkOrangeBackground3
+                                    : tokens.colorBrandBackground,
+                                }}
+                              />
+                            </div>
+                            <span style={{ textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>
+                              {pct.toFixed(1)}%
+                            </span>
+                            <span
+                              style={{
+                                textAlign: 'right',
+                                fontWeight: 600,
+                                fontVariantNumeric: 'tabular-nums',
+                              }}
+                            >
+                              {formatBytes(row.node.size_bytes)}
+                            </span>
+                            <span
+                              style={{
+                                textAlign: 'right',
+                                color: tokens.colorNeutralForeground3,
+                                fontVariantNumeric: 'tabular-nums',
+                              }}
+                            >
+                              {row.node.file_count.toLocaleString()}
+                            </span>
                           </div>
                         );
                       })}
                     </div>
-                  );
-                })}
-              </div>
-            ) : (
-              <div className={styles.scrollList}>
-                {report.largest_files.map((f, idx) => (
-                  <div
-                    key={`${f.path}-${idx}`}
-                    className={styles.treeRow}
-                    style={{ backgroundColor: tokens.colorNeutralBackground1 }}
+                  </>
+                ) : (
+                  <>
+                    <div className={`${styles.tableHeader} ${styles.largeFileCols}`}>
+                      <span>{lang === 'zh' ? '文件路径' : 'File Path'}</span>
+                      <span>{lang === 'zh' ? '类型' : 'Ext'}</span>
+                      <span style={{ textAlign: 'right' }}>{lang === 'zh' ? '大小' : 'Size'}</span>
+                      <span style={{ textAlign: 'center' }}>{lang === 'zh' ? '定位' : 'Open'}</span>
+                    </div>
+                    <div className={styles.scrollBody}>
+                      {report.largest_files.map((lf, i) => (
+                        <div
+                          key={`${lf.path}-${i}`}
+                          className={`${styles.gridRow} ${styles.largeFileCols} ${
+                            selectedPath === lf.path ? styles.gridRowSelected : ''
+                          }`}
+                          onClick={() => selectAndRevealInTree(lf.path)}
+                        >
+                          <span
+                            title={lf.path}
+                            style={{
+                              overflow: 'hidden',
+                              textOverflow: 'ellipsis',
+                              whiteSpace: 'nowrap',
+                              fontFamily: 'Consolas, monospace',
+                            }}
+                          >
+                            {lf.path}
+                          </span>
+                          <Badge size="small" appearance="outline">
+                            {lf.ext}
+                          </Badge>
+                          <span style={{ textAlign: 'right', fontWeight: 600 }}>
+                            {formatBytes(lf.size_bytes)}
+                          </span>
+                          <Button
+                            size="small"
+                            appearance="subtle"
+                            icon={<FolderOpen16Regular />}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              api.revealInExplorer(lf.path);
+                            }}
+                          />
+                        </div>
+                      ))}
+                    </div>
+                  </>
+                )}
+
+                <div className={styles.leftPaneFooter}>
+                  <TabList
+                    size="small"
+                    selectedValue={leftTab}
+                    onTabSelect={(_, d) => setLeftTab(d.value as 'tree' | 'files')}
                   >
-                    <div style={{ display: 'flex', flexDirection: 'column', minWidth: 0, flex: 1 }}>
-                      <Text size={200} weight="semibold" truncate>
-                        {f.name}
-                      </Text>
-                      <Text
-                        size={100}
-                        truncate
-                        style={{ color: tokens.colorNeutralForeground3, fontFamily: 'Consolas, monospace' }}
+                    <Tab value="tree">{lang === 'zh' ? '所有文件' : 'All Files'}</Tab>
+                    <Tab value="files">
+                      {lang === 'zh'
+                        ? `最大文件 (${report.largest_files.length})`
+                        : `Largest Files (${report.largest_files.length})`}
+                    </Tab>
+                  </TabList>
+                  <Text size={100} style={{ color: tokens.colorNeutralForeground3 }}>
+                    {lang === 'zh' ? '双击目录展开 / 懒加载深层子项' : 'Double-click dir to expand'}
+                  </Text>
+                </div>
+              </div>
+
+              {/* Right Pane: Extensions Table */}
+              <div className={styles.paneCard}>
+                <div className={`${styles.tableHeader} ${styles.extGridCols}`}>
+                  <span>{lang === 'zh' ? '扩展名' : 'Ext'}</span>
+                  <span>{lang === 'zh' ? '色' : 'C'}</span>
+                  <span>{lang === 'zh' ? '描述' : 'Description'}</span>
+                  <span style={{ textAlign: 'right' }}>{lang === 'zh' ? '大小' : 'Size'}</span>
+                  <span style={{ textAlign: 'right' }}>{lang === 'zh' ? '占比' : '%'}</span>
+                  <span style={{ textAlign: 'right' }}>{lang === 'zh' ? '文件' : 'Files'}</span>
+                </div>
+                <div className={styles.scrollBody}>
+                  {report.extensions.map((ext) => {
+                    const pct =
+                      report.total_bytes > 0 ? (ext.size_bytes / report.total_bytes) * 100 : 0;
+                    const isAct = activeExt === ext.ext;
+                    return (
+                      <div
+                        key={ext.ext}
+                        className={`${styles.gridRow} ${styles.extGridCols} ${
+                          isAct ? styles.gridRowSelected : ''
+                        }`}
+                        onClick={() => setActiveExt(isAct ? null : ext.ext)}
                       >
-                        {f.path}
-                      </Text>
-                    </div>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                      <Badge size="small" appearance="outline">
-                        {f.ext}
-                      </Badge>
-                      <Text size={200} weight="bold" style={{ width: 76, textAlign: 'right' }}>
-                        {formatBytes(f.size_bytes)}
-                      </Text>
-                      <Button
-                        size="small"
-                        appearance="subtle"
-                        icon={<FolderOpen20Regular />}
-                        onClick={() => api.revealInExplorer(f.path)}
-                      >
-                        {lang === 'zh' ? '定位' : 'Reveal'}
-                      </Button>
-                    </div>
-                  </div>
-                ))}
+                        <span style={{ fontWeight: 600 }}>{ext.ext}</span>
+                        <span
+                          style={{
+                            width: 14,
+                            height: 14,
+                            borderRadius: 3,
+                            background: `linear-gradient(135deg, ${adjustHexColor(
+                              ext.color,
+                              0.35
+                            )}, ${ext.color}, ${adjustHexColor(ext.color, -0.4)})`,
+                            border: '1px solid rgba(255,255,255,0.2)',
+                            display: 'inline-block',
+                          }}
+                        />
+                        <span
+                          style={{
+                            overflow: 'hidden',
+                            textOverflow: 'ellipsis',
+                            whiteSpace: 'nowrap',
+                            color: tokens.colorNeutralForeground2,
+                          }}
+                        >
+                          {pickText(ext.description, lang)}
+                        </span>
+                        <span
+                          style={{
+                            textAlign: 'right',
+                            fontWeight: 600,
+                            fontVariantNumeric: 'tabular-nums',
+                          }}
+                        >
+                          {formatBytes(ext.size_bytes)}
+                        </span>
+                        <span style={{ textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>
+                          {pct.toFixed(1)}%
+                        </span>
+                        <span
+                          style={{
+                            textAlign: 'right',
+                            color: tokens.colorNeutralForeground3,
+                            fontVariantNumeric: 'tabular-nums',
+                          }}
+                        >
+                          {ext.file_count.toLocaleString()}
+                        </span>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            </div>
+
+            {/* Draggable Splitter */}
+            <div
+              className={styles.resizer}
+              onMouseDown={startResize}
+              title={lang === 'zh' ? '上下拖动调整分区高度' : 'Drag to resize panes'}
+            >
+              <div className={styles.resizerPill} />
+            </div>
+
+            {/* Bottom Pane: Full-width 3D Cushion Treemap */}
+            <div className={styles.treemapCard}>
+              <div className={styles.treemapToolbar}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
+                  <Button
+                    size="small"
+                    appearance="subtle"
+                    icon={<ArrowUp20Regular />}
+                    disabled={zoomStack.length <= 1}
+                    onClick={() => setZoomStack((prev) => prev.slice(0, -1))}
+                  >
+                    {lang === 'zh' ? '返回上级视口' : 'Zoom Out'}
+                  </Button>
+                  <Button
+                    size="small"
+                    appearance="subtle"
+                    icon={<ZoomIn16Regular />}
+                    disabled={!selectedNode || !selectedNode.is_dir || selectedNode.path === zoomRootNode?.path}
+                    onClick={() => {
+                      if (selectedNode && selectedNode.is_dir) {
+                        if (selectedNode.children.length > 0) {
+                          setZoomStack((prev) => [...prev, selectedNode.path]);
+                        } else {
+                          runAnalyze(selectedNode.path);
+                        }
+                      }
+                    }}
+                  >
+                    {lang === 'zh' ? '聚焦选中目录' : 'Focus Selected'}
+                  </Button>
+                  {zoomStack.length > 1 && (
+                    <Button
+                      size="small"
+                      appearance="subtle"
+                      icon={<ZoomOut16Regular />}
+                      onClick={() => setZoomStack([report.tree.path])}
+                    >
+                      {lang === 'zh' ? '重置全局' : 'Reset Zoom'}
+                    </Button>
+                  )}
+                  <Text size={200} truncate style={{ color: tokens.colorNeutralForeground2 }}>
+                    {zoomRootNode?.path}
+                  </Text>
+                </div>
+
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
+                  {activeExt && (
+                    <Badge
+                      size="small"
+                      appearance="filled"
+                      color="brand"
+                      style={{ cursor: 'pointer' }}
+                      onClick={() => setActiveExt(null)}
+                    >
+                      {lang === 'zh' ? `高亮 ${activeExt} (点击取消)` : `Filter: ${activeExt} ×`}
+                    </Badge>
+                  )}
+                  <Text size={100} style={{ color: tokens.colorNeutralForeground3 }}>
+                    {lang === 'zh'
+                      ? '单击色块联动定位 · 双击目录聚焦下钻'
+                      : 'Click block to locate · Double-click to zoom'}
+                  </Text>
+                </div>
+              </div>
+
+              <div ref={canvasWrapRef} className={styles.canvasWrap}>
+                <canvas
+                  ref={canvasRef}
+                  style={{ width: '100%', height: '100%', display: 'block', cursor: 'crosshair' }}
+                  onMouseMove={(e) => setHoveredLeaf(hitTest(e.clientX, e.clientY))}
+                  onMouseLeave={() => setHoveredLeaf(null)}
+                  onClick={handleCanvasClick}
+                  onDoubleClick={handleCanvasDoubleClick}
+                />
+              </div>
+            </div>
+          </div>
+
+          {/* Bottom Status Bar */}
+          <div className={styles.statusBar}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0, flex: 1 }}>
+              {activeDisplayNode ? (
+                <>
+                  <Text
+                    size={200}
+                    truncate
+                    style={{ fontFamily: 'Consolas, monospace', color: tokens.colorNeutralForeground1 }}
+                    title={activeDisplayNode.path}
+                  >
+                    {activeDisplayNode.path}
+                  </Text>
+                  <Badge size="small" appearance="tint" color="brand">
+                    {formatBytes(activeDisplayNode.size_bytes)}
+                  </Badge>
+                  {activeDisplayNode.ext && extDescMap.get(activeDisplayNode.ext) && (
+                    <Text size={100} style={{ color: tokens.colorNeutralForeground3 }}>
+                      {extDescMap.get(activeDisplayNode.ext)}
+                    </Text>
+                  )}
+                </>
+              ) : (
+                <Text size={200} style={{ color: tokens.colorNeutralForeground3 }}>
+                  {lang === 'zh' ? '就绪' : 'Ready'}
+                </Text>
+              )}
+            </div>
+
+            {selectedNode && !selectedNode.is_aggregate && (
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
+                <Button
+                  size="small"
+                  appearance="subtle"
+                  icon={<Copy16Regular />}
+                  onClick={() => {
+                    navigator.clipboard?.writeText(selectedNode.path);
+                    setCopiedNotice(true);
+                    setTimeout(() => setCopiedNotice(false), 1500);
+                  }}
+                >
+                  {copiedNotice
+                    ? lang === 'zh'
+                      ? '已复制'
+                      : 'Copied'
+                    : lang === 'zh'
+                    ? '复制路径'
+                    : 'Copy Path'}
+                </Button>
+                <Button
+                  size="small"
+                  appearance="primary"
+                  icon={<FolderOpen16Regular />}
+                  onClick={() => api.revealInExplorer(selectedNode.path)}
+                >
+                  {lang === 'zh' ? '在资源管理器中定位' : 'Reveal in Explorer'}
+                </Button>
               </div>
             )}
           </div>

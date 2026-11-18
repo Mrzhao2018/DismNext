@@ -260,14 +260,14 @@ fn dispatch_api(
                                 Action::Custom { proc_name, .. }
                                 if matches!(
                                     proc_name.as_str(),
-                                    "DismComponentCleanup"
-                                        | "DismCompactOs"
-                                        | "DismHardLinkMerge"
-                                        | "DismDriverCleanup"
-                                        | "DismAppxsCleanup"
-                                        | "NCCorruptedAppXOnlineCleanup"
-                                        | "NCSRPointOnlineCleanup"
-                                        | "NCInstallerFolderCleanup"
+                                    "BuiltinComponentCleanup"
+                                        | "BuiltinCompactOs"
+                                        | "BuiltinHardLinkMerge"
+                                        | "BuiltinDriverCleanup"
+                                        | "BuiltinAppxCleanup"
+                                        | "BuiltinCorruptedAppxCleanup"
+                                        | "BuiltinRestorePointCleanup"
+                                        | "BuiltinInstallerCleanup"
                                 )
                             )
                         });
@@ -394,7 +394,7 @@ fn dispatch_api(
             let payload: DiskAnalyzeReq = read_json_body(req)?;
             let report = analyze_path(
                 Path::new(payload.path.trim()),
-                payload.max_depth.unwrap_or(3),
+                payload.max_depth.unwrap_or(4),
             )?;
             Ok(serde_json::to_value(report)?)
         }

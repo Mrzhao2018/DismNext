@@ -230,7 +230,7 @@ const AppShell: React.FC<{
               icon={<DataPie24Regular />}
               onClick={() => setTab('diskmap')}
             >
-              {lang === 'zh' ? '空间分析 (Treemap)' : 'Space Analyzer'}
+              {lang === 'zh' ? '空间分析' : 'Space Analyzer'}
             </Button>
             <Button
               className={styles.navBtn}

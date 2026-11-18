@@ -39,7 +39,7 @@
           "actions": [
             {
               "type": "Custom",
-              "proc_name": "DismComponentCleanup",
+              "proc_name": "BuiltinComponentCleanup",
               "flags": "#1"
             }
           ],
@@ -73,7 +73,7 @@
           "actions": [
             {
               "type": "Custom",
-              "proc_name": "DismComponentCleanup",
+              "proc_name": "BuiltinComponentCleanup",
               "flags": "#1"
             }
           ],
@@ -115,7 +115,7 @@
           "actions": [
             {
               "type": "Custom",
-              "proc_name": "DismComponentCleanup",
+              "proc_name": "BuiltinComponentCleanup",
               "flags": null
             }
           ],
@@ -178,118 +178,6 @@
     {
       "id": "clean-003",
       "name": {
-        "zh": "以前的Dism++组件",
-        "en": "Leftover Files of the Previous Version(s) of Dism++"
-      },
-      "group": {
-        "zh": "过期文件",
-        "en": "Expired files"
-      },
-      "description": {
-        "zh": "以前版本的Dism++使用的文件。",
-        "en": "Files used by the previous version(s) of Dism++."
-      },
-      "warning": null,
-      "level": 3,
-      "work": null,
-      "source": "official-1002.2",
-      "scans": [
-        {
-          "work": 1,
-          "scan_type": null,
-          "name_override": null,
-          "description_override": null,
-          "warning_override": null,
-          "applicable": {
-            "type": "ImageFlags",
-            "mask": 1
-          },
-          "named_applicables": {},
-          "actions": [
-            {
-              "type": "General",
-              "root_path": "%0%Config\\",
-              "flags": "Directory|File",
-              "id": null,
-              "queries": [
-                "wsusscn2.cab.Session",
-                "DismRule.xml",
-                "Dism.xml",
-                "Config*"
-              ],
-              "excluded": [
-                "Config.ini"
-              ]
-            },
-            {
-              "type": "General",
-              "root_path": "%0%Config\\amd64",
-              "flags": "Directory|File",
-              "id": null,
-              "queries": [
-                "BCDBoot",
-                "DuiLib.dll",
-                "Plug-in",
-                "nativedism.exe",
-                "Dism"
-              ],
-              "excluded": []
-            },
-            {
-              "type": "General",
-              "root_path": "%0%Config\\x86",
-              "flags": "Directory|File",
-              "id": null,
-              "queries": [
-                "BCDBoot",
-                "DuiLib.dll",
-                "Plug-in",
-                "nativedism.exe",
-                "Dism"
-              ],
-              "excluded": []
-            },
-            {
-              "type": "General",
-              "root_path": "%0%Config\\Languages",
-              "flags": "Directory|File",
-              "id": null,
-              "queries": [],
-              "excluded": [
-                "?GetLocaleName().zip"
-              ]
-            },
-            {
-              "type": "General",
-              "root_path": "%0%Config\\Plugins",
-              "flags": "Directory",
-              "id": null,
-              "queries": [
-                "{*}"
-              ],
-              "excluded": []
-            },
-            {
-              "type": "General",
-              "root_path": "%0%",
-              "flags": "Directory|File",
-              "id": null,
-              "queries": [
-                "*.dmp",
-                "What's New(beta).txt",
-                "What's New(Public).txt"
-              ],
-              "excluded": []
-            }
-          ],
-          "rescan": false,
-          "restart": null
-        }
-      ]
-    },
-    {
-      "id": "clean-004",
-      "name": {
         "zh": "360浏览器老版本备份",
         "en": "Previous Backup of 360 Web Browser"
       },
@@ -347,7 +235,7 @@
       ]
     },
     {
-      "id": "clean-005",
+      "id": "clean-004",
       "name": {
         "zh": "阿里旺旺老版本备份",
         "en": "Previous Backup of AliIM"
@@ -410,7 +298,7 @@
       ]
     },
     {
-      "id": "clean-006",
+      "id": "clean-005",
       "name": {
         "zh": "阿里亲淘老版本备份",
         "en": "Previous Backup of AliQinTao"
@@ -473,7 +361,7 @@
       ]
     },
     {
-      "id": "clean-007",
+      "id": "clean-006",
       "name": {
         "zh": "Chrome浏览器老版本备份（by Honry）",
         "en": "Previous Backup of Chrome (by Honry)"
@@ -611,7 +499,7 @@
       ]
     },
     {
-      "id": "clean-008",
+      "id": "clean-007",
       "name": {
         "zh": "Opera浏览器老版本备份（by MS-PC2）",
         "en": "Previous Backup of Opera (by MS-PC2)"
@@ -719,7 +607,7 @@
       ]
     },
     {
-      "id": "clean-009",
+      "id": "clean-008",
       "name": {
         "zh": "PPLive老版本备份（by 何超）",
         "en": "Previous Backup of PPLive (by HeChao)"
@@ -782,7 +670,7 @@
       ]
     },
     {
-      "id": "clean-010",
+      "id": "clean-009",
       "name": {
         "zh": "酷狗音乐老版本备份（by 何超）",
         "en": "Previous Backup of Kugou Music (by HeChao)"
@@ -845,7 +733,7 @@
       ]
     },
     {
-      "id": "clean-011",
+      "id": "clean-010",
       "name": {
         "zh": "2345拼音输入法老版本备份（by 何超）",
         "en": "Previous Backup of 2345 Pinyin IME (by HeChao)"
@@ -908,7 +796,7 @@
       ]
     },
     {
-      "id": "clean-012",
+      "id": "clean-011",
       "name": {
         "zh": "WPS老版本备份（by Rambin）",
         "en": "Previous Backup of WPS (by Rambin)"
@@ -971,7 +859,7 @@
       ]
     },
     {
-      "id": "clean-013",
+      "id": "clean-012",
       "name": {
         "zh": "系统自带Appx应用",
         "en": "Built-in Windows Store Application"
@@ -1022,7 +910,7 @@
           "actions": [
             {
               "type": "Custom",
-              "proc_name": "DismAppxsCleanup",
+              "proc_name": "BuiltinAppxCleanup",
               "flags": null
             }
           ],
@@ -1032,7 +920,7 @@
       ]
     },
     {
-      "id": "clean-014",
+      "id": "clean-013",
       "name": {
         "zh": "Windows报告",
         "en": "Windows Error Report"
@@ -1092,7 +980,7 @@
       ]
     },
     {
-      "id": "clean-015",
+      "id": "clean-014",
       "name": {
         "zh": "Windows事件",
         "en": "Windows Events"
@@ -1124,7 +1012,7 @@
           "actions": [
             {
               "type": "Custom",
-              "proc_name": "NCWinEventLogOnlineCleanup",
+              "proc_name": "BuiltinEventLogCleanup",
               "flags": null
             }
           ],
@@ -1157,7 +1045,7 @@
       ]
     },
     {
-      "id": "clean-016",
+      "id": "clean-015",
       "name": {
         "zh": "Windows更新安装记录",
         "en": "Windows Update Installation History"
@@ -1215,7 +1103,7 @@
       ]
     },
     {
-      "id": "clean-017",
+      "id": "clean-016",
       "name": {
         "zh": "Installer目录",
         "en": "Installer Folder"
@@ -1251,7 +1139,7 @@
           "actions": [
             {
               "type": "Custom",
-              "proc_name": "NCInstallerFolderCleanup",
+              "proc_name": "BuiltinInstallerCleanup",
               "flags": null
             }
           ],
@@ -1261,7 +1149,7 @@
       ]
     },
     {
-      "id": "clean-018",
+      "id": "clean-017",
       "name": {
         "zh": "损坏的Appx",
         "en": "Damaged Appx"
@@ -1339,7 +1227,7 @@
           "actions": [
             {
               "type": "Custom",
-              "proc_name": "NCCorruptedAppXOnlineCleanup",
+              "proc_name": "BuiltinCorruptedAppxCleanup",
               "flags": null
             }
           ],
@@ -1349,7 +1237,7 @@
       ]
     },
     {
-      "id": "clean-019",
+      "id": "clean-018",
       "name": {
         "zh": "系统还原点",
         "en": "System Restore Points"
@@ -1384,7 +1272,7 @@
           "actions": [
             {
               "type": "Custom",
-              "proc_name": "NCSRPointOnlineCleanup",
+              "proc_name": "BuiltinRestorePointCleanup",
               "flags": null
             }
           ],
@@ -1394,7 +1282,7 @@
       ]
     },
     {
-      "id": "clean-020",
+      "id": "clean-019",
       "name": {
         "zh": "零售演示离线内容",
         "en": "Retail Demo Offline Content"
@@ -1440,7 +1328,7 @@
       ]
     },
     {
-      "id": "clean-021",
+      "id": "clean-020",
       "name": {
         "zh": "NuGet包缓存",
         "en": "NuGet Package Cache"
@@ -1518,7 +1406,7 @@
       ]
     },
     {
-      "id": "clean-022",
+      "id": "clean-021",
       "name": {
         "zh": "Windows下载缓存",
         "en": "Windows Download Cache"
@@ -1598,7 +1486,7 @@
       ]
     },
     {
-      "id": "clean-023",
+      "id": "clean-022",
       "name": {
         "zh": "传递优化缓存",
         "en": "Delivery Optimization Cache"
@@ -1655,7 +1543,7 @@
           "actions": [
             {
               "type": "Custom",
-              "proc_name": "NCDOCacheOnlineCleanup",
+              "proc_name": "BuiltinDeliveryOptCleanup",
               "flags": null
             }
           ],
@@ -1690,7 +1578,7 @@
       ]
     },
     {
-      "id": "clean-024",
+      "id": "clean-023",
       "name": {
         "zh": "Terminal Server Client缓存",
         "en": "Terminal Server Client Cache"
@@ -1734,7 +1622,7 @@
       ]
     },
     {
-      "id": "clean-025",
+      "id": "clean-024",
       "name": {
         "zh": "XDE缓存文件",
         "en": "XDE Cache Files"
@@ -1788,7 +1676,7 @@
       ]
     },
     {
-      "id": "clean-026",
+      "id": "clean-025",
       "name": {
         "zh": "PDB缓存文件",
         "en": "PDB Cache Files"
@@ -1836,7 +1724,7 @@
       ]
     },
     {
-      "id": "clean-027",
+      "id": "clean-026",
       "name": {
         "zh": "NET程序集缓存（by 大胖子技术员）",
         "en": "NET Assembly Cache (by dpzjsy)"
@@ -1900,7 +1788,7 @@
       ]
     },
     {
-      "id": "clean-028",
+      "id": "clean-027",
       "name": {
         "zh": "Visual Studio智能跟踪（by LP）",
         "en": "Visual Studio IntelliTrace (by LP)"
@@ -1946,7 +1834,7 @@
       ]
     },
     {
-      "id": "clean-029",
+      "id": "clean-028",
       "name": {
         "zh": "Windows预读取文件（by 辰g.）",
         "en": "Windows Prefetch Files (by Cheng g.)"
@@ -1990,7 +1878,7 @@
       ]
     },
     {
-      "id": "clean-030",
+      "id": "clean-029",
       "name": {
         "zh": "缩略图缓存",
         "en": "Thumbnail Cache"
@@ -2082,7 +1970,7 @@
       ]
     },
     {
-      "id": "clean-031",
+      "id": "clean-030",
       "name": {
         "zh": "WinINet网页缓存",
         "en": "WinINet Web Cache"
@@ -2230,7 +2118,7 @@
       ]
     },
     {
-      "id": "clean-032",
+      "id": "clean-031",
       "name": {
         "zh": "WinINet Cookies",
         "en": "WinINet Cookies"
@@ -2378,7 +2266,7 @@
       ]
     },
     {
-      "id": "clean-033",
+      "id": "clean-032",
       "name": {
         "zh": "Package Cache目录",
         "en": "Package Cache Folder"
@@ -2414,7 +2302,7 @@
           "actions": [
             {
               "type": "Custom",
-              "proc_name": "NCPackageCacheFolderCleanup",
+              "proc_name": "BuiltinPackageCacheCleanup",
               "flags": null
             }
           ],
@@ -2424,7 +2312,7 @@
       ]
     },
     {
-      "id": "clean-034",
+      "id": "clean-033",
       "name": {
         "zh": "Windows Defender保护历史记录",
         "en": "Windows Defender Protection History"
@@ -2473,7 +2361,7 @@
       ]
     },
     {
-      "id": "clean-035",
+      "id": "clean-034",
       "name": {
         "zh": "WebPI缓存",
         "en": "WebPI Cache"
@@ -2523,7 +2411,7 @@
       ]
     },
     {
-      "id": "clean-036",
+      "id": "clean-035",
       "name": {
         "zh": "新版Visual Studio安装源缓存",
         "en": "New Visual Studio installation source cache"
@@ -2559,7 +2447,7 @@
           "actions": [
             {
               "type": "Custom",
-              "proc_name": "NCVSPackageCacheCleanup",
+              "proc_name": "BuiltinVsPackageCacheCleanup",
               "flags": null
             }
           ],
@@ -2569,7 +2457,7 @@
       ]
     },
     {
-      "id": "clean-037",
+      "id": "clean-036",
       "name": {
         "zh": "Boot备份信息",
         "en": "Boot Backup File"
@@ -2617,7 +2505,7 @@
       ]
     },
     {
-      "id": "clean-038",
+      "id": "clean-037",
       "name": {
         "zh": "硬链接备份",
         "en": "HardLink Backup"
@@ -2668,7 +2556,7 @@
       ]
     },
     {
-      "id": "clean-039",
+      "id": "clean-038",
       "name": {
         "zh": "会声会影素材存档",
         "en": "Ulead Video Studio Material Archive"
@@ -2726,7 +2614,7 @@
       ]
     },
     {
-      "id": "clean-040",
+      "id": "clean-039",
       "name": {
         "zh": "最后一次正确配置（by Stanlazy）",
         "en": "Last Known Good Configuration (by Stanlazy)"
@@ -2785,7 +2673,7 @@
       ]
     },
     {
-      "id": "clean-041",
+      "id": "clean-040",
       "name": {
         "zh": "WinSxS临时文件",
         "en": "WinSxS Temp Files"
@@ -2837,7 +2725,7 @@
       ]
     },
     {
-      "id": "clean-042",
+      "id": "clean-041",
       "name": {
         "zh": "Windows日志（by chenyu、YukiSakura）",
         "en": "Windows Log (by chenyu, YukiSakura)"
@@ -2998,7 +2886,7 @@
       ]
     },
     {
-      "id": "clean-043",
+      "id": "clean-042",
       "name": {
         "zh": "临时文件",
         "en": "Temprorary Files"
@@ -3172,7 +3060,7 @@
       ]
     },
     {
-      "id": "clean-044",
+      "id": "clean-043",
       "name": {
         "zh": "常见的驱动临时解压目录",
         "en": "Temprorary Driver Directories"
@@ -3238,7 +3126,7 @@
       ]
     },
     {
-      "id": "clean-045",
+      "id": "clean-044",
       "name": {
         "zh": "Windows临时安装文件",
         "en": "Windows Temporary Installation Files"
@@ -3303,7 +3191,7 @@
       ]
     },
     {
-      "id": "clean-046",
+      "id": "clean-045",
       "name": {
         "zh": "QQ临时数据",
         "en": "Tencent QQ Temporary Files"
@@ -3375,7 +3263,7 @@
       ]
     },
     {
-      "id": "clean-047",
+      "id": "clean-046",
       "name": {
         "zh": "YY临时文件",
         "en": "YY Temporary Files"
@@ -3428,7 +3316,7 @@
       ]
     },
     {
-      "id": "clean-048",
+      "id": "clean-047",
       "name": {
         "zh": "ProgramData 通用临时目录（原腾讯下载目录）",
         "en": "ProgramData Shared Temp Folder (Legacy Tencent Download Rule)"
@@ -3479,7 +3367,7 @@
       ]
     },
     {
-      "id": "clean-049",
+      "id": "clean-048",
       "name": {
         "zh": "微软拼音安装文件",
         "en": "Microsoft Pinyin Installation Files"
@@ -3531,7 +3419,7 @@
       ]
     },
     {
-      "id": "clean-050",
+      "id": "clean-049",
       "name": {
         "zh": "百度网盘日志",
         "en": "Baidu Yun log"
@@ -3595,7 +3483,7 @@
       ]
     },
     {
-      "id": "clean-051",
+      "id": "clean-050",
       "name": {
         "zh": "飞信日志",
         "en": "Fetion log"
@@ -3641,7 +3529,7 @@
       ]
     },
     {
-      "id": "clean-052",
+      "id": "clean-051",
       "name": {
         "zh": "回收站",
         "en": "Recycle Bin"
@@ -3686,7 +3574,7 @@
       ]
     },
     {
-      "id": "clean-053",
+      "id": "clean-052",
       "name": {
         "zh": "系统以及程序崩溃dmp文件（by YukiSakura）",
         "en": "Dump Files of System and Applications (by YukiSakura)"
@@ -3743,7 +3631,7 @@
       ]
     },
     {
-      "id": "clean-054",
+      "id": "clean-053",
       "name": {
         "zh": "微软系安软无用文件",
         "en": "Redundant Files Created by Microsoft Anti-Malware"
@@ -3839,7 +3727,7 @@
       ]
     },
     {
-      "id": "clean-055",
+      "id": "clean-054",
       "name": {
         "zh": "Visual Studio日志",
         "en": "Visual Studio Log Files"
@@ -3885,7 +3773,7 @@
       ]
     },
     {
-      "id": "clean-056",
+      "id": "clean-055",
       "name": {
         "zh": "IDM临时文件（by MS-PC2）",
         "en": "Internet Download Manager temporary files (by MS-PC2)"
@@ -3956,7 +3844,7 @@
       ]
     },
     {
-      "id": "clean-057",
+      "id": "clean-056",
       "name": {
         "zh": "CompactOs（较慢）",
         "en": "CompactOs (slower)"
@@ -4036,7 +3924,7 @@
           "actions": [
             {
               "type": "Custom",
-              "proc_name": "DismCompactOs",
+              "proc_name": "BuiltinCompactOs",
               "flags": null
             }
           ],
@@ -4046,7 +3934,7 @@
       ]
     },
     {
-      "id": "clean-058",
+      "id": "clean-057",
       "name": {
         "zh": "硬链接合并（较慢）",
         "en": "Hard link merge (slower)"
@@ -4080,7 +3968,7 @@
           "actions": [
             {
               "type": "Custom",
-              "proc_name": "DismHardLinkMerge",
+              "proc_name": "BuiltinHardLinkMerge",
               "flags": null
             }
           ],
@@ -4090,7 +3978,7 @@
       ]
     },
     {
-      "id": "clean-059",
+      "id": "clean-058",
       "name": {
         "zh": "过期驱动",
         "en": "Outdated Drivers"
@@ -4124,7 +4012,7 @@
           "actions": [
             {
               "type": "Custom",
-              "proc_name": "DismDriverCleanup",
+              "proc_name": "BuiltinDriverCleanup",
               "flags": null
             }
           ],
@@ -4134,7 +4022,7 @@
       ]
     },
     {
-      "id": "clean-060",
+      "id": "clean-059",
       "name": {
         "zh": "过期Appx应用",
         "en": "Outdated Appx application"
@@ -4183,7 +4071,7 @@
           "actions": [
             {
               "type": "Custom",
-              "proc_name": "DismAppxsCleanup",
+              "proc_name": "BuiltinAppxCleanup",
               "flags": null
             }
           ],
@@ -4193,7 +4081,7 @@
       ]
     },
     {
-      "id": "clean-061",
+      "id": "clean-060",
       "name": {
         "zh": "Installer基线缓存",
         "en": "Installer Baseline Cache"
@@ -4257,7 +4145,7 @@
       ]
     },
     {
-      "id": "clean-062",
+      "id": "clean-061",
       "name": {
         "zh": "Office安装源",
         "en": "Office Installation Source"
@@ -4362,7 +4250,7 @@
       ]
     },
     {
-      "id": "clean-063",
+      "id": "clean-062",
       "name": {
         "zh": "Office 365/2016安装源",
         "en": "Office 365/2016 Installation Source"
@@ -4414,7 +4302,7 @@
       ]
     },
     {
-      "id": "clean-064",
+      "id": "clean-063",
       "name": {
         "zh": "苹果iTunes备份",
         "en": "Apple iTunes Backup"
@@ -4467,7 +4355,7 @@
       ]
     },
     {
-      "id": "clean-065",
+      "id": "clean-064",
       "name": {
         "zh": "瑞昱声卡驱动安装源缓存（by YukiSakura）",
         "en": "Realtek Sound Driver Installation Cache (by YukiSakura)"
@@ -4521,7 +4409,7 @@
       ]
     },
     {
-      "id": "clean-066",
+      "id": "clean-065",
       "name": {
         "zh": "Java安装源缓存（by YukiSakura）",
         "en": "Java Installation Cache (by YukiSakura)"
@@ -4578,7 +4466,7 @@
       ]
     },
     {
-      "id": "clean-067",
+      "id": "clean-066",
       "name": {
         "zh": "Intel驱动安装源缓存（by YukiSakura）",
         "en": "Intel Driver Installation Cache (by YukiSakura)"
@@ -4627,7 +4515,7 @@
       ]
     },
     {
-      "id": "clean-068",
+      "id": "clean-067",
       "name": {
         "zh": "英伟达驱动安装源缓存（by YukiSakura）",
         "en": "NVIDIA Driver Installation Cache (by YukiSakura)"
@@ -4684,7 +4572,7 @@
       ]
     },
     {
-      "id": "clean-069",
+      "id": "clean-068",
       "name": {
         "zh": "英伟达驱动安装包（by Ailick）",
         "en": "NVIDIA Driver Installation Package (by Ailick)"
@@ -4733,7 +4621,7 @@
       ]
     },
     {
-      "id": "clean-070",
+      "id": "clean-069",
       "name": {
         "zh": "Microsoft SQL Server更新缓存（by Honry、撕裂五维空间）",
         "en": "Microsoft SQL Server Update Cache (by Honry, SiLieWuWeiKongJian)"
@@ -4884,7 +4772,7 @@
       ]
     },
     {
-      "id": "clean-071",
+      "id": "clean-070",
       "name": {
         "zh": "Adobe Acrobat安装源缓存（by Honry）",
         "en": "Adobe Acrobat Installation Cache (by Honry)"
@@ -4933,7 +4821,7 @@
       ]
     },
     {
-      "id": "clean-072",
+      "id": "clean-071",
       "name": {
         "zh": "小红伞临时文件",
         "en": "Avira Temporary Files"
@@ -4982,7 +4870,7 @@
       ]
     },
     {
-      "id": "clean-073",
+      "id": "clean-072",
       "name": {
         "zh": "Microsoft .NET安装缓存（by 撕裂五维空间）",
         "en": "Microsoft .NET Installation Cache (by SiLieWuWeiKongJian)"
@@ -5079,7 +4967,7 @@
       ]
     },
     {
-      "id": "clean-074",
+      "id": "clean-073",
       "name": {
         "zh": "Windows系统临时目录（SystemTemp）",
         "en": "Windows System Temp (SystemTemp)"
@@ -5125,7 +5013,7 @@
       ]
     },
     {
-      "id": "clean-075",
+      "id": "clean-074",
       "name": {
         "zh": "D3D着色器缓存",
         "en": "Direct3D Shader Cache (D3DSCache)"
@@ -5171,7 +5059,7 @@
       ]
     },
     {
-      "id": "clean-076",
+      "id": "clean-075",
       "name": {
         "zh": "应用崩溃转储（CrashDumps）",
         "en": "Application Crash Dumps (CrashDumps)"
@@ -5222,7 +5110,7 @@
       ]
     },
     {
-      "id": "clean-077",
+      "id": "clean-076",
       "name": {
         "zh": "缩略图缓存待删队列（ThumbCacheToDelete）",
         "en": "Pending Thumbnail Cache Queue (ThumbCacheToDelete)"
@@ -5268,7 +5156,7 @@
       ]
     },
     {
-      "id": "clean-078",
+      "id": "clean-077",
       "name": {
         "zh": "NVIDIA 着色器缓存（DXCache/GLCache）",
         "en": "NVIDIA Shader Cache (DXCache / GLCache)"
@@ -5362,7 +5250,7 @@
       ]
     },
     {
-      "id": "clean-079",
+      "id": "clean-078",
       "name": {
         "zh": "Microsoft Edge (Chromium) 浏览器缓存",
         "en": "Microsoft Edge (Chromium) Browser Cache"
@@ -5424,7 +5312,7 @@
       ]
     },
     {
-      "id": "clean-080",
+      "id": "clean-079",
       "name": {
         "zh": "Google Chrome 浏览器缓存",
         "en": "Google Chrome Browser Cache"
@@ -5486,7 +5374,7 @@
       ]
     },
     {
-      "id": "clean-081",
+      "id": "clean-080",
       "name": {
         "zh": "Electron / Squirrel 桌面应用更新残留",
         "en": "Electron / Squirrel App Updater Leftovers"
@@ -5550,7 +5438,7 @@
       ]
     },
     {
-      "id": "clean-082",
+      "id": "clean-081",
       "name": {
         "zh": "AMD 显卡着色器缓存",
         "en": "AMD Graphics Shader Cache"
@@ -5627,7 +5515,7 @@
       ]
     },
     {
-      "id": "clean-083",
+      "id": "clean-082",
       "name": {
         "zh": "Intel 显卡着色器缓存",
         "en": "Intel Graphics Shader Cache"
@@ -5673,7 +5561,7 @@
       ]
     },
     {
-      "id": "clean-084",
+      "id": "clean-083",
       "name": {
         "zh": "Windows 大版本升级与诊断日志（Panther / USOShared）",
         "en": "Windows Upgrade & Diagnostic Logs (Panther / USOShared)"
@@ -5767,7 +5655,7 @@
       ]
     },
     {
-      "id": "clean-085",
+      "id": "clean-084",
       "name": {
         "zh": "WebView2 / CEF 与现代应用崩溃报告",
         "en": "WebView2 / CEF & Modern Crashpad Reports"
@@ -5844,7 +5732,7 @@
       ]
     },
     {
-      "id": "clean-086",
+      "id": "clean-085",
       "name": {
         "zh": "Node.js 包管理器缓存（npm / pnpm）",
         "en": "Node.js Package Manager Cache (npm / pnpm)"
@@ -5924,7 +5812,7 @@
       ]
     },
     {
-      "id": "clean-087",
+      "id": "clean-086",
       "name": {
         "zh": "Python 包管理器缓存（uv / pip）",
         "en": "Python Package Manager Cache (uv / pip)"

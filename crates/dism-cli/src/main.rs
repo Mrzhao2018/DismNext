@@ -54,10 +54,10 @@ enum Commands {
         #[command(subcommand)]
         action: SnapshotCommands,
     },
-    /// WinDirStat-style disk space analyzer (parallel treemap & extension breakdown)
+    /// Parallel disk space analyzer (treemap & extension breakdown)
     Diskmap {
         path: Option<PathBuf>,
-        #[arg(long, default_value_t = 3)]
+        #[arg(long, default_value_t = 4)]
         depth: usize,
         #[arg(long)]
         json: bool,

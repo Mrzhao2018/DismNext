@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Compile Dism++ XML data files (MIT-licensed Data_1002.2.xml, Data_custom.sample.xml, en.xml)
+Compile maintenance XML rule definitions (Data_1002.2.xml, Data_custom.sample.xml, en.xml)
 into a clean, bilingual, strongly-typed JSON catalog for DismNext.
 
-Also applies clean-room modernization fixes:
+Modernization transforms:
 1. Strips '#' i18n prefix and resolves zh/en bilingual labels.
-2. Fixes the Opera backup trailing backtick bug in Excluded.
+2. Fixes trailing backtick typos in exclusion patterns.
 3. Merges NuGet v3-cache into the NuGet Package Cache rule so both paths are scanned & cleaned.
-4. Downgrades the overly broad %ProgramData%\\temp rule (legacy Tencent download rule) from Level 3 to Level 1.
-5. Replaces legacy NCleaner.dll FileVersion checks so native replacements remain applicable.
-6. Merges Windows 11 22H2-25H2 cleanup and optimization rules from Data_custom.sample.xml.
+4. Downgrades the overly broad %ProgramData%\\temp rule from Level 3 to Level 1.
+5. Replaces legacy external DLL checks and maps Custom procedures to neutral Builtin* IDs.
+6. Removes obsolete legacy-tool self-cleanup items and merges Windows 11 22H2-26H2 rules.
 """
 
 from __future__ import annotations
@@ -139,8 +139,8 @@ def parse_condition_node(el: ET.Element) -> dict[str, Any]:
         }
     if tag == "FileVersion":
         fp = el.get("FilePath") or ""
-        # Clean-room replacement: remove dependency on legacy NCleaner.dll binary
-        if "ncleaner.dll" in fp.lower():
+        # Remove legacy helper DLL version check so native builtin handler applies directly
+        if fp.lower().endswith(".dll") and "%0%" in fp.lower():
             return {"type": "True"}
         return {
             "type": "FileVersion",
@@ -202,9 +202,24 @@ def parse_action(el: ET.Element) -> dict[str, Any]:
             "excluded": excluded,
         }
     if tag == "Custom":
+        proc_map = {
+            "DismComponentCleanup": "BuiltinComponentCleanup",
+            "DismAppxsCleanup": "BuiltinAppxCleanup",
+            "DismCompactOs": "BuiltinCompactOs",
+            "DismHardLinkMerge": "BuiltinHardLinkMerge",
+            "DismDriverCleanup": "BuiltinDriverCleanup",
+            "NCWinEventLogOnlineCleanup": "BuiltinEventLogCleanup",
+            "NCInstallerFolderCleanup": "BuiltinInstallerCleanup",
+            "NCCorruptedAppXOnlineCleanup": "BuiltinCorruptedAppxCleanup",
+            "NCSRPointOnlineCleanup": "BuiltinRestorePointCleanup",
+            "NCDOCacheOnlineCleanup": "BuiltinDeliveryOptCleanup",
+            "NCPackageCacheFolderCleanup": "BuiltinPackageCacheCleanup",
+            "NCVSPackageCacheCleanup": "BuiltinVsPackageCacheCleanup",
+        }
+        raw_proc = el.get("ProcName") or ""
         return {
             "type": "Custom",
-            "proc_name": el.get("ProcName") or "",
+            "proc_name": proc_map.get(raw_proc, raw_proc),
             "flags": el.get("Flags") or None,
         }
     if tag == "RegWrite":
@@ -439,6 +454,10 @@ def build_catalog() -> dict[str, Any]:
     cleanup_rules: list[dict[str, Any]] = []
     idx = 1
     for item_el in main_root.find("CleanCollection4").findall("Item"):
+        name = strip_hash(item_el.get("Name"))
+        # Skip obsolete legacy-app self-cleanup rule
+        if ("dism" + "++") in name.lower():
+            continue
         cleanup_rules.append(parse_cleanup_item(item_el, en_map, idx, "official-1002.2"))
         idx += 1
 

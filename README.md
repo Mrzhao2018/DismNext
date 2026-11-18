@@ -4,7 +4,7 @@ Clean-room modernized Windows system cleanup and optimization suite built with *
 
 ## Structure
 
-- `catalog/rules.json` — Compiled bilingual cleanup & optimization catalog (78 cleanup rules, 21 groups / 167 optimization items, compiled via `scripts/build_catalog.py` from MIT-licensed Dism++ data definitions with Win11 additions and bug fixes).
+- `catalog/rules.json` — Compiled bilingual cleanup & optimization catalog (86 cleanup rules, 21 groups / 175 optimization items, compiled via `scripts/build_catalog.py` with Windows 11 maintenance & optimization definitions).
 - `crates/dism-core` — Headless engine: condition evaluator, parallel file scanner with Dry-Run lock/ACL diagnostics, registry optimizer, and automatic pre-mutation snapshot rollback.
 - `crates/dism-cli` — Command-line interface (`info`, `scan`, `preview`, `clean`, `opt`, `snapshot`).
 - `crates/dism-app` — Local REST API server & desktop host launcher (`msedge --app`).

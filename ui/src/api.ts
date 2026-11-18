@@ -184,6 +184,7 @@ export interface DiskTreeNode {
   path: string;
   is_dir: boolean;
   is_aggregate: boolean;
+  is_cache_hint: boolean;
   aggregate_count: number;
   size_bytes: number;
   file_count: number;
@@ -194,6 +195,7 @@ export interface DiskTreeNode {
 
 export interface ExtensionStat {
   ext: string;
+  description: LocalizedText;
   size_bytes: number;
   file_count: number;
   color: string;
@@ -256,7 +258,7 @@ export const api = {
       }
     ),
   getDiskPresets: () => reqJson<{ presets: DiskPreset[] }>('/api/diskmap/presets'),
-  analyzeDisk: (path: string, max_depth = 3) =>
+  analyzeDisk: (path: string, max_depth = 4) =>
     reqJson<DiskAnalysisReport>('/api/diskmap/analyze', {
       method: 'POST',
       body: JSON.stringify({ path, max_depth }),

@@ -473,7 +473,7 @@ fn handle_custom_proc(
     system_task_hint: &mut Option<LocalizedText>,
 ) {
     match proc_name {
-        "NCWinEventLogOnlineCleanup" => {
+        "BuiltinEventLogCleanup" => {
             collect_general_action(
                 r"%SystemRoot%\System32\winevt\Logs",
                 "File",
@@ -485,7 +485,7 @@ fn handle_custom_proc(
                 removable_dirs,
             );
         }
-        "NCDOCacheOnlineCleanup" => {
+        "BuiltinDeliveryOptCleanup" => {
             for p in [
                 r"%SystemRoot%\SoftwareDistribution\DeliveryOptimization",
                 r"%SystemRoot%\DeliveryOptimization",
@@ -494,7 +494,7 @@ fn handle_custom_proc(
                 collect_general_action(p, "Directory|File", &[], &[], sys, files, seen_paths, removable_dirs);
             }
         }
-        "NCPackageCacheFolderCleanup" => {
+        "BuiltinPackageCacheCleanup" => {
             collect_general_action(
                 r"%ProgramData%\Package Cache",
                 "Directory|File",
@@ -506,7 +506,7 @@ fn handle_custom_proc(
                 removable_dirs,
             );
         }
-        "NCVSPackageCacheCleanup" => {
+        "BuiltinVsPackageCacheCleanup" => {
             collect_general_action(
                 r"%ProgramData%\Microsoft\VisualStudio\Packages",
                 "Directory|File",
@@ -518,49 +518,49 @@ fn handle_custom_proc(
                 removable_dirs,
             );
         }
-        "NCInstallerFolderCleanup" => {
+        "BuiltinInstallerCleanup" => {
             *is_system_task = true;
             *system_task_hint = Some(LocalizedText {
                 zh: "Windows Installer 孤儿补丁需要严格校验 MSI 数据库引用，Phase 1 暂不直接删除以保安全。".to_string(),
                 en: "Orphaned Windows Installer (.msp) cleanup requires MSI database reference verification and is skipped in Phase 1 for safety.".to_string(),
             });
         }
-        "DismComponentCleanup" => {
+        "BuiltinComponentCleanup" => {
             *is_system_task = true;
             *system_task_hint = Some(LocalizedText {
                 zh: "系统组件存储清理需调用 Windows DISM 接口 (Dism.exe /Online /Cleanup-Image /StartComponentCleanup)，将在 Phase 2 接入。".to_string(),
                 en: "WinSxS component cleanup uses Windows DISM (/StartComponentCleanup) and will be wired natively in Phase 2.".to_string(),
             });
         }
-        "DismCompactOs" => {
+        "BuiltinCompactOs" => {
             *is_system_task = true;
             *system_task_hint = Some(LocalizedText {
                 zh: "CompactOS 文件系统压缩属于系统级操作 (compact.exe /CompactOS:always)，将在 Phase 2 接入。".to_string(),
                 en: "CompactOS compression is a system-level operation (compact.exe /CompactOS:always) scheduled for Phase 2.".to_string(),
             });
         }
-        "DismHardLinkMerge" => {
+        "BuiltinHardLinkMerge" => {
             *is_system_task = true;
             *system_task_hint = Some(LocalizedText {
                 zh: "NTFS 硬链接合并属于底层系统级任务，将在后续阶段评估接入。".to_string(),
                 en: "NTFS hardlink merge is an advanced disk operation excluded from Phase 1 safe cleanup.".to_string(),
             });
         }
-        "DismDriverCleanup" => {
+        "BuiltinDriverCleanup" => {
             *is_system_task = true;
             *system_task_hint = Some(LocalizedText {
                 zh: "过期驱动程序清理需枚举 DriverStore 包引用，将在 Phase 2 接入。".to_string(),
                 en: "Outdated driver store cleanup requires DriverStore enumeration scheduled for Phase 2.".to_string(),
             });
         }
-        "DismAppxsCleanup" | "NCCorruptedAppXOnlineCleanup" => {
+        "BuiltinAppxCleanup" | "BuiltinCorruptedAppxCleanup" => {
             *is_system_task = true;
             *system_task_hint = Some(LocalizedText {
                 zh: "Appx 应用包清理将在 Phase 2 通过 WinRT PackageManager 接口原生实现。".to_string(),
                 en: "Appx package cleanup will use native WinRT PackageManager APIs in Phase 2.".to_string(),
             });
         }
-        "NCSRPointOnlineCleanup" => {
+        "BuiltinRestorePointCleanup" => {
             *is_system_task = true;
             *system_task_hint = Some(LocalizedText {
                 zh: "系统还原点管理需调用 VSS 卷影复制接口，将在 Phase 2 接入。".to_string(),

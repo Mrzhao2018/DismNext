@@ -28,7 +28,7 @@ pub fn parse_reg_path(full_key: &str) -> Option<(HKEY, String)> {
     };
 
     let mut sub = rest.trim_start_matches('\\').to_string();
-    // Map HKEY_USERS\DEFAULT\... (Dism++ XML convention) -> HKEY_USERS\.DEFAULT\...
+    // Map HKEY_USERS\DEFAULT\... (catalog XML convention) -> HKEY_USERS\.DEFAULT\...
     if hive == HKEY_USERS {
         if sub.eq_ignore_ascii_case("DEFAULT") {
             sub = ".DEFAULT".to_string();
