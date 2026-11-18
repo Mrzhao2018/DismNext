@@ -5,7 +5,7 @@ use std::fs;
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use winreg::enums::{HKEY_LOCAL_MACHINE, KEY_READ};
+use winreg::enums::{HKEY_LOCAL_MACHINE, HKEY_USERS, KEY_READ, KEY_WOW64_32KEY, KEY_WOW64_64KEY};
 use winreg::RegKey;
 
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
@@ -181,12 +181,93 @@ fn collect_referenced_installer_packages() -> HashSet<String> {
             for patch_guid in patches.enum_keys().flatten() {
                 if let Ok(pk) = patches.open_subkey_with_flags(&patch_guid, KEY_READ) {
                     record_local_package(&pk, &mut set);
+                    if let Ok(props) = pk.open_subkey_with_flags("InstallProperties", KEY_READ) {
+                        record_local_package(&props, &mut set);
+                    }
+                }
+            }
+        }
+    }
+
+    // Also include Classes\Installer, HKEY_USERS Installer, and Uninstall references as extra safelists
+    for cls_sub in [
+        r"SOFTWARE\Classes\Installer\Products",
+        r"SOFTWARE\Classes\Installer\Patches",
+    ] {
+        collect_sourcelist_refs(&hklm, cls_sub, KEY_READ, &mut set);
+    }
+
+    let hku = RegKey::predef(HKEY_USERS);
+    for sid in hku.enum_keys().flatten() {
+        for sub in [
+            format!(r"{}\Software\Microsoft\Installer\Products", sid),
+            format!(r"{}\Software\Microsoft\Installer\Patches", sid),
+        ] {
+            collect_sourcelist_refs(&hku, &sub, KEY_READ, &mut set);
+        }
+    }
+
+    for sam in [KEY_READ | KEY_WOW64_64KEY, KEY_READ | KEY_WOW64_32KEY] {
+        if let Ok(uninst) =
+            hklm.open_subkey_with_flags(r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall", sam)
+        {
+            for app_key in uninst.enum_keys().flatten() {
+                if let Ok(ak) = uninst.open_subkey_with_flags(&app_key, sam) {
+                    for val_name in ["UninstallString", "ModifyPath", "InstallSource"] {
+                        if let Ok(raw) = ak.get_value::<String, _>(val_name) {
+                            record_ms_tokens(&raw, &mut set);
+                        }
+                    }
                 }
             }
         }
     }
 
     set
+}
+
+fn collect_sourcelist_refs(root: &RegKey, subkey: &str, sam: u32, set: &mut HashSet<String>) {
+    let Ok(parent) = root.open_subkey_with_flags(subkey, sam) else {
+        return;
+    };
+    for guid in parent.enum_keys().flatten() {
+        let Ok(sk) = parent.open_subkey_with_flags(&guid, sam) else {
+            continue;
+        };
+        if let Ok(src) = sk.open_subkey_with_flags("SourceList", sam) {
+            if let Ok(pkg_name) = src.get_value::<String, _>("PackageName") {
+                record_ms_tokens(&pkg_name, set);
+            }
+            if let Ok(net) = src.open_subkey_with_flags("Net", sam) {
+                for (_, rv) in net.enum_values().flatten() {
+                    let s = crate::evaluator::reg_value_to_string(&rv);
+                    record_ms_tokens(&s, set);
+                }
+            }
+        }
+    }
+}
+
+fn record_ms_tokens(raw: &str, set: &mut HashSet<String>) {
+    let norm = normalize_installer_ref(raw);
+    if norm.is_empty() {
+        return;
+    }
+    for part in norm.split(['"', ';', ',']) {
+        let trimmed = part.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if let Some(fname) = Path::new(trimmed).file_name().and_then(|s| s.to_str()) {
+            let lower = fname.to_ascii_lowercase();
+            if lower.ends_with(".msi") || lower.ends_with(".msp") {
+                set.insert(lower);
+            }
+        }
+        if trimmed.ends_with(".msi") || trimmed.ends_with(".msp") {
+            set.insert(trimmed.to_string());
+        }
+    }
 }
 
 fn record_local_package(key: &RegKey, set: &mut HashSet<String>) {

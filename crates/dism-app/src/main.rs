@@ -202,9 +202,22 @@ fn launch_desktop_window(url: &str) {
 }
 
 fn handle_request(mut req: Request, state: &AppState) {
+    let origin_header = header_value(&req, "origin");
+    if let Err(reason) = verify_request_security(&req, state.port) {
+        let mut resp = Response::from_string(
+            serde_json::json!({ "error": reason }).to_string(),
+        )
+        .with_status_code(StatusCode(403));
+        if let Ok(h) = Header::from_bytes("Content-Type", "application/json; charset=utf-8") {
+            resp.add_header(h);
+        }
+        let _ = req.respond(resp);
+        return;
+    }
+
     if req.method() == &Method::Options {
         let mut resp = Response::empty(StatusCode(204));
-        add_cors_headers(&mut resp);
+        add_cors_headers(&mut resp, state.port, origin_header.as_deref());
         let _ = req.respond(resp);
         return;
     }
@@ -218,12 +231,24 @@ fn handle_request(mut req: Request, state: &AppState) {
     if path.starts_with("/api/") {
         let result = dispatch_api(&mut req, path, query, state);
         match result {
-            Ok(json_val) => respond_json(req, StatusCode(200), &json_val),
+            Ok(json_val) => respond_json(
+                req,
+                StatusCode(200),
+                &json_val,
+                state.port,
+                origin_header.as_deref(),
+            ),
             Err(err) => {
                 let body = ErrorPayload {
                     error: err.to_string(),
                 };
-                respond_json(req, StatusCode(400), &body);
+                respond_json(
+                    req,
+                    StatusCode(400),
+                    &body,
+                    state.port,
+                    origin_header.as_deref(),
+                );
             }
         }
         return;
@@ -236,7 +261,7 @@ fn handle_request(mut req: Request, state: &AppState) {
             "DismNext API Server is running. Run `npm run build` in ui/ to enable GUI.",
         )
         .with_status_code(StatusCode(200));
-        add_cors_headers(&mut resp);
+        add_cors_headers(&mut resp, state.port, origin_header.as_deref());
         let _ = req.respond(resp);
     }
 }
@@ -610,24 +635,103 @@ fn parse_query_param(query: &str, key: &str) -> Option<String> {
     None
 }
 
-fn respond_json<T: Serialize>(req: Request, status: StatusCode, val: &T) {
+fn respond_json<T: Serialize>(
+    req: Request,
+    status: StatusCode,
+    val: &T,
+    port: u16,
+    origin: Option<&str>,
+) {
     let text = serde_json::to_string(val).unwrap_or_else(|_| "{}".to_string());
     let mut resp = Response::from_string(text).with_status_code(status);
     if let Ok(h) = Header::from_bytes("Content-Type", "application/json; charset=utf-8") {
         resp.add_header(h);
     }
-    add_cors_headers(&mut resp);
+    add_cors_headers(&mut resp, port, origin);
     let _ = req.respond(resp);
 }
 
-fn add_cors_headers<R: std::io::Read>(resp: &mut Response<R>) {
-    if let Ok(h) = Header::from_bytes("Access-Control-Allow-Origin", "*") {
+fn header_value(req: &Request, name_lower: &str) -> Option<String> {
+    req.headers()
+        .iter()
+        .find(|h| h.field.as_str().as_str().eq_ignore_ascii_case(name_lower))
+        .map(|h| h.value.as_str().trim().to_string())
+}
+
+fn is_allowed_host(host: &str, port: u16) -> bool {
+    let lower = host.trim().to_ascii_lowercase();
+    lower == format!("127.0.0.1:{}", port)
+        || lower == format!("localhost:{}", port)
+        || lower == "127.0.0.1"
+        || lower == "localhost"
+}
+
+fn is_allowed_origin(origin: &str, port: u16) -> bool {
+    let lower = origin.trim().trim_end_matches('/').to_ascii_lowercase();
+    lower == format!("http://127.0.0.1:{}", port)
+        || lower == format!("http://localhost:{}", port)
+        || lower == "http://127.0.0.1:5173"
+        || lower == "http://localhost:5173"
+}
+
+fn verify_request_security(req: &Request, port: u16) -> std::result::Result<(), String> {
+    if let Some(host) = header_value(req, "host") {
+        if !is_allowed_host(&host, port) {
+            return Err(format!("Blocked untrusted Host header: {}", host));
+        }
+    }
+    if let Some(origin) = header_value(req, "origin") {
+        if !is_allowed_origin(&origin, port) {
+            return Err(format!("Blocked untrusted Origin header: {}", origin));
+        }
+    }
+    if req.method() == &Method::Post && req.url().starts_with("/api/") {
+        let token_ok = header_value(req, "x-dismnext-client")
+            .map(|v| v == "1")
+            .unwrap_or(false);
+        if !token_ok {
+            return Err("Missing required X-DismNext-Client CSRF protection header".to_string());
+        }
+    }
+    Ok(())
+}
+
+fn add_cors_headers<R: std::io::Read>(resp: &mut Response<R>, port: u16, origin: Option<&str>) {
+    let allowed_origin = match origin {
+        Some(o) if is_allowed_origin(o, port) => o.to_string(),
+        _ => format!("http://127.0.0.1:{}", port),
+    };
+    if let Ok(h) = Header::from_bytes("Access-Control-Allow-Origin", allowed_origin.as_bytes()) {
+        resp.add_header(h);
+    }
+    if let Ok(h) = Header::from_bytes("Vary", "Origin") {
         resp.add_header(h);
     }
     if let Ok(h) = Header::from_bytes("Access-Control-Allow-Methods", "GET, POST, OPTIONS") {
         resp.add_header(h);
     }
-    if let Ok(h) = Header::from_bytes("Access-Control-Allow-Headers", "Content-Type") {
+    if let Ok(h) = Header::from_bytes(
+        "Access-Control-Allow-Headers",
+        "Content-Type, X-DismNext-Client",
+    ) {
         resp.add_header(h);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_host_and_origin_security_checks() {
+        assert!(is_allowed_host("127.0.0.1:9527", 9527));
+        assert!(is_allowed_host("localhost:9527", 9527));
+        assert!(!is_allowed_host("evil.example.com:9527", 9527));
+        assert!(!is_allowed_host("127.0.0.1:9999", 9527));
+
+        assert!(is_allowed_origin("http://127.0.0.1:9527", 9527));
+        assert!(is_allowed_origin("http://localhost:9527/", 9527));
+        assert!(!is_allowed_origin("https://evil.example.com", 9527));
+        assert!(!is_allowed_origin("null", 9527));
     }
 }

@@ -38,6 +38,8 @@ pub struct DriverPackageInfo {
     date_filetime: u64,
     #[serde(skip)]
     published_num: u32,
+    #[serde(skip)]
+    hw_descriptors: HashSet<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -61,6 +63,7 @@ struct RawDriverMeta {
     date: String,
     date_filetime: u64,
     fallback_file_size: u64,
+    hw_descriptors: HashSet<String>,
 }
 
 /// Lists all third-party (`oem*.inf`) driver packages registered in Windows DriverDatabase
@@ -103,6 +106,7 @@ pub fn list_drivers() -> Vec<DriverPackageInfo> {
             .unwrap_or_default();
         let (class_guid, date_filetime, date, version_rank, version) =
             decode_driver_version_blob(&version_bytes);
+        let hw_descriptors = read_driver_descriptors(&sk);
 
         raw_entries.push(RawDriverMeta {
             repo_folder,
@@ -117,6 +121,7 @@ pub fn list_drivers() -> Vec<DriverPackageInfo> {
             date,
             date_filetime,
             fallback_file_size,
+            hw_descriptors,
         });
     }
 
@@ -149,6 +154,7 @@ pub fn list_drivers() -> Vec<DriverPackageInfo> {
                 version_rank: raw.version_rank,
                 date_filetime: raw.date_filetime,
                 published_num: raw.published_num,
+                hw_descriptors: raw.hw_descriptors,
             }
         })
         .collect();
@@ -314,11 +320,33 @@ pub fn delete_driver(published_name: &str) -> Result<String> {
     Ok(combined)
 }
 
+fn read_driver_descriptors(pkg_key: &RegKey) -> HashSet<String> {
+    let mut set = HashSet::new();
+    let Ok(desc_root) = pkg_key.open_subkey_with_flags("Descriptors", KEY_READ) else {
+        return set;
+    };
+    for bus in desc_root.enum_keys().flatten() {
+        let Ok(bus_key) = desc_root.open_subkey_with_flags(&bus, KEY_READ) else {
+            continue;
+        };
+        let mut has_child = false;
+        for hwid in bus_key.enum_keys().flatten() {
+            has_child = true;
+            set.insert(format!("{}\\{}", bus, hwid).to_ascii_lowercase());
+        }
+        if !has_child {
+            set.insert(bus.to_ascii_lowercase());
+        }
+    }
+    set
+}
+
 fn mark_outdated_duplicates(items: &mut [DriverPackageInfo]) {
-    let mut groups: HashMap<(String, String), Vec<usize>> = HashMap::new();
+    let mut groups: HashMap<(String, String, String), Vec<usize>> = HashMap::new();
     for (idx, item) in items.iter().enumerate() {
         let key = (
-            item.original_name.to_ascii_lowercase(),
+            item.provider.trim().to_ascii_lowercase(),
+            item.original_name.trim().to_ascii_lowercase(),
             item.class_guid.to_ascii_lowercase(),
         );
         groups.entry(key).or_default().push(idx);
@@ -353,7 +381,10 @@ fn mark_outdated_duplicates(items: &mut [DriverPackageInfo]) {
 
         for &idx in &sorted[1..] {
             let cur_key = (items[idx].version_rank, items[idx].date_filetime);
-            if cur_key < newest_key {
+            let hw_covered = items[idx]
+                .hw_descriptors
+                .is_subset(&items[newest_idx].hw_descriptors);
+            if cur_key < newest_key && hw_covered {
                 items[idx].is_outdated_duplicate = true;
                 items[idx].newer_version = Some(newest_label.clone());
             }
@@ -590,5 +621,44 @@ mod tests {
         assert!(delete_driver("acpivpc.inf").is_err());
         assert!(delete_driver("oemabc.inf").is_err());
         assert!(delete_driver("oem1.sys").is_err());
+    }
+
+    #[test]
+    fn test_outdated_duplicate_requires_provider_and_descriptor_coverage() {
+        let make_drv = |pub_name: &str, provider: &str, ver: &str, rank: u64, hw: &[&str]| DriverPackageInfo {
+            published_name: pub_name.to_string(),
+            original_name: "usbdev.inf".to_string(),
+            provider: provider.to_string(),
+            class_name: "USB".to_string(),
+            class_guid: "{36fc9e60-c465-11cf-8056-444553540000}".to_string(),
+            version: ver.to_string(),
+            date: "2026-01-01".to_string(),
+            signer_name: provider.to_string(),
+            repo_folder: pub_name.to_string(),
+            repo_path: pub_name.to_string(),
+            size_bytes: 1024,
+            is_outdated_duplicate: false,
+            newer_version: None,
+            version_rank: rank,
+            date_filetime: 100,
+            published_num: 1,
+            hw_descriptors: hw.iter().map(|s| s.to_string()).collect(),
+        };
+
+        let mut list = vec![
+            make_drv("oem10.inf", "VendorA", "2.0.0.0", 2, &["usb\\vid_1111&pid_0001"]),
+            // Same provider, covered HWID -> should be marked outdated
+            make_drv("oem11.inf", "VendorA", "1.0.0.0", 1, &["usb\\vid_1111&pid_0001"]),
+            // Same provider, extra HWID not in oem10 -> must NOT be marked outdated
+            make_drv("oem12.inf", "VendorA", "1.0.0.0", 1, &["usb\\vid_1111&pid_0002"]),
+            // Different provider with same INF name -> must NOT be marked outdated
+            make_drv("oem13.inf", "VendorB", "1.0.0.0", 1, &["usb\\vid_1111&pid_0001"]),
+        ];
+
+        mark_outdated_duplicates(&mut list);
+        assert!(!list[0].is_outdated_duplicate);
+        assert!(list[1].is_outdated_duplicate);
+        assert!(!list[2].is_outdated_duplicate);
+        assert!(!list[3].is_outdated_duplicate);
     }
 }

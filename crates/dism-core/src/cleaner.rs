@@ -291,7 +291,15 @@ fn execute_single_rule(rule: &CleanupRule, sys: &SystemInfo, dry_run: bool) -> R
                         deleted_bytes += f.size_bytes;
                         deleted_files += 1;
                     } else {
-                        match remove_file_safe(Path::new(&f.path)) {
+                        let p = Path::new(&f.path);
+                        let delete_res = if collected.system_task_proc.as_deref()
+                            == Some("BuiltinInstallerCleanup")
+                        {
+                            crate::diskmap::recycle_path(p).map(|_| ())
+                        } else {
+                            remove_file_safe(p).map_err(|e| anyhow::anyhow!(e))
+                        };
+                        match delete_res {
                             Ok(()) => {
                                 deleted_bytes += f.size_bytes;
                                 deleted_files += 1;
@@ -595,11 +603,11 @@ fn handle_custom_proc(
             *system_task_proc = Some(proc_name.to_string());
             *system_task_hint = Some(LocalizedText {
                 zh: format!(
-                    "已交叉核验 Installer\\UserData 数据库，检出 {} 个无引用孤立 .msi/.msp 安装缓存（已安装软件依赖包已保护）。",
+                    "已交叉核验 Installer\\UserData / Classes / Uninstall 数据库，检出 {} 个无引用 .msi/.msp 安装缓存；执行清理时将先移入回收站以便随时恢复。",
                     orphan_count
                 ),
                 en: format!(
-                    "Cross-checked Installer\\UserData database and found {} orphaned .msi/.msp cache file(s); referenced packages remain protected.",
+                    "Cross-checked Installer\\UserData, Classes, and Uninstall databases and found {} unreferenced .msi/.msp file(s); cleanup moves files to the Windows Recycle Bin for reversibility.",
                     orphan_count
                 ),
             });

@@ -2,6 +2,12 @@ import React, { useEffect, useMemo, useState } from 'react';
 import {
   Badge,
   Button,
+  Dialog,
+  DialogActions,
+  DialogBody,
+  DialogContent,
+  DialogSurface,
+  DialogTitle,
   Input,
   MessageBar,
   MessageBarBody,
@@ -78,6 +84,10 @@ export const FeaturesView: React.FC<Props> = ({ lang, isAdmin }) => {
   const [onlyEnabled, setOnlyEnabled] = useState(false);
   const [search, setSearch] = useState('');
   const [busyName, setBusyName] = useState<string | null>(null);
+  const [pendingToggle, setPendingToggle] = useState<{
+    feat: WindowsFeatureInfo;
+    nextEnabled: boolean;
+  } | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
@@ -130,6 +140,7 @@ export const FeaturesView: React.FC<Props> = ({ lang, isAdmin }) => {
   }, [features, catFilter, onlyEnabled, search]);
 
   const handleToggle = async (feat: WindowsFeatureInfo, nextEnabled: boolean) => {
+    setPendingToggle(null);
     setBusyName(feat.name);
     setErrorMsg(null);
     setNotice(null);
@@ -145,6 +156,14 @@ export const FeaturesView: React.FC<Props> = ({ lang, isAdmin }) => {
       setErrorMsg(String(e));
     } finally {
       setBusyName(null);
+    }
+  };
+
+  const requestToggle = (feat: WindowsFeatureInfo, nextEnabled: boolean) => {
+    if (feat.high_impact) {
+      setPendingToggle({ feat, nextEnabled });
+    } else {
+      void handleToggle(feat, nextEnabled);
     }
   };
 
@@ -279,13 +298,50 @@ export const FeaturesView: React.FC<Props> = ({ lang, isAdmin }) => {
                 <Switch
                   checked={feat.enabled}
                   disabled={busyName !== null}
-                  onChange={(_, d) => handleToggle(feat, d.checked)}
+                  onChange={(_, d) => requestToggle(feat, d.checked)}
                 />
               </div>
             </div>
           ))
         )}
       </div>
+
+      <Dialog
+        open={Boolean(pendingToggle)}
+        onOpenChange={(_, d) => {
+          if (!d.open) setPendingToggle(null);
+        }}
+      >
+        <DialogSurface>
+          <DialogBody>
+            <DialogTitle>
+              {lang === 'zh' ? '确认更改关键 Windows 可选功能？' : 'Confirm Critical Windows Feature Change'}
+            </DialogTitle>
+            <DialogContent>
+              {pendingToggle && (
+                <Text>
+                  {lang === 'zh'
+                    ? `即将${pendingToggle.nextEnabled ? '开启' : '关闭'}「${pickText(pendingToggle.feat.display_name, lang)}」(${pendingToggle.feat.name})。\n${pickText(pendingToggle.feat.description, lang)}\n${!pendingToggle.nextEnabled ? '注意：关闭虚拟化或运行时组件后，依赖它的 WSL2、Docker、模拟器或传统桌面软件将无法启动，且操作后可能需要重启电脑。' : '部分功能启用后需要重启 Windows 生效。'}`
+                    : `${pendingToggle.nextEnabled ? 'Enable' : 'Disable'} ${pendingToggle.feat.name}? ${pickText(pendingToggle.feat.description, lang)}`}
+                </Text>
+              )}
+            </DialogContent>
+            <DialogActions>
+              <Button appearance="secondary" onClick={() => setPendingToggle(null)}>
+                {lang === 'zh' ? '取消' : 'Cancel'}
+              </Button>
+              <Button
+                appearance="primary"
+                onClick={() =>
+                  pendingToggle && void handleToggle(pendingToggle.feat, pendingToggle.nextEnabled)
+                }
+              >
+                {lang === 'zh' ? '确认修改功能' : 'Confirm Change'}
+              </Button>
+            </DialogActions>
+          </DialogBody>
+        </DialogSurface>
+      </Dialog>
     </div>
   );
 };

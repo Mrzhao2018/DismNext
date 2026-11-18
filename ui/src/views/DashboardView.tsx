@@ -2,6 +2,12 @@ import React, { useEffect, useState } from 'react';
 import {
   Badge,
   Button,
+  Dialog,
+  DialogActions,
+  DialogBody,
+  DialogContent,
+  DialogSurface,
+  DialogTitle,
   Spinner,
   Text,
   makeStyles,
@@ -156,6 +162,7 @@ export const DashboardView: React.FC<Props> = ({
   const [appxPackages, setAppxPackages] = useState<AppxPackageInfo[]>([]);
   const [sysTaskStatus, setSysTaskStatus] = useState<SystemTaskStatus | null>(null);
   const [taskRunning, setTaskRunning] = useState(false);
+  const [confirmCleanupOpen, setConfirmCleanupOpen] = useState(false);
   const [taskFeedback, setTaskFeedback] = useState<string | null>(null);
 
   const loadMetrics = async () => {
@@ -183,6 +190,7 @@ export const DashboardView: React.FC<Props> = ({
   }, []);
 
   const handleRunComponentCleanup = async () => {
+    setConfirmCleanupOpen(false);
     setTaskRunning(true);
     setTaskFeedback(null);
     try {
@@ -505,7 +513,7 @@ export const DashboardView: React.FC<Props> = ({
             appearance="outline"
             icon={taskRunning ? <Spinner size="tiny" /> : <PlayRegular />}
             disabled={taskRunning}
-            onClick={handleRunComponentCleanup}
+            onClick={() => setConfirmCleanupOpen(true)}
           >
             {lang === 'zh' ? '执行 WinSxS 组件深度清理' : 'Run DISM /StartComponentCleanup'}
           </Button>
@@ -554,6 +562,31 @@ export const DashboardView: React.FC<Props> = ({
           </div>
         </div>
       </div>
+
+      <Dialog open={confirmCleanupOpen} onOpenChange={(_, d) => setConfirmCleanupOpen(d.open)}>
+        <DialogSurface>
+          <DialogBody>
+            <DialogTitle>
+              {lang === 'zh' ? '确认执行 WinSxS 组件深度清理？' : 'Confirm DISM Component Cleanup'}
+            </DialogTitle>
+            <DialogContent>
+              <Text>
+                {lang === 'zh'
+                  ? '将调用 Dism.exe (/StartComponentCleanup) 清除已被取代的旧版本系统更新备份（耗时数十秒至数分钟）。执行后旧更新无法通过常规方式卸载，确定继续吗？'
+                  : 'This invokes DISM /StartComponentCleanup to remove superseded WinSxS update backups. Older updates cannot be uninstalled afterward. Continue?'}
+              </Text>
+            </DialogContent>
+            <DialogActions>
+              <Button appearance="secondary" onClick={() => setConfirmCleanupOpen(false)}>
+                {lang === 'zh' ? '取消' : 'Cancel'}
+              </Button>
+              <Button appearance="primary" onClick={() => void handleRunComponentCleanup()}>
+                {lang === 'zh' ? '确认执行清理' : 'Confirm Cleanup'}
+              </Button>
+            </DialogActions>
+          </DialogBody>
+        </DialogSurface>
+      </Dialog>
     </div>
   );
 };

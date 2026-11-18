@@ -1,11 +1,13 @@
 use crate::catalog::{Action, LocalizedText};
 use crate::evaluator::{parse_reg_path, wow64_sam_list};
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use chrono::Local;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use winreg::enums::{RegType, KEY_ALL_ACCESS, KEY_READ};
+use winreg::enums::{
+    RegType, HKEY_CLASSES_ROOT, HKEY_LOCAL_MACHINE, HKEY_USERS, KEY_ALL_ACCESS, KEY_READ,
+};
 use winreg::{RegKey, RegValue};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -210,6 +212,11 @@ impl SnapshotManager {
 
     pub fn restore(&self, id: &str) -> Result<RegistrySnapshot> {
         let mut snap = self.load(id)?;
+        if snapshot_requires_admin(&snap) && !crate::sysinfo::SystemInfo::collect().is_admin {
+            return Err(anyhow!(
+                "该快照包含系统级注册表项 (HKLM/HKU)，回滚需要管理员权限。请先点击顶部“一键提权为管理员”后再执行回滚。 / Restoring system-level registry snapshots requires Administrator privileges."
+            ));
+        }
         // Apply records in reverse order to accurately undo sequences like RegMove
         for rec in snap.records.iter().rev() {
             restore_record(rec)?;
@@ -403,3 +410,54 @@ pub fn snapshot_summary(s: &RegistrySnapshot) -> SnapshotSummary {
 
 #[allow(dead_code)]
 fn _keep_path(_: &Path) {}
+
+/// Returns true if any snapshot record targets machine-wide or privileged registry hives (`HKLM`/`HKCR`/`HKU`).
+pub fn snapshot_requires_admin(snap: &RegistrySnapshot) -> bool {
+    snap.records.iter().any(|rec| {
+        let key = match rec {
+            SnapshotRecord::ValueState { key, .. } => key,
+            SnapshotRecord::KeyTreeState { key, .. } => key,
+        };
+        matches!(
+            parse_reg_path(key),
+            Some((h, _)) if h == HKEY_LOCAL_MACHINE || h == HKEY_CLASSES_ROOT || h == HKEY_USERS
+        )
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_snapshot_requires_admin_detection() {
+        let make_snap = |key: &str| RegistrySnapshot {
+            id: "t1".into(),
+            created_at: "2026-01-01T00:00:00Z".into(),
+            item_id: "opt-1".into(),
+            item_name: LocalizedText {
+                zh: "测试".into(),
+                en: "Test".into(),
+            },
+            scope: "current".into(),
+            action_summary: "Enable".into(),
+            restored: false,
+            records: vec![SnapshotRecord::ValueState {
+                key: key.into(),
+                value_name: "Val".into(),
+                sam: 0,
+                previous: None,
+            }],
+        };
+
+        assert!(!snapshot_requires_admin(&make_snap(
+            r"HKEY_CURRENT_USER\Software\Test"
+        )));
+        assert!(snapshot_requires_admin(&make_snap(
+            r"HKEY_LOCAL_MACHINE\SOFTWARE\Test"
+        )));
+        assert!(snapshot_requires_admin(&make_snap(
+            r"HKEY_USERS\DEFAULT\Control Panel"
+        )));
+    }
+}

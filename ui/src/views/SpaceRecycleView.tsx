@@ -217,6 +217,7 @@ export const SpaceRecycleView: React.FC<Props> = ({
   const [previewLoading, setPreviewLoading] = useState(false);
   const [executing, setExecuting] = useState(false);
   const [taskRunning, setTaskRunning] = useState<string | null>(null);
+  const [pendingSysTask, setPendingSysTask] = useState<string | null>(null);
   const [taskNotice, setTaskNotice] = useState<string | null>(null);
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [lastReport, setLastReport] = useState<CleanupExecutionReport | null>(null);
@@ -329,6 +330,7 @@ export const SpaceRecycleView: React.FC<Props> = ({
   };
 
   const handleRunSystemTask = async (taskId: string) => {
+    setPendingSysTask(null);
     setTaskRunning(taskId);
     setErrorMsg(null);
     setTaskNotice(null);
@@ -348,6 +350,53 @@ export const SpaceRecycleView: React.FC<Props> = ({
       setErrorMsg(String(e));
     } finally {
       setTaskRunning(null);
+    }
+  };
+
+  const sysTaskDescription = (taskId: string | null): { title: string; body: string } => {
+    switch (taskId) {
+      case 'component_cleanup':
+        return {
+          title: lang === 'zh' ? '确认执行 DISM 组件存储清理？' : 'Confirm DISM Component Cleanup',
+          body:
+            lang === 'zh'
+              ? '此操作将调用原生 Dism.exe (/StartComponentCleanup) 永久清除已被取代的历史 WinSxS 系统更新备份，执行后旧系统补丁将无法回退。是否继续？'
+              : 'This runs DISM /StartComponentCleanup and permanently removes superseded WinSxS component backups. Older updates cannot be uninstalled afterward.',
+        };
+      case 'compact_os_enable':
+        return {
+          title: lang === 'zh' ? '确认启用 CompactOS 系统压缩？' : 'Confirm Enable CompactOS',
+          body:
+            lang === 'zh'
+              ? '启用 CompactOS 将对 Windows 系统核心二进制文件执行压缩（耗时数分钟），以节省系统盘空间。确定继续吗？'
+              : 'Enabling CompactOS compresses OS binaries to save drive space and may take several minutes. Continue?',
+        };
+      case 'compact_os_disable':
+        return {
+          title: lang === 'zh' ? '确认关闭 CompactOS 压缩？' : 'Confirm Disable CompactOS',
+          body:
+            lang === 'zh'
+              ? '关闭 CompactOS 将解压缩 Windows 系统核心文件，并会额外占用数 GB 系统盘空间。确定继续吗？'
+              : 'Disabling CompactOS decompresses OS binaries and increases disk usage by several GB. Continue?',
+        };
+      case 'restore_point_cleanup':
+        return {
+          title: lang === 'zh' ? '确认删除最旧系统还原点？' : 'Confirm Delete Oldest Restore Point',
+          body:
+            lang === 'zh'
+              ? '此操作将调用 vssadmin 删除系统盘最旧的卷影复制还原点以释放磁盘空间，删除后该还原点不可恢复。确定继续吗？'
+              : 'This runs vssadmin to permanently delete the oldest VSS shadow copy restore point on the system drive. Continue?',
+        };
+      case 'driver_cleanup':
+        return {
+          title: lang === 'zh' ? '确认卸载过期重复驱动包？' : 'Confirm Outdated Driver Removal',
+          body:
+            lang === 'zh'
+              ? '将调用 pnputil 安全移除已被同厂商新版本（且硬件 ID 完全覆盖）取代的旧版驱动包；当前正在使用的驱动保持不变。确定继续吗？'
+              : 'Safely delete superseded duplicate driver packages via pnputil while keeping active drivers?',
+        };
+      default:
+        return { title: '', body: '' };
     }
   };
 
@@ -585,7 +634,7 @@ export const SpaceRecycleView: React.FC<Props> = ({
                         appearance="primary"
                         icon={taskRunning === 'component_cleanup' ? <Spinner size="tiny" /> : <PlayRegular />}
                         disabled={Boolean(taskRunning)}
-                        onClick={() => handleRunSystemTask('component_cleanup')}
+                        onClick={() => setPendingSysTask('component_cleanup')}
                       >
                         {lang === 'zh' ? '执行 DISM 组件存储清理' : 'Run DISM /StartComponentCleanup'}
                       </Button>
@@ -597,7 +646,7 @@ export const SpaceRecycleView: React.FC<Props> = ({
                           appearance="primary"
                           icon={taskRunning === 'compact_os_enable' ? <Spinner size="tiny" /> : <PlayRegular />}
                           disabled={Boolean(taskRunning)}
-                          onClick={() => handleRunSystemTask('compact_os_enable')}
+                          onClick={() => setPendingSysTask('compact_os_enable')}
                         >
                           {lang === 'zh' ? '启用 CompactOS 系统压缩' : 'Enable CompactOS'}
                         </Button>
@@ -605,7 +654,7 @@ export const SpaceRecycleView: React.FC<Props> = ({
                           size="small"
                           appearance="outline"
                           disabled={Boolean(taskRunning)}
-                          onClick={() => handleRunSystemTask('compact_os_disable')}
+                          onClick={() => setPendingSysTask('compact_os_disable')}
                         >
                           {lang === 'zh' ? '关闭 CompactOS 压缩' : 'Disable CompactOS'}
                         </Button>
@@ -617,7 +666,7 @@ export const SpaceRecycleView: React.FC<Props> = ({
                         appearance="primary"
                         icon={taskRunning === 'restore_point_cleanup' ? <Spinner size="tiny" /> : <PlayRegular />}
                         disabled={Boolean(taskRunning)}
-                        onClick={() => handleRunSystemTask('restore_point_cleanup')}
+                        onClick={() => setPendingSysTask('restore_point_cleanup')}
                       >
                         {lang === 'zh' ? '删除最旧系统还原点 (VSS)' : 'Delete Oldest Restore Point'}
                       </Button>
@@ -628,7 +677,7 @@ export const SpaceRecycleView: React.FC<Props> = ({
                         appearance="primary"
                         icon={taskRunning === 'driver_cleanup' ? <Spinner size="tiny" /> : <PlayRegular />}
                         disabled={Boolean(taskRunning)}
-                        onClick={() => handleRunSystemTask('driver_cleanup')}
+                        onClick={() => setPendingSysTask('driver_cleanup')}
                       >
                         {lang === 'zh' ? '一键卸载全部过期重复驱动' : 'Clean Outdated Drivers'}
                       </Button>
@@ -796,6 +845,33 @@ export const SpaceRecycleView: React.FC<Props> = ({
               </Button>
               <Button appearance="primary" onClick={() => runCleanup(false)}>
                 {lang === 'zh' ? '确认执行清理' : 'Confirm Clean'}
+              </Button>
+            </DialogActions>
+          </DialogBody>
+        </DialogSurface>
+      </Dialog>
+
+      <Dialog
+        open={Boolean(pendingSysTask)}
+        onOpenChange={(_, d) => {
+          if (!d.open) setPendingSysTask(null);
+        }}
+      >
+        <DialogSurface>
+          <DialogBody>
+            <DialogTitle>{sysTaskDescription(pendingSysTask).title}</DialogTitle>
+            <DialogContent>
+              <Text>{sysTaskDescription(pendingSysTask).body}</Text>
+            </DialogContent>
+            <DialogActions>
+              <Button appearance="secondary" onClick={() => setPendingSysTask(null)}>
+                {lang === 'zh' ? '取消' : 'Cancel'}
+              </Button>
+              <Button
+                appearance="primary"
+                onClick={() => pendingSysTask && handleRunSystemTask(pendingSysTask)}
+              >
+                {lang === 'zh' ? '确认执行任务' : 'Confirm Task'}
               </Button>
             </DialogActions>
           </DialogBody>

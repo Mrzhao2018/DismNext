@@ -170,8 +170,12 @@ export function formatBytes(bytes: number): string {
 
 async function reqJson<T>(url: string, init?: RequestInit): Promise<T> {
   const res = await fetch(url, {
-    headers: { 'Content-Type': 'application/json' },
     ...init,
+    headers: {
+      'Content-Type': 'application/json',
+      'X-DismNext-Client': '1',
+      ...(init?.headers ?? {}),
+    },
   });
   const data = await res.json();
   if (!res.ok) {

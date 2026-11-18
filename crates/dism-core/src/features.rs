@@ -158,21 +158,21 @@ fn feature_meta(name: &str) -> (LocalizedText, LocalizedText, FeatureCategory, b
             lt("适用于 Linux 的 Windows 子系统 (WSL)", "Windows Subsystem for Linux (WSL)"),
             lt("允许直接在 Windows 上原生运行 Linux 发行版与开发工具链。", "Provides native compatibility to run Linux distributions on Windows."),
             FeatureCategory::Virtualization,
-            false,
+            true,
             0,
         ),
         "VirtualMachinePlatform" => (
             lt("虚拟机平台 (Virtual Machine Platform)", "Virtual Machine Platform"),
             lt("为 WSL 2、Docker Desktop 与安卓子系统提供轻量级虚拟化平台支持。", "Enables lightweight hypervisor platform support required by WSL 2 and containers."),
             FeatureCategory::Virtualization,
-            false,
+            true,
             0,
         ),
         "HypervisorPlatform" => (
             lt("Windows 虚拟机监控程序平台", "Windows Hypervisor Platform"),
             lt("允许 QEMU、Android Emulator 等第三方虚拟化软件调用 Windows Hypervisor。", "Allows third-party virtualization apps (QEMU, Android Emulator) to use Windows Hypervisor."),
             FeatureCategory::Virtualization,
-            false,
+            true,
             0,
         ),
         "Containers-DisposableClientVM" => (
@@ -200,7 +200,7 @@ fn feature_meta(name: &str) -> (LocalizedText, LocalizedText, FeatureCategory, b
             lt(".NET Framework 3.5 (含 2.0/3.0)", ".NET Framework 3.5 (includes 2.0 & 3.0)"),
             lt("大量经典专业软件、工控应用和老游戏运行所需的 .NET 3.5 运行环境。", "Runtime required by many classic desktop tools and legacy enterprise applications."),
             FeatureCategory::Developer,
-            false,
+            true,
             1,
         ),
         "NetFx4Extended-ASPNET45" => (
