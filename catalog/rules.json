@@ -6028,6 +6028,831 @@
           "restart": null
         }
       ]
+    },
+    {
+      "id": "clean-087",
+      "name": {
+        "zh": "Claude Code 运行缓存与调试日志",
+        "en": "Claude Code Runtime Cache & Debug Logs"
+      },
+      "group": {
+        "zh": "AI 与智能体缓存",
+        "en": "AI & Agent Cache"
+      },
+      "description": {
+        "zh": "清理 Claude Code 与 Claude 桌面端的运行缓存（cache）、调试日志（debug/logs）、下载暂存（downloads）、Shell 快照（shell-snapshots）与配置自动备份，严格保留 .credentials.json、settings.json、CLAUDE.md、Skills、插件与活跃会话。",
+        "en": "Clears Claude Code and Claude Desktop runtime caches, debug logs, shell snapshots, downloads, and backup files while strictly preserving credentials, settings, CLAUDE.md, skills, plugins, and active sessions."
+      },
+      "warning": null,
+      "level": 2,
+      "work": null,
+      "source": "win11-modern",
+      "scans": [
+        {
+          "work": 10,
+          "scan_type": null,
+          "name_override": null,
+          "description_override": null,
+          "warning_override": null,
+          "applicable": {
+            "type": "Or",
+            "children": [
+              {
+                "type": "FileExist",
+                "file_path": "%USERPROFILE%\\.claude",
+                "wow64": null
+              },
+              {
+                "type": "FileExist",
+                "file_path": "%LOCALAPPDATA%\\Claude",
+                "wow64": null
+              },
+              {
+                "type": "FileExist",
+                "file_path": "%APPDATA%\\Claude",
+                "wow64": null
+              }
+            ]
+          },
+          "named_applicables": {},
+          "actions": [
+            {
+              "type": "General",
+              "root_path": "%USERPROFILE%\\.claude\\cache",
+              "flags": "Directory|File",
+              "id": null,
+              "queries": [],
+              "excluded": []
+            },
+            {
+              "type": "General",
+              "root_path": "%USERPROFILE%\\.claude\\debug",
+              "flags": "Directory|File",
+              "id": null,
+              "queries": [],
+              "excluded": []
+            },
+            {
+              "type": "General",
+              "root_path": "%USERPROFILE%\\.claude\\downloads",
+              "flags": "Directory|File",
+              "id": null,
+              "queries": [],
+              "excluded": []
+            },
+            {
+              "type": "General",
+              "root_path": "%USERPROFILE%\\.claude\\shell-snapshots",
+              "flags": "Directory|File",
+              "id": null,
+              "queries": [],
+              "excluded": []
+            },
+            {
+              "type": "General",
+              "root_path": "%USERPROFILE%\\.claude\\backups",
+              "flags": "Directory|File",
+              "id": null,
+              "queries": [],
+              "excluded": []
+            },
+            {
+              "type": "General",
+              "root_path": "%LOCALAPPDATA%\\Claude\\logs",
+              "flags": "Directory|File",
+              "id": null,
+              "queries": [],
+              "excluded": []
+            },
+            {
+              "type": "General",
+              "root_path": "%APPDATA%\\Claude\\Cache",
+              "flags": "Directory|File",
+              "id": null,
+              "queries": [],
+              "excluded": []
+            },
+            {
+              "type": "General",
+              "root_path": "%APPDATA%\\Claude\\Code Cache",
+              "flags": "Directory|File",
+              "id": null,
+              "queries": [],
+              "excluded": []
+            },
+            {
+              "type": "General",
+              "root_path": "%APPDATA%\\Claude\\GPUCache",
+              "flags": "Directory|File",
+              "id": null,
+              "queries": [],
+              "excluded": []
+            },
+            {
+              "type": "General",
+              "root_path": "%APPDATA%\\Claude\\DawnGraphiteCache",
+              "flags": "Directory|File",
+              "id": null,
+              "queries": [],
+              "excluded": []
+            },
+            {
+              "type": "General",
+              "root_path": "%APPDATA%\\Claude\\DawnWebGPUCache",
+              "flags": "Directory|File",
+              "id": null,
+              "queries": [],
+              "excluded": []
+            },
+            {
+              "type": "General",
+              "root_path": "%APPDATA%\\Claude\\Crashpad",
+              "flags": "Directory|File",
+              "id": null,
+              "queries": [],
+              "excluded": []
+            },
+            {
+              "type": "General",
+              "root_path": "%APPDATA%\\Claude\\logs",
+              "flags": "Directory|File",
+              "id": null,
+              "queries": [],
+              "excluded": []
+            }
+          ],
+          "rescan": false,
+          "restart": null
+        }
+      ]
+    },
+    {
+      "id": "clean-088",
+      "name": {
+        "zh": "Codex 临时文件与沙箱运行缓存",
+        "en": "Codex Temp Files & Runtime Cache"
+      },
+      "group": {
+        "zh": "AI 与智能体缓存",
+        "en": "AI & Agent Cache"
+      },
+      "description": {
+        "zh": "清理 OpenAI Codex CLI / 客户端在 .codex 目录下产生的 .tmp 临时沙箱文件、cache 缓存目录及原子写入残留的 *.tmp-* 临时文件，严格保留 auth.json、config.toml、AGENTS.md、Skills、插件与活跃会话数据库。",
+        "en": "Clears OpenAI Codex .tmp sandbox files, cache directory, and orphaned *.tmp-* state files under %USERPROFILE%\\.codex while preserving auth.json, config.toml, AGENTS.md, skills, plugins, and active session databases."
+      },
+      "warning": null,
+      "level": 2,
+      "work": null,
+      "source": "win11-modern",
+      "scans": [
+        {
+          "work": 10,
+          "scan_type": null,
+          "name_override": null,
+          "description_override": null,
+          "warning_override": null,
+          "applicable": {
+            "type": "FileExist",
+            "file_path": "%USERPROFILE%\\.codex",
+            "wow64": null
+          },
+          "named_applicables": {},
+          "actions": [
+            {
+              "type": "General",
+              "root_path": "%USERPROFILE%\\.codex\\.tmp",
+              "flags": "Directory|File",
+              "id": null,
+              "queries": [],
+              "excluded": []
+            },
+            {
+              "type": "General",
+              "root_path": "%USERPROFILE%\\.codex\\tmp",
+              "flags": "Directory|File",
+              "id": null,
+              "queries": [],
+              "excluded": []
+            },
+            {
+              "type": "General",
+              "root_path": "%USERPROFILE%\\.codex\\cache",
+              "flags": "Directory|File",
+              "id": null,
+              "queries": [],
+              "excluded": []
+            },
+            {
+              "type": "General",
+              "root_path": "%USERPROFILE%\\.codex",
+              "flags": "File",
+              "id": null,
+              "queries": [
+                "*.tmp-*",
+                "..codex-global-state.json*.tmp-*",
+                "*.bak"
+              ],
+              "excluded": []
+            }
+          ],
+          "rescan": false,
+          "restart": null
+        }
+      ]
+    },
+    {
+      "id": "clean-089",
+      "name": {
+        "zh": "Antigravity 渲染缓存与崩溃日志",
+        "en": "Antigravity WebView, Shader & Crash Caches"
+      },
+      "group": {
+        "zh": "AI 与智能体缓存",
+        "en": "AI & Agent Cache"
+      },
+      "description": {
+        "zh": "清理 Antigravity 桌面端的 Chromium/WebView 页面缓存、V8 代码缓存、GPU/Dawn 着色器缓存、Crashpad 崩溃转储及账单历史 .bak.json 备份，严格保留活跃对话（brain / conversations）、MCP 配置、内置与自定义 Skills 及用户设置。",
+        "en": "Clears Antigravity WebView caches (Cache, CachedData, Code Cache, GPU/Shader caches), Crashpad dumps, and *.bak.json files while strictly preserving active conversations (brain / conversations), MCP configs, skills, and user settings."
+      },
+      "warning": null,
+      "level": 2,
+      "work": null,
+      "source": "win11-modern",
+      "scans": [
+        {
+          "work": 10,
+          "scan_type": null,
+          "name_override": null,
+          "description_override": null,
+          "warning_override": null,
+          "applicable": {
+            "type": "Or",
+            "children": [
+              {
+                "type": "FileExist",
+                "file_path": "%APPDATA%\\Antigravity",
+                "wow64": null
+              },
+              {
+                "type": "FileExist",
+                "file_path": "%USERPROFILE%\\.gemini\\antigravity",
+                "wow64": null
+              }
+            ]
+          },
+          "named_applicables": {},
+          "actions": [
+            {
+              "type": "General",
+              "root_path": "%APPDATA%\\Antigravity\\Cache",
+              "flags": "Directory|File",
+              "id": null,
+              "queries": [],
+              "excluded": []
+            },
+            {
+              "type": "General",
+              "root_path": "%APPDATA%\\Antigravity\\CachedData",
+              "flags": "Directory|File",
+              "id": null,
+              "queries": [],
+              "excluded": []
+            },
+            {
+              "type": "General",
+              "root_path": "%APPDATA%\\Antigravity\\CachedExtensionVSIXs",
+              "flags": "Directory|File",
+              "id": null,
+              "queries": [],
+              "excluded": []
+            },
+            {
+              "type": "General",
+              "root_path": "%APPDATA%\\Antigravity\\Code Cache",
+              "flags": "Directory|File",
+              "id": null,
+              "queries": [],
+              "excluded": []
+            },
+            {
+              "type": "General",
+              "root_path": "%APPDATA%\\Antigravity\\GPUCache",
+              "flags": "Directory|File",
+              "id": null,
+              "queries": [],
+              "excluded": []
+            },
+            {
+              "type": "General",
+              "root_path": "%APPDATA%\\Antigravity\\GrShaderCache",
+              "flags": "Directory|File",
+              "id": null,
+              "queries": [],
+              "excluded": []
+            },
+            {
+              "type": "General",
+              "root_path": "%APPDATA%\\Antigravity\\DawnGraphiteCache",
+              "flags": "Directory|File",
+              "id": null,
+              "queries": [],
+              "excluded": []
+            },
+            {
+              "type": "General",
+              "root_path": "%APPDATA%\\Antigravity\\DawnWebGPUCache",
+              "flags": "Directory|File",
+              "id": null,
+              "queries": [],
+              "excluded": []
+            },
+            {
+              "type": "General",
+              "root_path": "%APPDATA%\\Antigravity\\ShaderCache",
+              "flags": "Directory|File",
+              "id": null,
+              "queries": [],
+              "excluded": []
+            },
+            {
+              "type": "General",
+              "root_path": "%APPDATA%\\Antigravity\\Crashpad",
+              "flags": "Directory|File",
+              "id": null,
+              "queries": [],
+              "excluded": []
+            },
+            {
+              "type": "General",
+              "root_path": "%APPDATA%\\Antigravity\\logs",
+              "flags": "Directory|File",
+              "id": null,
+              "queries": [],
+              "excluded": []
+            },
+            {
+              "type": "General",
+              "root_path": "%USERPROFILE%\\.gemini\\antigravity\\crashes",
+              "flags": "Directory|File",
+              "id": null,
+              "queries": [],
+              "excluded": []
+            },
+            {
+              "type": "General",
+              "root_path": "%USERPROFILE%\\.gemini\\antigravity",
+              "flags": "File",
+              "id": null,
+              "queries": [
+                "*.bak.json"
+              ],
+              "excluded": []
+            }
+          ],
+          "rescan": false,
+          "restart": null
+        }
+      ]
+    },
+    {
+      "id": "clean-090",
+      "name": {
+        "zh": "OpenCode 运行日志、快照与 WebView 缓存",
+        "en": "OpenCode Logs, Snapshots & WebView Caches"
+      },
+      "group": {
+        "zh": "AI 与智能体缓存",
+        "en": "AI & Agent Cache"
+      },
+      "description": {
+        "zh": "清理 OpenCode 在 .local\\share\\opencode 下的运行日志（log）、临时快照（snapshot）、工具输出暂存（tool-output）以及桌面端 EBWebView 渲染缓存，严格保留 opencode.db 主数据库、auth.json 与 mcp-auth.json。",
+        "en": "Clears OpenCode runtime logs, temporary snapshots, tool-output buffers, and EBWebView caches while strictly preserving opencode.db, auth.json, and mcp-auth.json."
+      },
+      "warning": null,
+      "level": 2,
+      "work": null,
+      "source": "win11-modern",
+      "scans": [
+        {
+          "work": 10,
+          "scan_type": null,
+          "name_override": null,
+          "description_override": null,
+          "warning_override": null,
+          "applicable": {
+            "type": "Or",
+            "children": [
+              {
+                "type": "FileExist",
+                "file_path": "%USERPROFILE%\\.local\\share\\opencode",
+                "wow64": null
+              },
+              {
+                "type": "FileExist",
+                "file_path": "%APPDATA%\\opencode\\EBWebView",
+                "wow64": null
+              }
+            ]
+          },
+          "named_applicables": {},
+          "actions": [
+            {
+              "type": "General",
+              "root_path": "%USERPROFILE%\\.local\\share\\opencode\\log",
+              "flags": "Directory|File",
+              "id": null,
+              "queries": [],
+              "excluded": []
+            },
+            {
+              "type": "General",
+              "root_path": "%USERPROFILE%\\.local\\share\\opencode\\snapshot",
+              "flags": "Directory|File",
+              "id": null,
+              "queries": [],
+              "excluded": []
+            },
+            {
+              "type": "General",
+              "root_path": "%USERPROFILE%\\.local\\share\\opencode\\tool-output",
+              "flags": "Directory|File",
+              "id": null,
+              "queries": [],
+              "excluded": []
+            },
+            {
+              "type": "General",
+              "root_path": "%APPDATA%\\opencode\\EBWebView\\Default\\Cache",
+              "flags": "Directory|File",
+              "id": null,
+              "queries": [],
+              "excluded": []
+            },
+            {
+              "type": "General",
+              "root_path": "%APPDATA%\\opencode\\EBWebView\\Default\\Code Cache",
+              "flags": "Directory|File",
+              "id": null,
+              "queries": [],
+              "excluded": []
+            },
+            {
+              "type": "General",
+              "root_path": "%APPDATA%\\opencode\\EBWebView\\Default\\GPUCache",
+              "flags": "Directory|File",
+              "id": null,
+              "queries": [],
+              "excluded": []
+            },
+            {
+              "type": "General",
+              "root_path": "%APPDATA%\\opencode\\EBWebView\\Default\\DawnGraphiteCache",
+              "flags": "Directory|File",
+              "id": null,
+              "queries": [],
+              "excluded": []
+            },
+            {
+              "type": "General",
+              "root_path": "%APPDATA%\\opencode\\EBWebView\\Default\\DawnWebGPUCache",
+              "flags": "Directory|File",
+              "id": null,
+              "queries": [],
+              "excluded": []
+            },
+            {
+              "type": "General",
+              "root_path": "%APPDATA%\\opencode\\EBWebView\\GrShaderCache",
+              "flags": "Directory|File",
+              "id": null,
+              "queries": [],
+              "excluded": []
+            },
+            {
+              "type": "General",
+              "root_path": "%APPDATA%\\opencode\\EBWebView\\ShaderCache",
+              "flags": "Directory|File",
+              "id": null,
+              "queries": [],
+              "excluded": []
+            },
+            {
+              "type": "General",
+              "root_path": "%APPDATA%\\opencode\\EBWebView\\GraphiteDawnCache",
+              "flags": "Directory|File",
+              "id": null,
+              "queries": [],
+              "excluded": []
+            },
+            {
+              "type": "General",
+              "root_path": "%APPDATA%\\opencode\\EBWebView\\Crashpad",
+              "flags": "Directory|File",
+              "id": null,
+              "queries": [],
+              "excluded": []
+            }
+          ],
+          "rescan": false,
+          "restart": null
+        }
+      ]
+    },
+    {
+      "id": "clean-091",
+      "name": {
+        "zh": "Cursor / Windsurf / VS Code 渲染缓存与崩溃转储",
+        "en": "Cursor, Windsurf & VS Code WebView Cache & Crashpad"
+      },
+      "group": {
+        "zh": "AI 与智能体缓存",
+        "en": "AI & Agent Cache"
+      },
+      "description": {
+        "zh": "清理 AI 编辑器（Cursor、Windsurf、VS Code）的 Chromium 页面缓存（Cache）、GPU 着色器缓存、Crashpad 崩溃转储文件与运行日志，不影响已安装扩展、工作区记忆与用户配置。",
+        "en": "Clears Chromium Cache, GPU/Dawn shader caches, Crashpad dumps, and logs for Cursor, Windsurf, and VS Code without affecting extensions, workspace state, or settings."
+      },
+      "warning": null,
+      "level": 2,
+      "work": null,
+      "source": "win11-modern",
+      "scans": [
+        {
+          "work": 10,
+          "scan_type": null,
+          "name_override": null,
+          "description_override": null,
+          "warning_override": null,
+          "applicable": {
+            "type": "Or",
+            "children": [
+              {
+                "type": "FileExist",
+                "file_path": "%APPDATA%\\Cursor",
+                "wow64": null
+              },
+              {
+                "type": "FileExist",
+                "file_path": "%APPDATA%\\Windsurf",
+                "wow64": null
+              },
+              {
+                "type": "FileExist",
+                "file_path": "%APPDATA%\\Code",
+                "wow64": null
+              }
+            ]
+          },
+          "named_applicables": {},
+          "actions": [
+            {
+              "type": "General",
+              "root_path": "%APPDATA%\\Cursor\\Cache",
+              "flags": "Directory|File",
+              "id": null,
+              "queries": [],
+              "excluded": []
+            },
+            {
+              "type": "General",
+              "root_path": "%APPDATA%\\Cursor\\Code Cache",
+              "flags": "Directory|File",
+              "id": null,
+              "queries": [],
+              "excluded": []
+            },
+            {
+              "type": "General",
+              "root_path": "%APPDATA%\\Cursor\\GPUCache",
+              "flags": "Directory|File",
+              "id": null,
+              "queries": [],
+              "excluded": []
+            },
+            {
+              "type": "General",
+              "root_path": "%APPDATA%\\Cursor\\DawnGraphiteCache",
+              "flags": "Directory|File",
+              "id": null,
+              "queries": [],
+              "excluded": []
+            },
+            {
+              "type": "General",
+              "root_path": "%APPDATA%\\Cursor\\DawnWebGPUCache",
+              "flags": "Directory|File",
+              "id": null,
+              "queries": [],
+              "excluded": []
+            },
+            {
+              "type": "General",
+              "root_path": "%APPDATA%\\Cursor\\Crashpad",
+              "flags": "Directory|File",
+              "id": null,
+              "queries": [],
+              "excluded": []
+            },
+            {
+              "type": "General",
+              "root_path": "%APPDATA%\\Cursor\\logs",
+              "flags": "Directory|File",
+              "id": null,
+              "queries": [],
+              "excluded": []
+            },
+            {
+              "type": "General",
+              "root_path": "%APPDATA%\\Windsurf\\Cache",
+              "flags": "Directory|File",
+              "id": null,
+              "queries": [],
+              "excluded": []
+            },
+            {
+              "type": "General",
+              "root_path": "%APPDATA%\\Windsurf\\Code Cache",
+              "flags": "Directory|File",
+              "id": null,
+              "queries": [],
+              "excluded": []
+            },
+            {
+              "type": "General",
+              "root_path": "%APPDATA%\\Windsurf\\GPUCache",
+              "flags": "Directory|File",
+              "id": null,
+              "queries": [],
+              "excluded": []
+            },
+            {
+              "type": "General",
+              "root_path": "%APPDATA%\\Windsurf\\DawnGraphiteCache",
+              "flags": "Directory|File",
+              "id": null,
+              "queries": [],
+              "excluded": []
+            },
+            {
+              "type": "General",
+              "root_path": "%APPDATA%\\Windsurf\\DawnWebGPUCache",
+              "flags": "Directory|File",
+              "id": null,
+              "queries": [],
+              "excluded": []
+            },
+            {
+              "type": "General",
+              "root_path": "%APPDATA%\\Windsurf\\Crashpad",
+              "flags": "Directory|File",
+              "id": null,
+              "queries": [],
+              "excluded": []
+            },
+            {
+              "type": "General",
+              "root_path": "%APPDATA%\\Windsurf\\logs",
+              "flags": "Directory|File",
+              "id": null,
+              "queries": [],
+              "excluded": []
+            },
+            {
+              "type": "General",
+              "root_path": "%APPDATA%\\Code\\Cache",
+              "flags": "Directory|File",
+              "id": null,
+              "queries": [],
+              "excluded": []
+            },
+            {
+              "type": "General",
+              "root_path": "%APPDATA%\\Code\\Code Cache",
+              "flags": "Directory|File",
+              "id": null,
+              "queries": [],
+              "excluded": []
+            },
+            {
+              "type": "General",
+              "root_path": "%APPDATA%\\Code\\GPUCache",
+              "flags": "Directory|File",
+              "id": null,
+              "queries": [],
+              "excluded": []
+            },
+            {
+              "type": "General",
+              "root_path": "%APPDATA%\\Code\\DawnGraphiteCache",
+              "flags": "Directory|File",
+              "id": null,
+              "queries": [],
+              "excluded": []
+            },
+            {
+              "type": "General",
+              "root_path": "%APPDATA%\\Code\\DawnWebGPUCache",
+              "flags": "Directory|File",
+              "id": null,
+              "queries": [],
+              "excluded": []
+            },
+            {
+              "type": "General",
+              "root_path": "%APPDATA%\\Code\\Crashpad",
+              "flags": "Directory|File",
+              "id": null,
+              "queries": [],
+              "excluded": []
+            },
+            {
+              "type": "General",
+              "root_path": "%APPDATA%\\Code\\logs",
+              "flags": "Directory|File",
+              "id": null,
+              "queries": [],
+              "excluded": []
+            }
+          ],
+          "rescan": false,
+          "restart": null
+        }
+      ]
+    },
+    {
+      "id": "clean-092",
+      "name": {
+        "zh": "Claude Code 与 Codex 历史归档会话副本",
+        "en": "Claude Code & Codex Archived Session Transcripts"
+      },
+      "group": {
+        "zh": "AI 与智能体缓存",
+        "en": "AI & Agent Cache"
+      },
+      "description": {
+        "zh": "清理 Codex 已归档的旧会话目录（.codex\\archived_sessions）以及 Claude Code 的历史会话转录日志（.claude\\transcripts 与 file-history），可释放数百 MB 空间。",
+        "en": "Clears archived historical session files under .codex\\archived_sessions and .claude\\transcripts / file-history."
+      },
+      "warning": {
+        "zh": "清理后已归档的早期历史对话记录将无法回溯（当前活跃会话、配置、MCP 与 Skills 不受影响）。",
+        "en": "Archived past session transcripts will be removed (active sessions, configs, MCP servers, and skills are unaffected)."
+      },
+      "level": 1,
+      "work": null,
+      "source": "win11-modern",
+      "scans": [
+        {
+          "work": 10,
+          "scan_type": null,
+          "name_override": null,
+          "description_override": null,
+          "warning_override": null,
+          "applicable": {
+            "type": "Or",
+            "children": [
+              {
+                "type": "FileExist",
+                "file_path": "%USERPROFILE%\\.codex\\archived_sessions",
+                "wow64": null
+              },
+              {
+                "type": "FileExist",
+                "file_path": "%USERPROFILE%\\.claude\\transcripts",
+                "wow64": null
+              }
+            ]
+          },
+          "named_applicables": {},
+          "actions": [
+            {
+              "type": "General",
+              "root_path": "%USERPROFILE%\\.codex\\archived_sessions",
+              "flags": "Directory|File",
+              "id": null,
+              "queries": [],
+              "excluded": []
+            },
+            {
+              "type": "General",
+              "root_path": "%USERPROFILE%\\.claude\\transcripts",
+              "flags": "Directory|File",
+              "id": null,
+              "queries": [],
+              "excluded": []
+            },
+            {
+              "type": "General",
+              "root_path": "%USERPROFILE%\\.claude\\file-history",
+              "flags": "Directory|File",
+              "id": null,
+              "queries": [],
+              "excluded": []
+            }
+          ],
+          "rescan": false,
+          "restart": null
+        }
+      ]
     }
   ],
   "optimization_groups": [

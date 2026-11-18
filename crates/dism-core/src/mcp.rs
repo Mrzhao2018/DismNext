@@ -951,7 +951,7 @@ mod tests {
             .as_str()
             .expect("content text");
         let parsed: Value = serde_json::from_str(text).expect("valid JSON tool payload");
-        assert!(parsed["catalog"]["cleanup_rules"].as_u64().unwrap() >= 86);
+        assert!(parsed["catalog"]["cleanup_rules"].as_u64().unwrap() >= 92);
         assert!(parsed["system"]["system_disk"]["total_bytes"].as_u64().unwrap() > 0);
 
         let snap_req = json!({

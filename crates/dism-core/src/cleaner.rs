@@ -1094,7 +1094,7 @@ mod tests {
     fn test_catalog_hygiene_no_author_credits_or_empty_descriptions() {
         let catalog = crate::catalog::Catalog::load(None).expect("embedded catalog should load");
         assert_eq!(catalog.base_version, "DismNext 2.0");
-        assert!(catalog.cleanup_rules.len() >= 86);
+        assert!(catalog.cleanup_rules.len() >= 92);
 
         let contains_by_credit = |s: &str| -> bool {
             let lower = s.to_ascii_lowercase();
