@@ -17,7 +17,7 @@ pub use appx::{list_appx_packages, remove_appx_package, AppxCategory, AppxPackag
 pub use catalog::{Catalog, CleanupRule, OptimizationGroup};
 pub use cleaner::{
     execute_cleanup, is_deferred_system_task_proc, scan_all, scan_custom_proc_name, scan_rule,
-    CleanupExecutionReport, CleanupScanResult, FileStatus, PreviewFile,
+    scan_rule_preview, CleanupExecutionReport, CleanupScanResult, FileStatus, PreviewFile,
 };
 pub use diskmap::{
     analyze_path, find_duplicate_files, find_orphaned_app_dirs, get_presets, recycle_path,
@@ -32,7 +32,10 @@ pub use features::{
     list_optional_features, set_feature_enabled, FeatureCategory, FeatureToggleOutcome,
     WindowsFeatureInfo,
 };
-pub use lockcheck::{find_locking_processes, terminate_locking_process, LockingProcessInfo};
+pub use lockcheck::{
+    find_locking_processes, find_locking_processes_batch, terminate_locking_process,
+    LockingProcessInfo,
+};
 pub use optimizer::{
     apply_optimization, apply_optimization_batch, evaluate_all_groups,
     export_optimization_profile, get_optimization_presets, ApplyOutcome, ApplyValue,

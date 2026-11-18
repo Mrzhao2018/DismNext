@@ -1,7 +1,7 @@
 use anyhow::{anyhow, Result};
 use clap::{Parser, Subcommand};
 use dism_core::appx::{list_appx_packages, remove_appx_package, AppxCategory};
-use dism_core::cleaner::{execute_cleanup, scan_all, scan_rule, FileStatus};
+use dism_core::cleaner::{execute_cleanup, scan_all, scan_rule_preview, FileStatus};
 use dism_core::diskmap::analyze_path;
 use dism_core::drivers::{delete_driver, export_drivers, list_drivers};
 use dism_core::evaluator::eval_condition;
@@ -274,7 +274,7 @@ fn main() -> Result<()> {
                 .iter()
                 .find(|r| r.id == rule_id)
                 .ok_or_else(|| anyhow!("Cleanup rule '{}' not found", rule_id))?;
-            let res = scan_rule(rule, &sys);
+            let res = scan_rule_preview(rule, &sys);
             if json {
                 println!("{}", serde_json::to_string_pretty(&res)?);
             } else {

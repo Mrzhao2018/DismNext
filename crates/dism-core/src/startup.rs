@@ -5,7 +5,8 @@ use std::collections::HashMap;
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::{OnceLock, RwLock};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 const SERVICES_KEY: &str = r"SYSTEM\CurrentControlSet\Services";
@@ -457,18 +458,45 @@ pub fn set_service_start_mode(service_name: &str, start_mode: &str) -> Result<Th
         .ok_or_else(|| anyhow!("Service '{}' not found after update", trimmed))
 }
 
-/// Enumerates non-Windows Scheduled Tasks outside `\Microsoft\Windows` via `Schedule.Service` COM (~350ms).
+static TASKS_CACHE: OnceLock<RwLock<Option<(Instant, Vec<ScheduledTaskItem>)>>> = OnceLock::new();
+
+pub fn invalidate_tasks_cache() {
+    if let Some(lock) = TASKS_CACHE.get() {
+        if let Ok(mut w) = lock.write() {
+            *w = None;
+        }
+    }
+}
+
+/// Enumerates non-Windows Scheduled Tasks outside `\Microsoft\Windows` via `Schedule.Service` COM
+/// using lightweight XML regex parsing and a 60-second in-memory cache.
 pub fn list_scheduled_tasks() -> Vec<ScheduledTaskItem> {
+    let cache = TASKS_CACHE.get_or_init(|| RwLock::new(None));
+    if let Ok(guard) = cache.read() {
+        if let Some((ts, ref list)) = *guard {
+            if ts.elapsed() < Duration::from_secs(60) {
+                return list.clone();
+            }
+        }
+    }
+
+    let computed = compute_scheduled_tasks_uncached();
+    if let Ok(mut w) = cache.write() {
+        *w = Some((Instant::now(), computed.clone()));
+    }
+    computed
+}
+
+fn compute_scheduled_tasks_uncached() -> Vec<ScheduledTaskItem> {
     let ps_script = r#"
 $svc = New-Object -ComObject Schedule.Service
 $svc.Connect()
 function Walk-Tasks($folder) {
   foreach ($t in $folder.GetTasks(1)) {
-    try {
-      $xml = [xml]$t.Xml
-      $exec = $xml.Task.Actions.Exec | Select-Object -First 1
-      $cmd = if ($exec) { ($exec.Command + ' ' + $exec.Arguments).Trim() } else { '' }
-    } catch { $cmd = '' }
+    $x = $t.Xml
+    $c = if ($x -match '<Command>([^<]+)</Command>') { $Matches[1] } else { '' }
+    $a = if ($x -match '<Arguments>([^<]+)</Arguments>') { $Matches[1] } else { '' }
+    $cmd = ($c + ' ' + $a).Trim()
     $st = switch ($t.State) { 1 {'Disabled'} 2 {'Queued'} 3 {'Ready'} 4 {'Running'} default {'Unknown'} }
     [PSCustomObject]@{ path=$t.Path; name=$t.Name; enabled=[bool]$t.Enabled; state=$st; command=$cmd }
   }
@@ -565,6 +593,7 @@ pub fn set_scheduled_task_enabled(task_path: &str, enabled: bool) -> Result<()> 
     if !output.status.success() {
         return Err(anyhow!("schtasks /Change failed: {}", combined));
     }
+    invalidate_tasks_cache();
     Ok(())
 }
 

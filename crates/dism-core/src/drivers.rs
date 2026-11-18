@@ -9,6 +9,8 @@ use std::os::windows::fs::MetadataExt;
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::{OnceLock, RwLock};
+use std::time::{Duration, Instant};
 use winreg::enums::{HKEY_LOCAL_MACHINE, KEY_READ};
 use winreg::RegKey;
 
@@ -66,9 +68,35 @@ struct RawDriverMeta {
     hw_descriptors: HashSet<String>,
 }
 
+static DRIVERS_CACHE: OnceLock<RwLock<Option<(Instant, Vec<DriverPackageInfo>)>>> = OnceLock::new();
+
+pub fn invalidate_drivers_cache() {
+    if let Some(lock) = DRIVERS_CACHE.get() {
+        if let Ok(mut w) = lock.write() {
+            *w = None;
+        }
+    }
+}
+
 /// Lists all third-party (`oem*.inf`) driver packages registered in Windows DriverDatabase
 /// and detects older duplicate versions superseded by newer packages.
 pub fn list_drivers() -> Vec<DriverPackageInfo> {
+    let cache = DRIVERS_CACHE.get_or_init(|| RwLock::new(None));
+    if let Ok(guard) = cache.read() {
+        if let Some((ts, ref list)) = *guard {
+            if ts.elapsed() < Duration::from_secs(30) {
+                return list.clone();
+            }
+        }
+    }
+    let computed = compute_drivers_uncached();
+    if let Ok(mut w) = cache.write() {
+        *w = Some((Instant::now(), computed.clone()));
+    }
+    computed
+}
+
+fn compute_drivers_uncached() -> Vec<DriverPackageInfo> {
     let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
     let Ok(pkg_root) = hklm.open_subkey_with_flags(DRIVER_PACKAGES_KEY, KEY_READ) else {
         return Vec::new();
@@ -317,6 +345,7 @@ pub fn delete_driver(published_name: &str) -> Result<String> {
         ));
     }
 
+    invalidate_drivers_cache();
     Ok(combined)
 }
 
@@ -511,15 +540,14 @@ fn dir_size_bytes(dir: &Path) -> u64 {
             continue;
         };
         for entry in rd.flatten() {
-            let p = entry.path();
-            let Ok(meta) = fs::symlink_metadata(&p) else {
+            let Ok(meta) = entry.metadata() else {
                 continue;
             };
             if (meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT) != 0 {
                 continue;
             }
             if meta.is_dir() {
-                stack.push(p);
+                stack.push(entry.path());
             } else if meta.is_file() {
                 total = total.saturating_add(meta.len());
             }

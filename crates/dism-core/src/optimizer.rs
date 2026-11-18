@@ -10,6 +10,7 @@ use crate::snapshot::{
 };
 use crate::sysinfo::SystemInfo;
 use anyhow::{anyhow, Context, Result};
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::ffi::OsStr;
 use std::os::windows::ffi::OsStrExt;
@@ -285,35 +286,35 @@ pub fn evaluate_all_groups(
     groups: &[OptimizationGroup],
     sys: &SystemInfo,
 ) -> Vec<OptimizationGroupStatus> {
-    let mut out = Vec::new();
-    for g in groups {
-        if !eval_condition(&g.applicable, sys) {
-            continue;
-        }
-        let mut items = Vec::new();
-        for it in &g.items {
-            if !eval_condition(&it.applicable, sys) {
-                continue;
+    groups
+        .par_iter()
+        .filter(|g| eval_condition(&g.applicable, sys))
+        .filter_map(|g| {
+            let items: Vec<OptimizationItemStatus> = g
+                .items
+                .par_iter()
+                .filter(|it| eval_condition(&it.applicable, sys))
+                .map(|it| OptimizationItemStatus {
+                    id: it.id.clone(),
+                    name: it.name.clone(),
+                    item_type: it.item_type.clone(),
+                    source: it.source.clone(),
+                    current: it.current.as_ref().map(|s| eval_scope(s, sys)),
+                    default: it.default.as_ref().map(|s| eval_scope(s, sys)),
+                    system: it.system.as_ref().map(|s| eval_scope(s, sys)),
+                })
+                .collect();
+            if items.is_empty() {
+                None
+            } else {
+                Some(OptimizationGroupStatus {
+                    id: g.id.clone(),
+                    name: g.name.clone(),
+                    items,
+                })
             }
-            items.push(OptimizationItemStatus {
-                id: it.id.clone(),
-                name: it.name.clone(),
-                item_type: it.item_type.clone(),
-                source: it.source.clone(),
-                current: it.current.as_ref().map(|s| eval_scope(s, sys)),
-                default: it.default.as_ref().map(|s| eval_scope(s, sys)),
-                system: it.system.as_ref().map(|s| eval_scope(s, sys)),
-            });
-        }
-        if !items.is_empty() {
-            out.push(OptimizationGroupStatus {
-                id: g.id.clone(),
-                name: g.name.clone(),
-                items,
-            });
-        }
-    }
-    out
+        })
+        .collect()
 }
 
 fn eval_scope(scope: &OptimizationScope, sys: &SystemInfo) -> ScopeStatus {

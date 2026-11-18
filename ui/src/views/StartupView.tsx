@@ -99,6 +99,7 @@ export const StartupView: React.FC<Props> = ({ lang, isAdmin }) => {
   const [tasksLoaded, setTasksLoaded] = useState(false);
 
   const [search, setSearch] = useState('');
+  const deferredSearch = React.useDeferredValue(search);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
@@ -156,7 +157,7 @@ export const StartupView: React.FC<Props> = ({ lang, isAdmin }) => {
   }, [mode, servicesLoaded, tasksLoaded]);
 
   const filteredRun = useMemo(() => {
-    const q = search.trim().toLowerCase();
+    const q = deferredSearch.trim().toLowerCase();
     return items.filter((it) => {
       if (scopeFilter !== 'all' && it.scope !== scopeFilter) return false;
       if (onlyEnabled && !it.enabled) return false;
@@ -167,10 +168,10 @@ export const StartupView: React.FC<Props> = ({ lang, isAdmin }) => {
         it.location.toLowerCase().includes(q)
       );
     });
-  }, [items, scopeFilter, onlyEnabled, search]);
+  }, [items, scopeFilter, onlyEnabled, deferredSearch]);
 
   const filteredServices = useMemo(() => {
-    const q = search.trim().toLowerCase();
+    const q = deferredSearch.trim().toLowerCase();
     return services.filter((s) => {
       if (onlyEnabled && s.start_mode !== 'auto') return false;
       if (!q) return true;
@@ -180,10 +181,10 @@ export const StartupView: React.FC<Props> = ({ lang, isAdmin }) => {
         s.image_path.toLowerCase().includes(q)
       );
     });
-  }, [services, onlyEnabled, search]);
+  }, [services, onlyEnabled, deferredSearch]);
 
   const filteredTasks = useMemo(() => {
-    const q = search.trim().toLowerCase();
+    const q = deferredSearch.trim().toLowerCase();
     return tasks.filter((t) => {
       if (onlyEnabled && !t.enabled) return false;
       if (!q) return true;
@@ -193,7 +194,7 @@ export const StartupView: React.FC<Props> = ({ lang, isAdmin }) => {
         t.command.toLowerCase().includes(q)
       );
     });
-  }, [tasks, onlyEnabled, search]);
+  }, [tasks, onlyEnabled, deferredSearch]);
 
   const enabledRunCount = useMemo(() => items.filter((i) => i.enabled).length, [items]);
   const autoServiceCount = useMemo(

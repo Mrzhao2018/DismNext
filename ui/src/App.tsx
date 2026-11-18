@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { Suspense, lazy, useEffect, useMemo, useState } from 'react';
 import {
   Badge,
   Button,
@@ -35,15 +35,34 @@ import {
   formatBytes,
 } from './api';
 import { DashboardTargetTab, DashboardView } from './views/DashboardView';
-import { SpaceRecycleView } from './views/SpaceRecycleView';
-import { OptimizationView } from './views/OptimizationView';
-import { SnapshotView } from './views/SnapshotView';
-import { DiskAnalyzerView } from './views/DiskAnalyzerView';
-import { StartupView } from './views/StartupView';
-import { AppxView } from './views/AppxView';
-import { DriverView } from './views/DriverView';
-import { FeaturesView } from './views/FeaturesView';
-import { RescueView } from './views/RescueView';
+
+const SpaceRecycleView = lazy(() =>
+  import('./views/SpaceRecycleView').then((m) => ({ default: m.SpaceRecycleView }))
+);
+const OptimizationView = lazy(() =>
+  import('./views/OptimizationView').then((m) => ({ default: m.OptimizationView }))
+);
+const SnapshotView = lazy(() =>
+  import('./views/SnapshotView').then((m) => ({ default: m.SnapshotView }))
+);
+const DiskAnalyzerView = lazy(() =>
+  import('./views/DiskAnalyzerView').then((m) => ({ default: m.DiskAnalyzerView }))
+);
+const StartupView = lazy(() =>
+  import('./views/StartupView').then((m) => ({ default: m.StartupView }))
+);
+const AppxView = lazy(() =>
+  import('./views/AppxView').then((m) => ({ default: m.AppxView }))
+);
+const DriverView = lazy(() =>
+  import('./views/DriverView').then((m) => ({ default: m.DriverView }))
+);
+const FeaturesView = lazy(() =>
+  import('./views/FeaturesView').then((m) => ({ default: m.FeaturesView }))
+);
+const RescueView = lazy(() =>
+  import('./views/RescueView').then((m) => ({ default: m.RescueView }))
+);
 
 type NavTab = DashboardTargetTab;
 
@@ -419,76 +438,84 @@ const AppShell: React.FC<{
         </header>
 
         <section className={styles.contentArea}>
-          {loading ? (
-            <div style={{ display: 'flex', justifyContent: 'center', paddingTop: 60 }}>
-              <Spinner label={lang === 'zh' ? '正在加载规则引擎...' : 'Loading engine...'} />
-            </div>
-          ) : tab === 'dashboard' ? (
-            <DashboardView
-              lang={lang}
-              sysPayload={sysPayload}
-              cleanupEntries={cleanupEntries}
-              optGroups={optGroups}
-              snapshots={snapshots}
-              scanning={scanning}
-              onScanCleanup={handleScan}
-              onNavigate={setTab}
-              onSystemUpdated={(sys) =>
-                setSysPayload((prev) => (prev ? { ...prev, system: sys } : prev))
-              }
-            />
-          ) : tab === 'cleanup' ? (
-            <SpaceRecycleView
-              lang={lang}
-              entries={cleanupEntries}
-              scanning={scanning}
-              onScan={handleScan}
-              onExecuted={async () => {
-                await handleScan();
-                const sys = await api.getSysInfo();
-                setSysPayload(sys);
-              }}
-              onSystemTaskDone={async (sys) => {
-                setSysPayload((prev) => (prev ? { ...prev, system: sys } : prev));
-                await handleScan();
-              }}
-            />
-          ) : tab === 'diskmap' ? (
-            <DiskAnalyzerView
-              lang={lang}
-              onSystemUpdated={(sys) =>
-                setSysPayload((prev) => (prev ? { ...prev, system: sys } : prev))
-              }
-            />
-          ) : tab === 'drivers' ? (
-            <DriverView lang={lang} isAdmin={Boolean(sysPayload?.system.is_admin)} />
-          ) : tab === 'features' ? (
-            <FeaturesView lang={lang} isAdmin={Boolean(sysPayload?.system.is_admin)} />
-          ) : tab === 'startup' ? (
-            <StartupView lang={lang} isAdmin={Boolean(sysPayload?.system.is_admin)} />
-          ) : tab === 'appx' ? (
-            <AppxView lang={lang} />
-          ) : tab === 'rescue' ? (
-            <RescueView lang={lang} isAdmin={Boolean(sysPayload?.system.is_admin)} />
-          ) : tab === 'optimize' ? (
-            <OptimizationView
-              lang={lang}
-              groups={optGroups}
-              onGroupsUpdated={(next) => {
-                setOptGroups(next);
-                void refreshSnapshots();
-              }}
-              onSnapshotCreated={(snap) => setSnapshots((prev) => [snap, ...prev])}
-              onJumpToSnapshots={() => setTab('snapshots')}
-            />
-          ) : (
-            <SnapshotView
-              lang={lang}
-              snapshots={snapshots}
-              onRefresh={refreshSnapshots}
-              onGroupsUpdated={setOptGroups}
-            />
-          )}
+          <Suspense
+            fallback={
+              <div style={{ display: 'flex', justifyContent: 'center', paddingTop: 60 }}>
+                <Spinner label={lang === 'zh' ? '正在加载视图...' : 'Loading view...'} />
+              </div>
+            }
+          >
+            {loading ? (
+              <div style={{ display: 'flex', justifyContent: 'center', paddingTop: 60 }}>
+                <Spinner label={lang === 'zh' ? '正在加载规则引擎...' : 'Loading engine...'} />
+              </div>
+            ) : tab === 'dashboard' ? (
+              <DashboardView
+                lang={lang}
+                sysPayload={sysPayload}
+                cleanupEntries={cleanupEntries}
+                optGroups={optGroups}
+                snapshots={snapshots}
+                scanning={scanning}
+                onScanCleanup={handleScan}
+                onNavigate={setTab}
+                onSystemUpdated={(sys) =>
+                  setSysPayload((prev) => (prev ? { ...prev, system: sys } : prev))
+                }
+              />
+            ) : tab === 'cleanup' ? (
+              <SpaceRecycleView
+                lang={lang}
+                entries={cleanupEntries}
+                scanning={scanning}
+                onScan={handleScan}
+                onExecuted={async () => {
+                  await handleScan();
+                  const sys = await api.getSysInfo();
+                  setSysPayload(sys);
+                }}
+                onSystemTaskDone={async (sys) => {
+                  setSysPayload((prev) => (prev ? { ...prev, system: sys } : prev));
+                  await handleScan();
+                }}
+              />
+            ) : tab === 'diskmap' ? (
+              <DiskAnalyzerView
+                lang={lang}
+                onSystemUpdated={(sys) =>
+                  setSysPayload((prev) => (prev ? { ...prev, system: sys } : prev))
+                }
+              />
+            ) : tab === 'drivers' ? (
+              <DriverView lang={lang} isAdmin={Boolean(sysPayload?.system.is_admin)} />
+            ) : tab === 'features' ? (
+              <FeaturesView lang={lang} isAdmin={Boolean(sysPayload?.system.is_admin)} />
+            ) : tab === 'startup' ? (
+              <StartupView lang={lang} isAdmin={Boolean(sysPayload?.system.is_admin)} />
+            ) : tab === 'appx' ? (
+              <AppxView lang={lang} />
+            ) : tab === 'rescue' ? (
+              <RescueView lang={lang} isAdmin={Boolean(sysPayload?.system.is_admin)} />
+            ) : tab === 'optimize' ? (
+              <OptimizationView
+                lang={lang}
+                groups={optGroups}
+                onGroupsUpdated={(next) => {
+                  setOptGroups(next);
+                  void refreshSnapshots();
+                }}
+                onSnapshotCreated={(snap) => setSnapshots((prev) => [snap, ...prev])}
+                onJumpToSnapshots={() => setTab('snapshots')}
+              />
+            ) : (
+              <SnapshotView
+                lang={lang}
+                snapshots={snapshots}
+                onRefresh={refreshSnapshots}
+                onGroupsUpdated={setOptGroups}
+              />
+            )}
+          </Suspense>
         </section>
       </main>
     </div>

@@ -2,12 +2,71 @@ use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 use std::ffi::OsStr;
 use std::os::windows::ffi::OsStrExt;
+use std::sync::OnceLock;
 use windows_sys::Win32::Storage::FileSystem::{GetDiskFreeSpaceExW, GetDriveTypeW, GetLogicalDrives};
 use windows_sys::Win32::UI::Shell::{IsUserAnAdmin, ShellExecuteW};
 use winreg::enums::HKEY_LOCAL_MACHINE;
 use winreg::RegKey;
 
 const DRIVE_FIXED: u32 = 3;
+
+#[derive(Clone)]
+struct StaticSystemInfo {
+    product_name: String,
+    display_version: String,
+    major: u32,
+    minor: u32,
+    build: u32,
+    ubr: u32,
+    version_string: String,
+    arch: String,
+    arch_code: u32,
+    is_admin: bool,
+    system_drive: String,
+    drive_root: String,
+    fixed_drives: Vec<String>,
+}
+
+static STATIC_SYS_INFO: OnceLock<StaticSystemInfo> = OnceLock::new();
+
+fn static_sys_info() -> &'static StaticSystemInfo {
+    STATIC_SYS_INFO.get_or_init(|| {
+        let (product_name, display_version, major, minor, build, ubr) = read_windows_version();
+        let version_string = format!("{}.{}.{}.{}", major, minor, build, ubr);
+
+        let (arch, arch_code) = match std::env::consts::ARCH {
+            "x86_64" => ("x64".to_string(), 9),
+            "x86" => ("x86".to_string(), 0),
+            "aarch64" => ("ARM64".to_string(), 12),
+            other => (other.to_string(), 9),
+        };
+
+        let is_admin = unsafe { IsUserAnAdmin() != 0 };
+        let system_drive = std::env::var("SystemDrive").unwrap_or_else(|_| "C:".to_string());
+        let drive_root = if system_drive.ends_with('\\') {
+            system_drive.clone()
+        } else {
+            format!("{}\\", system_drive)
+        };
+        let fixed_drives = enumerate_fixed_drives();
+
+        StaticSystemInfo {
+            product_name,
+            display_version,
+            major,
+            minor,
+            build,
+            ubr,
+            version_string,
+            arch,
+            arch_code,
+            is_admin,
+            system_drive,
+            drive_root,
+            fixed_drives,
+        }
+    })
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DiskStats {
@@ -36,40 +95,23 @@ pub struct SystemInfo {
 
 impl SystemInfo {
     pub fn collect() -> Self {
-        let (product_name, display_version, major, minor, build, ubr) = read_windows_version();
-        let version_string = format!("{}.{}.{}.{}", major, minor, build, ubr);
-
-        let (arch, arch_code) = match std::env::consts::ARCH {
-            "x86_64" => ("x64".to_string(), 9),
-            "x86" => ("x86".to_string(), 0),
-            "aarch64" => ("ARM64".to_string(), 12),
-            other => (other.to_string(), 9),
-        };
-
-        let is_admin = unsafe { IsUserAnAdmin() != 0 };
-        let system_drive = std::env::var("SystemDrive").unwrap_or_else(|_| "C:".to_string());
-        let drive_root = if system_drive.ends_with('\\') {
-            system_drive.clone()
-        } else {
-            format!("{}\\", system_drive)
-        };
-        let system_disk = query_disk_space(&drive_root);
-        let fixed_drives = enumerate_fixed_drives();
+        let st = static_sys_info();
+        let system_disk = query_disk_space(&st.drive_root);
 
         Self {
-            product_name,
-            display_version,
-            major,
-            minor,
-            build,
-            ubr,
-            version_string,
-            arch,
-            arch_code,
-            is_admin,
-            system_drive,
+            product_name: st.product_name.clone(),
+            display_version: st.display_version.clone(),
+            major: st.major,
+            minor: st.minor,
+            build: st.build,
+            ubr: st.ubr,
+            version_string: st.version_string.clone(),
+            arch: st.arch.clone(),
+            arch_code: st.arch_code,
+            is_admin: st.is_admin,
+            system_drive: st.system_drive.clone(),
             system_disk,
-            fixed_drives,
+            fixed_drives: st.fixed_drives.clone(),
         }
     }
 

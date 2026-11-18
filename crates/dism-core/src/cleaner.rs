@@ -132,8 +132,51 @@ pub fn scan_all(rules: &[CleanupRule], sys: &SystemInfo) -> Vec<CleanupScanResul
         .collect()
 }
 
-/// Scans a single cleanup rule and produces file-level diagnostics + up to 100 largest preview entries.
+/// Scans a single rule using fast budgeted handle probing (ideal for bulk `scan_all`).
 pub fn scan_rule(rule: &CleanupRule, sys: &SystemInfo) -> CleanupScanResult {
+    scan_rule_with_budget(rule, sys, 64)
+}
+
+/// Scans a single rule with full handle diagnostics and a single batched Restart Manager lock check
+/// across up to the top 6 locked files in `preview_files`.
+pub fn scan_rule_preview(rule: &CleanupRule, sys: &SystemInfo) -> CleanupScanResult {
+    let mut res = scan_rule_with_budget(rule, sys, usize::MAX);
+    let locked_indices: Vec<usize> = res
+        .preview_files
+        .iter()
+        .enumerate()
+        .filter(|(_, f)| f.status == FileStatus::Locked)
+        .map(|(idx, _)| idx)
+        .take(6)
+        .collect();
+
+    if !locked_indices.is_empty() {
+        let locked_paths: Vec<&Path> = locked_indices
+            .iter()
+            .map(|&idx| Path::new(&res.preview_files[idx].path))
+            .collect();
+        let procs = crate::lockcheck::find_locking_processes_batch(&locked_paths);
+        if !procs.is_empty() {
+            let summary: Vec<String> = procs
+                .iter()
+                .take(3)
+                .map(|p| format!("{} (PID {})", p.app_name, p.pid))
+                .collect();
+            let reason_text = format!("被进程占用: {}", summary.join(", "));
+            for idx in locked_indices {
+                res.preview_files[idx].reason = Some(reason_text.clone());
+                res.preview_files[idx].locking_processes = procs.clone();
+            }
+        }
+    }
+    res
+}
+
+fn scan_rule_with_budget(
+    rule: &CleanupRule,
+    sys: &SystemInfo,
+    probe_budget: usize,
+) -> CleanupScanResult {
     let Some(active_scan) = select_active_scan(rule, sys) else {
         return empty_result(rule, false);
     };
@@ -151,7 +194,7 @@ pub fn scan_rule(rule: &CleanupRule, sys: &SystemInfo) -> CleanupScanResult {
         .clone()
         .or_else(|| rule.warning.clone());
 
-    let collected = collect_scan_targets(active_scan, sys);
+    let collected = collect_scan_targets(active_scan, sys, probe_budget);
     let mut cleanable_bytes = 0u64;
     let mut cleanable_count = 0usize;
     let mut skipped_locked_bytes = 0u64;
@@ -179,24 +222,6 @@ pub fn scan_rule(rule: &CleanupRule, sys: &SystemInfo) -> CleanupScanResult {
     let mut preview_files = collected.files;
     preview_files.sort_by(|a, b| b.size_bytes.cmp(&a.size_bytes));
     preview_files.truncate(MAX_PREVIEW_FILES);
-
-    // Enrich up to the top 12 locked files with Restart Manager process info
-    let mut inspected_locks = 0usize;
-    for f in &mut preview_files {
-        if f.status == FileStatus::Locked && inspected_locks < 12 {
-            inspected_locks += 1;
-            let procs = crate::lockcheck::find_locking_processes(Path::new(&f.path));
-            if !procs.is_empty() {
-                let summary: Vec<String> = procs
-                    .iter()
-                    .take(3)
-                    .map(|p| format!("{} (PID {})", p.app_name, p.pid))
-                    .collect();
-                f.reason = Some(format!("被进程占用: {}", summary.join(", ")));
-                f.locking_processes = procs;
-            }
-        }
-    }
 
     CleanupScanResult {
         id: rule.id.clone(),
@@ -269,7 +294,7 @@ fn execute_single_rule(rule: &CleanupRule, sys: &SystemInfo, dry_run: bool) -> R
         };
     };
 
-    let collected = collect_scan_targets(active_scan, sys);
+    let collected = collect_scan_targets(active_scan, sys, usize::MAX);
     let mut deleted_bytes = 0u64;
     let mut deleted_files = 0usize;
     let mut skipped_locked_files = 0usize;
@@ -402,7 +427,11 @@ fn select_active_scan<'a>(rule: &'a CleanupRule, sys: &SystemInfo) -> Option<&'a
         .find(|scan| eval_condition(&scan.applicable, sys))
 }
 
-fn collect_scan_targets(scan: &CleanupScan, sys: &SystemInfo) -> CollectedTargets {
+fn collect_scan_targets(
+    scan: &CleanupScan,
+    sys: &SystemInfo,
+    mut probe_budget: usize,
+) -> CollectedTargets {
     let mut files = Vec::new();
     let mut seen_paths = HashSet::<String>::new();
     let mut removable_dirs = Vec::new();
@@ -436,6 +465,7 @@ fn collect_scan_targets(scan: &CleanupScan, sys: &SystemInfo) -> CollectedTarget
                     &mut files,
                     &mut seen_paths,
                     &mut removable_dirs,
+                    &mut probe_budget,
                 );
             }
             Action::Custom { proc_name, .. } => {
@@ -449,6 +479,7 @@ fn collect_scan_targets(scan: &CleanupScan, sys: &SystemInfo) -> CollectedTarget
                     &mut is_system_task,
                     &mut system_task_proc,
                     &mut system_task_hint,
+                    &mut probe_budget,
                 );
             }
             _ => {}
@@ -475,6 +506,7 @@ fn collect_general_action(
     files: &mut Vec<PreviewFile>,
     seen_paths: &mut HashSet<String>,
     removable_dirs: &mut Vec<PathBuf>,
+    probe_budget: &mut usize,
 ) {
     let Some(expanded_root) = expand_expression(root_path, None) else {
         return;
@@ -497,9 +529,9 @@ fn collect_general_action(
 
     let roots = resolve_wildcard_roots(&effective_root, &sys.fixed_drives);
     for root_dir in roots {
-        if !root_dir.exists() {
+        let Ok(root_meta) = std::fs::symlink_metadata(&root_dir) else {
             continue;
-        }
+        };
         let root_str = root_dir.to_string_lossy().into_owned();
         let expanded_exclusions: Vec<String> = excluded
             .iter()
@@ -508,8 +540,15 @@ fn collect_general_action(
             .collect();
 
         if effective_queries.is_empty() {
-            if root_dir.is_file() {
-                record_file(&root_dir, files, seen_paths);
+            if root_meta.is_file() {
+                record_file_with_meta(
+                    &root_dir,
+                    Some(&root_meta),
+                    files,
+                    seen_paths,
+                    sys.is_admin,
+                    probe_budget,
+                );
             } else {
                 walk_dir_filtered(
                     &root_dir,
@@ -517,9 +556,11 @@ fn collect_general_action(
                     &expanded_exclusions,
                     allow_dirs,
                     false,
+                    sys.is_admin,
                     files,
                     seen_paths,
                     removable_dirs,
+                    probe_budget,
                 );
             }
         } else {
@@ -535,18 +576,30 @@ fn collect_general_action(
                     if is_excluded(&target, &root_dir, &expanded_exclusions) {
                         continue;
                     }
-                    if target.is_file() {
-                        record_file(&target, files, seen_paths);
-                    } else if target.is_dir() && !is_reparse_point(&target) {
+                    let Ok(t_meta) = std::fs::symlink_metadata(&target) else {
+                        continue;
+                    };
+                    if t_meta.is_file() {
+                        record_file_with_meta(
+                            &target,
+                            Some(&t_meta),
+                            files,
+                            seen_paths,
+                            sys.is_admin,
+                            probe_budget,
+                        );
+                    } else if t_meta.is_dir() && (t_meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT) == 0 {
                         walk_dir_filtered(
                             &target,
                             &root_dir,
                             &expanded_exclusions,
                             allow_dirs,
                             allow_dirs,
+                            sys.is_admin,
                             files,
                             seen_paths,
                             removable_dirs,
+                            probe_budget,
                         );
                     }
                 }
@@ -566,6 +619,7 @@ fn handle_custom_proc(
     is_system_task: &mut bool,
     system_task_proc: &mut Option<String>,
     system_task_hint: &mut Option<LocalizedText>,
+    probe_budget: &mut usize,
 ) {
     match proc_name {
         "BuiltinEventLogCleanup" => {
@@ -578,6 +632,7 @@ fn handle_custom_proc(
                 files,
                 seen_paths,
                 removable_dirs,
+                probe_budget,
             );
         }
         "BuiltinDeliveryOptCleanup" => {
@@ -586,7 +641,7 @@ fn handle_custom_proc(
                 r"%SystemRoot%\DeliveryOptimization",
                 r"%SystemRoot%\ServiceProfiles\NetworkService\AppData\Local\Microsoft\Windows\DeliveryOptimization",
             ] {
-                collect_general_action(p, "Directory|File", &[], &[], sys, files, seen_paths, removable_dirs);
+                collect_general_action(p, "Directory|File", &[], &[], sys, files, seen_paths, removable_dirs, probe_budget);
             }
         }
         "BuiltinPackageCacheCleanup" => {
@@ -599,6 +654,7 @@ fn handle_custom_proc(
                 files,
                 seen_paths,
                 removable_dirs,
+                probe_budget,
             );
         }
         "BuiltinVsPackageCacheCleanup" => {
@@ -611,13 +667,14 @@ fn handle_custom_proc(
                 files,
                 seen_paths,
                 removable_dirs,
+                probe_budget,
             );
         }
         "BuiltinInstallerCleanup" => {
             let orphans = crate::systasks::find_orphaned_installer_files();
             let orphan_count = orphans.len();
-            for (path, _sz) in orphans {
-                record_file(&path, files, seen_paths);
+            for (path, sz) in orphans {
+                record_file_with_size(&path, sz, files, seen_paths, sys.is_admin, probe_budget);
             }
             *is_system_task = false;
             *system_task_proc = Some(proc_name.to_string());
@@ -637,7 +694,7 @@ fn handle_custom_proc(
                 r"%SystemRoot%\WinSxS\Temp\PendingDeletes",
                 r"%SystemRoot%\WinSxS\ManifestCache",
             ] {
-                collect_general_action(p, "File", &[], &[], sys, files, seen_paths, removable_dirs);
+                collect_general_action(p, "File", &[], &[], sys, files, seen_paths, removable_dirs, probe_budget);
             }
             *is_system_task = true;
             *system_task_proc = Some(proc_name.to_string());
@@ -713,7 +770,7 @@ fn handle_custom_proc(
                 r"%ProgramFiles%\WindowsApps\DeletedAllUserPackages",
                 r"%LOCALAPPDATA%\Packages\*\AC\Temp",
             ] {
-                collect_general_action(p, "Directory|File", &[], &[], sys, files, seen_paths, removable_dirs);
+                collect_general_action(p, "Directory|File", &[], &[], sys, files, seen_paths, removable_dirs, probe_budget);
             }
             *is_system_task = true;
             *system_task_proc = Some(proc_name.to_string());
@@ -760,9 +817,11 @@ fn walk_dir_filtered(
     exclusions: &[String],
     allow_dirs: bool,
     remove_self: bool,
+    sys_is_admin: bool,
     files: &mut Vec<PreviewFile>,
     seen_paths: &mut HashSet<String>,
     removable_dirs: &mut Vec<PathBuf>,
+    probe_budget: &mut usize,
 ) {
     let mut dirs_in_walk = Vec::new();
     let walker = WalkDir::new(dir).follow_links(false).into_iter();
@@ -770,8 +829,17 @@ fn walk_dir_filtered(
         if e.path() == dir {
             return true;
         }
-        if is_reparse_point(e.path()) {
+        if e.path_is_symlink() {
             return false;
+        }
+        if e.file_type().is_dir() {
+            let is_rp = e
+                .metadata()
+                .map(|m| (m.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT) != 0)
+                .unwrap_or(false);
+            if is_rp {
+                return false;
+            }
         }
         !is_excluded(e.path(), anchor_root, exclusions)
     }) {
@@ -780,7 +848,15 @@ fn walk_dir_filtered(
         };
         let path = entry.path();
         if entry.file_type().is_file() {
-            record_file(path, files, seen_paths);
+            let meta = entry.metadata().ok();
+            record_file_with_meta(
+                path,
+                meta.as_ref(),
+                files,
+                seen_paths,
+                sys_is_admin,
+                probe_budget,
+            );
         } else if entry.file_type().is_dir() && allow_dirs && (path != dir || remove_self) {
             dirs_in_walk.push(path.to_path_buf());
         }
@@ -809,20 +885,41 @@ fn is_excluded(path: &Path, anchor_root: &Path, exclusions: &[String]) -> bool {
     false
 }
 
-fn is_reparse_point(path: &Path) -> bool {
-    std::fs::symlink_metadata(path)
-        .map(|m| (m.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT) != 0)
-        .unwrap_or(false)
+fn record_file_with_meta(
+    path: &Path,
+    meta: Option<&std::fs::Metadata>,
+    files: &mut Vec<PreviewFile>,
+    seen_paths: &mut HashSet<String>,
+    sys_is_admin: bool,
+    probe_budget: &mut usize,
+) {
+    let size_bytes = meta
+        .map(|m| m.len())
+        .unwrap_or_else(|| std::fs::symlink_metadata(path).map(|m| m.len()).unwrap_or(0));
+    record_file_with_size(path, size_bytes, files, seen_paths, sys_is_admin, probe_budget);
 }
 
-fn record_file(path: &Path, files: &mut Vec<PreviewFile>, seen_paths: &mut HashSet<String>) {
+fn record_file_with_size(
+    path: &Path,
+    size_bytes: u64,
+    files: &mut Vec<PreviewFile>,
+    seen_paths: &mut HashSet<String>,
+    sys_is_admin: bool,
+    probe_budget: &mut usize,
+) {
     let path_str = path.to_string_lossy().into_owned();
     let key = path_str.to_ascii_lowercase();
     if !seen_paths.insert(key) {
         return;
     }
-    let size_bytes = std::fs::symlink_metadata(path).map(|m| m.len()).unwrap_or(0);
-    let (status, reason) = diagnose_file(path, &path_str);
+    let (status, reason) = if *probe_budget > 0 || size_bytes >= 4 * 1024 * 1024 {
+        if *probe_budget > 0 {
+            *probe_budget -= 1;
+        }
+        diagnose_file(path, &path_str)
+    } else {
+        diagnose_file_fast(&path_str, sys_is_admin)
+    };
     files.push(PreviewFile {
         path: path_str,
         size_bytes,
@@ -830,6 +927,33 @@ fn record_file(path: &Path, files: &mut Vec<PreviewFile>, seen_paths: &mut HashS
         reason,
         locking_processes: Vec::new(),
     });
+}
+
+fn diagnose_file_fast(path_str: &str, is_admin: bool) -> (FileStatus, Option<String>) {
+    let lower = path_str.to_ascii_lowercase();
+    if lower.contains(r"\windows defender\") {
+        return (
+            FileStatus::Protected,
+            Some("Windows Defender self-protection (0x5)".to_string()),
+        );
+    }
+    if lower.contains(r"\windows\assembly\nativeimages_") {
+        return (
+            FileStatus::Protected,
+            Some("Protected .NET NativeImages ACL (0x5)".to_string()),
+        );
+    }
+    if !is_admin
+        && (lower.contains(r"\windows\installer\")
+            || lower.contains(r"\windows\winsxs\")
+            || lower.contains(r"\windows\system32\"))
+    {
+        return (
+            FileStatus::Protected,
+            Some("Administrator privileges required for system folder".to_string()),
+        );
+    }
+    (FileStatus::Ready, None)
 }
 
 fn diagnose_file(path: &Path, path_str: &str) -> (FileStatus, Option<String>) {

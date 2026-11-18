@@ -5,6 +5,8 @@ use std::fs;
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::{OnceLock, RwLock};
+use std::time::{Duration, Instant};
 use winreg::enums::{HKEY_LOCAL_MACHINE, HKEY_USERS, KEY_READ, KEY_WOW64_32KEY, KEY_WOW64_64KEY};
 use winreg::RegKey;
 
@@ -75,8 +77,42 @@ pub fn decode_cmd_output(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).into_owned()
 }
 
-/// Queries live Windows CompactOS compression state via `compact.exe /CompactOS:query`.
+static COMPACT_OS_CACHE: OnceLock<RwLock<Option<(Instant, (bool, String))>>> = OnceLock::new();
+static ORPHAN_INST_CACHE: OnceLock<RwLock<Option<(Instant, Vec<(PathBuf, u64)>)>>> =
+    OnceLock::new();
+
+pub fn invalidate_systasks_cache() {
+    if let Some(lock) = COMPACT_OS_CACHE.get() {
+        if let Ok(mut w) = lock.write() {
+            *w = None;
+        }
+    }
+    if let Some(lock) = ORPHAN_INST_CACHE.get() {
+        if let Ok(mut w) = lock.write() {
+            *w = None;
+        }
+    }
+}
+
+/// Queries live Windows CompactOS compression state via `compact.exe /CompactOS:query` (cached 30s).
 pub fn query_compact_os() -> (bool, String) {
+    let cache = COMPACT_OS_CACHE.get_or_init(|| RwLock::new(None));
+    if let Ok(guard) = cache.read() {
+        if let Some((ts, ref val)) = *guard {
+            if ts.elapsed() < Duration::from_secs(30) {
+                return val.clone();
+            }
+        }
+    }
+
+    let val = query_compact_os_uncached();
+    if let Ok(mut w) = cache.write() {
+        *w = Some((Instant::now(), val.clone()));
+    }
+    val
+}
+
+fn query_compact_os_uncached() -> (bool, String) {
     let Ok(output) = Command::new("compact.exe")
         .creation_flags(CREATE_NO_WINDOW)
         .arg("/CompactOS:query")
@@ -102,9 +138,26 @@ fn parse_compact_os_output(raw: &str) -> bool {
     positive && !negated
 }
 
-/// Finds orphaned `.msi` and `.msp` packages inside `%SystemRoot%\Installer`
-/// that have zero references across `Installer\UserData\*\Products` and `Patches`.
+/// Finds orphaned `.msi` and `.msp` packages inside `%SystemRoot%\Installer` (cached 30s)
+/// that have zero references across Installer registry databases.
 pub fn find_orphaned_installer_files() -> Vec<(PathBuf, u64)> {
+    let cache = ORPHAN_INST_CACHE.get_or_init(|| RwLock::new(None));
+    if let Ok(guard) = cache.read() {
+        if let Some((ts, ref val)) = *guard {
+            if ts.elapsed() < Duration::from_secs(30) {
+                return val.clone();
+            }
+        }
+    }
+
+    let val = compute_orphaned_installer_files_uncached();
+    if let Ok(mut w) = cache.write() {
+        *w = Some((Instant::now(), val.clone()));
+    }
+    val
+}
+
+fn compute_orphaned_installer_files_uncached() -> Vec<(PathBuf, u64)> {
     let referenced = collect_referenced_installer_packages();
     // Safety guard: never classify Installer files as orphaned if registry DB could not be read reliably
     if referenced.len() < 10 {
@@ -351,6 +404,8 @@ pub fn run_system_task(task_id: &str) -> Result<SystemTaskExecOutcome> {
         }
         other => return Err(anyhow!("Unknown system task '{}'", other)),
     };
+
+    invalidate_systasks_cache();
 
     Ok(SystemTaskExecOutcome {
         task_id: task_id.to_string(),

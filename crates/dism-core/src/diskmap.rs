@@ -11,7 +11,8 @@ use std::io::{Read, Seek, SeekFrom};
 use std::os::windows::ffi::OsStrExt;
 use std::os::windows::fs::MetadataExt;
 use std::path::{Path, PathBuf};
-use std::time::{Instant, UNIX_EPOCH};
+use std::sync::{OnceLock, RwLock};
+use std::time::{Duration, Instant, UNIX_EPOCH};
 use walkdir::WalkDir;
 use winreg::enums::{
     HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ, KEY_WOW64_32KEY, KEY_WOW64_64KEY,
@@ -254,28 +255,70 @@ fn scan_recursive(path: &Path) -> ScanAccumulator {
         return empty_acc(name, path_str, true);
     };
 
-    let child_paths: Vec<_> = rd.flatten().map(|e| e.path()).collect();
-    let child_accs: Vec<ScanAccumulator> = if child_paths.len() >= 2 {
-        child_paths.par_iter().map(|p| scan_recursive(p)).collect()
-    } else {
-        child_paths.iter().map(|p| scan_recursive(p)).collect()
-    };
-
     let mut total_bytes = 0u64;
     let mut total_files = 0usize;
     let mut total_dirs = 0usize;
-    let mut children = Vec::with_capacity(child_accs.len());
+    let mut children: Vec<RawNode> = Vec::new();
     let mut exts: HashMap<String, (u64, usize)> = HashMap::new();
     let mut top_files: Vec<LargeFileEntry> = Vec::new();
+    let mut sub_dirs: Vec<PathBuf> = Vec::new();
+
+    for entry in rd.flatten() {
+        let Ok(c_meta) = entry.metadata() else {
+            continue;
+        };
+        if (c_meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT) != 0 {
+            continue;
+        }
+        let child_path = entry.path();
+        if c_meta.is_file() {
+            let sz = c_meta.len();
+            let c_name = entry.file_name().to_string_lossy().into_owned();
+            let c_path_str = child_path.to_string_lossy().into_owned();
+            let ext = extract_ext(&child_path);
+
+            total_bytes = total_bytes.saturating_add(sz);
+            total_files += 1;
+
+            let ent = exts.entry(ext.clone()).or_insert((0, 0));
+            ent.0 = ent.0.saturating_add(sz);
+            ent.1 += 1;
+
+            top_files.push(LargeFileEntry {
+                path: c_path_str.clone(),
+                name: c_name.clone(),
+                ext: ext.clone(),
+                size_bytes: sz,
+            });
+            children.push(RawNode {
+                name: c_name,
+                path: c_path_str,
+                is_dir: false,
+                size_bytes: sz,
+                file_count: 1,
+                dir_count: 0,
+                ext: Some(ext),
+                children: Vec::new(),
+            });
+        } else if c_meta.is_dir() {
+            sub_dirs.push(child_path);
+        }
+    }
+
+    let child_accs: Vec<ScanAccumulator> = if sub_dirs.len() >= 2 {
+        sub_dirs.par_iter().map(|p| scan_recursive(p)).collect()
+    } else {
+        sub_dirs.iter().map(|p| scan_recursive(p)).collect()
+    };
 
     for c in child_accs {
-        total_bytes += c.node.size_bytes;
+        total_bytes = total_bytes.saturating_add(c.node.size_bytes);
         total_files += c.node.file_count;
         total_dirs += c.node.dir_count + usize::from(c.node.is_dir);
         children.push(c.node);
         for (ext, (sz, cnt)) in c.exts {
             let entry = exts.entry(ext).or_insert((0, 0));
-            entry.0 += sz;
+            entry.0 = entry.0.saturating_add(sz);
             entry.1 += cnt;
         }
         top_files.extend(c.top_files);
@@ -544,6 +587,7 @@ pub fn recycle_path(target: &Path) -> Result<u64> {
         ));
     }
 
+    invalidate_orphans_cache();
     Ok(size_bytes)
 }
 
@@ -572,11 +616,22 @@ fn measure_path_bytes(path: &Path) -> u64 {
     let Ok(rd) = std::fs::read_dir(path) else {
         return 0;
     };
-    rd.flatten()
-        .collect::<Vec<_>>()
-        .par_iter()
-        .map(|e| measure_path_bytes(&e.path()))
-        .sum()
+    let mut total = 0u64;
+    let mut sub_dirs = Vec::new();
+    for entry in rd.flatten() {
+        let Ok(m) = entry.metadata() else {
+            continue;
+        };
+        if (m.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT) != 0 {
+            continue;
+        }
+        if m.is_file() {
+            total = total.saturating_add(m.len());
+        } else if m.is_dir() {
+            sub_dirs.push(entry.path());
+        }
+    }
+    total.saturating_add(sub_dirs.par_iter().map(|d| measure_path_bytes(d)).sum::<u64>())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -785,9 +840,35 @@ fn full_hash_128(path: &Path) -> Option<u128> {
     Some(((h1 as u128) << 64) | (h2 as u128))
 }
 
+static ORPHANS_CACHE: OnceLock<RwLock<Option<(Instant, Vec<OrphanDirEntry>)>>> = OnceLock::new();
+
+pub fn invalidate_orphans_cache() {
+    if let Some(lock) = ORPHANS_CACHE.get() {
+        if let Ok(mut w) = lock.write() {
+            *w = None;
+        }
+    }
+}
+
 /// Scans top-level AppData / ProgramData directories and flags large folders not matched
 /// against active Uninstall keys, installed AppX apps, or known Windows/vendor safelists.
 pub fn find_orphaned_app_dirs() -> Vec<OrphanDirEntry> {
+    let cache = ORPHANS_CACHE.get_or_init(|| RwLock::new(None));
+    if let Ok(guard) = cache.read() {
+        if let Some((ts, ref list)) = *guard {
+            if ts.elapsed() < Duration::from_secs(30) {
+                return list.clone();
+            }
+        }
+    }
+    let computed = compute_orphaned_app_dirs();
+    if let Ok(mut w) = cache.write() {
+        *w = Some((Instant::now(), computed.clone()));
+    }
+    computed
+}
+
+fn compute_orphaned_app_dirs() -> Vec<OrphanDirEntry> {
     let (installed_tokens, installed_dirs) = collect_installed_app_tokens();
     let mut safelist: HashSet<&'static str> = [
         "microsoft",
@@ -924,6 +1005,7 @@ pub fn find_orphaned_app_dirs() -> Vec<OrphanDirEntry> {
 }
 
 fn measure_dir_stats(dir: &Path) -> (u64, usize) {
+    const MAX_FILES_PER_ORPHAN_DIR: usize = 20_000;
     let mut size = 0u64;
     let mut files = 0usize;
     let mut stack = vec![dir.to_path_buf()];
@@ -932,18 +1014,20 @@ fn measure_dir_stats(dir: &Path) -> (u64, usize) {
             continue;
         };
         for entry in rd.flatten() {
-            let p = entry.path();
-            let Ok(meta) = std::fs::symlink_metadata(&p) else {
+            let Ok(meta) = entry.metadata() else {
                 continue;
             };
             if (meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT) != 0 {
                 continue;
             }
             if meta.is_dir() {
-                stack.push(p);
+                stack.push(entry.path());
             } else if meta.is_file() {
                 size = size.saturating_add(meta.len());
                 files += 1;
+                if files >= MAX_FILES_PER_ORPHAN_DIR {
+                    return (size, files);
+                }
             }
         }
     }

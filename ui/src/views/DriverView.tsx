@@ -109,6 +109,7 @@ export const DriverView: React.FC<Props> = ({ lang, isAdmin }) => {
   const [loading, setLoading] = useState(true);
   const [filterMode, setFilterMode] = useState<'all' | 'outdated' | string>('all');
   const [search, setSearch] = useState('');
+  const deferredSearch = React.useDeferredValue(search);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [busyAction, setBusyAction] = useState<string | null>(null);
   const [backupReport, setBackupReport] = useState<DriverBackupReport | null>(null);
@@ -150,7 +151,7 @@ export const DriverView: React.FC<Props> = ({ lang, isAdmin }) => {
   }, [drivers]);
 
   const filtered = useMemo(() => {
-    const q = search.trim().toLowerCase();
+    const q = deferredSearch.trim().toLowerCase();
     return drivers.filter((d) => {
       if (filterMode === 'outdated' && !d.is_outdated_duplicate) return false;
       if (filterMode !== 'all' && filterMode !== 'outdated' && d.class_name !== filterMode) {
@@ -166,7 +167,7 @@ export const DriverView: React.FC<Props> = ({ lang, isAdmin }) => {
         d.signer_name.toLowerCase().includes(q)
       );
     });
-  }, [drivers, filterMode, search]);
+  }, [drivers, filterMode, deferredSearch]);
 
   const toggleSelect = (pubName: string) => {
     setSelected((prev) => {

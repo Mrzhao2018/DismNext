@@ -3,7 +3,7 @@ use clap::Parser;
 use dism_core::appx::{list_appx_packages, remove_appx_package};
 use dism_core::cleaner::{
     execute_cleanup, is_deferred_system_task_proc, scan_all, scan_custom_proc_name, scan_rule,
-    CleanupScanResult,
+    scan_rule_preview, CleanupScanResult,
 };
 use dism_core::diskmap::{
     analyze_path, find_duplicate_files, find_orphaned_app_dirs, get_presets, recycle_path,
@@ -188,6 +188,14 @@ fn main() -> Result<()> {
     if !args.no_window {
         launch_desktop_window(&url);
     }
+
+    // Pre-warm static system metadata, driver cache, system task status, and scheduled tasks
+    std::thread::spawn(|| {
+        let _ = SystemInfo::collect();
+        let _ = list_drivers();
+        let _ = get_system_task_status();
+        let _ = list_scheduled_tasks();
+    });
 
     for req in server.incoming_requests() {
         let st = Arc::clone(&state);
@@ -427,7 +435,7 @@ fn dispatch_api(
                 .iter()
                 .find(|r| r.id == id)
                 .ok_or_else(|| anyhow::anyhow!("Rule '{}' not found", id))?;
-            let res = scan_rule(rule, &sys);
+            let res = scan_rule_preview(rule, &sys);
             {
                 let mut cache = state.scan_cache.write().unwrap();
                 cache.insert(res.id.clone(), res.clone());

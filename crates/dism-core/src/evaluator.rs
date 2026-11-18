@@ -1,8 +1,10 @@
 use crate::catalog::Condition;
 use crate::sysinfo::SystemInfo;
+use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::os::windows::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
+use std::sync::{OnceLock, RwLock};
 use windows_sys::Win32::Storage::FileSystem::{
     GetFileVersionInfoSizeW, GetFileVersionInfoW, VerQueryValueW, VS_FIXEDFILEINFO,
 };
@@ -277,7 +279,24 @@ pub fn read_reg_sz(full_key: &str, value_name: &str, wow64: Option<&str>) -> Opt
     None
 }
 
+static FILE_VERSION_CACHE: OnceLock<RwLock<HashMap<String, Option<String>>>> = OnceLock::new();
+
 pub fn read_file_version(path: &Path) -> Option<String> {
+    let cache = FILE_VERSION_CACHE.get_or_init(|| RwLock::new(HashMap::new()));
+    let key = path.to_string_lossy().to_ascii_lowercase();
+    if let Ok(guard) = cache.read() {
+        if let Some(hit) = guard.get(&key) {
+            return hit.clone();
+        }
+    }
+    let val = read_file_version_uncached(path);
+    if let Ok(mut guard) = cache.write() {
+        guard.insert(key, val.clone());
+    }
+    val
+}
+
+fn read_file_version_uncached(path: &Path) -> Option<String> {
     if !path.exists() {
         return None;
     }

@@ -83,6 +83,7 @@ export const FeaturesView: React.FC<Props> = ({ lang, isAdmin }) => {
   const [catFilter, setCatFilter] = useState<'all' | FeatureCategory>('all');
   const [onlyEnabled, setOnlyEnabled] = useState(false);
   const [search, setSearch] = useState('');
+  const deferredSearch = React.useDeferredValue(search);
   const [busyName, setBusyName] = useState<string | null>(null);
   const [pendingToggle, setPendingToggle] = useState<{
     feat: WindowsFeatureInfo;
@@ -125,7 +126,7 @@ export const FeaturesView: React.FC<Props> = ({ lang, isAdmin }) => {
   }, [features]);
 
   const filtered = useMemo(() => {
-    const q = search.trim().toLowerCase();
+    const q = deferredSearch.trim().toLowerCase();
     return features.filter((f) => {
       if (catFilter !== 'all' && f.category !== catFilter) return false;
       if (onlyEnabled && !f.enabled) return false;
@@ -137,7 +138,7 @@ export const FeaturesView: React.FC<Props> = ({ lang, isAdmin }) => {
         f.description.zh.toLowerCase().includes(q)
       );
     });
-  }, [features, catFilter, onlyEnabled, search]);
+  }, [features, catFilter, onlyEnabled, deferredSearch]);
 
   const handleToggle = async (feat: WindowsFeatureInfo, nextEnabled: boolean) => {
     setPendingToggle(null);

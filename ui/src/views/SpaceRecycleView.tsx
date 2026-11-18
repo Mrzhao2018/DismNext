@@ -202,6 +202,7 @@ export const SpaceRecycleView: React.FC<Props> = ({
 }) => {
   const styles = useStyles();
   const [search, setSearch] = useState('');
+  const deferredSearch = React.useDeferredValue(search);
   const [groupFilter, setGroupFilter] = useState<string>('ALL');
   const [selectedIds, setSelectedIds] = useState<Set<string>>(() => {
     const init = new Set<string>();
@@ -234,7 +235,7 @@ export const SpaceRecycleView: React.FC<Props> = ({
   }, [entries, lang]);
 
   const filtered = useMemo(() => {
-    const q = search.trim().toLowerCase();
+    const q = deferredSearch.trim().toLowerCase();
     return entries.filter((e) => {
       if (groupFilter !== 'ALL' && e.rule.group.zh !== groupFilter) return false;
       if (!q) return true;
@@ -245,7 +246,7 @@ export const SpaceRecycleView: React.FC<Props> = ({
         e.rule.description.en.toLowerCase().includes(q)
       );
     });
-  }, [entries, groupFilter, search]);
+  }, [entries, groupFilter, deferredSearch]);
 
   const activeEntry = useMemo(() => {
     if (previewItem && previewItem.id === activeId) return previewItem;

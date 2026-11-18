@@ -81,6 +81,15 @@ pub fn find_locking_processes(path: &Path) -> Vec<LockingProcessInfo> {
     if !path.is_file() {
         return Vec::new();
     }
+    find_locking_processes_batch(&[path])
+}
+
+/// Identifies all processes locking any file in `paths` within a single Restart Manager session.
+pub fn find_locking_processes_batch(paths: &[&Path]) -> Vec<LockingProcessInfo> {
+    let valid: Vec<&Path> = paths.iter().copied().filter(|p| p.is_file()).collect();
+    if valid.is_empty() {
+        return Vec::new();
+    }
 
     let mut session_handle: u32 = 0;
     let mut session_key: [u16; CCH_RM_SESSION_KEY + 1] = [0; CCH_RM_SESSION_KEY + 1];
@@ -99,12 +108,15 @@ pub fn find_locking_processes(path: &Path) -> Vec<LockingProcessInfo> {
     }
     let _guard = SessionGuard(session_handle);
 
-    let wide_path: Vec<u16> = OsStr::new(path).encode_wide().chain(Some(0)).collect();
-    let ptr_list = [wide_path.as_ptr()];
+    let wide_paths: Vec<Vec<u16>> = valid
+        .iter()
+        .map(|p| OsStr::new(p).encode_wide().chain(Some(0)).collect())
+        .collect();
+    let ptr_list: Vec<*const u16> = wide_paths.iter().map(|w| w.as_ptr()).collect();
     let reg_rc = unsafe {
         RmRegisterResources(
             session_handle,
-            1,
+            ptr_list.len() as u32,
             ptr_list.as_ptr(),
             0,
             std::ptr::null(),

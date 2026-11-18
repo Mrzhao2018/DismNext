@@ -81,6 +81,7 @@ export const AppxView: React.FC<Props> = ({ lang }) => {
   const [loading, setLoading] = useState(true);
   const [cat, setCat] = useState<'all' | AppxCategory>('bloatware');
   const [search, setSearch] = useState('');
+  const deferredSearch = React.useDeferredValue(search);
   const [confirmPkg, setConfirmPkg] = useState<AppxPackageInfo | null>(null);
   const [removing, setRemoving] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
@@ -117,7 +118,7 @@ export const AppxView: React.FC<Props> = ({ lang }) => {
   }, [packages]);
 
   const filtered = useMemo(() => {
-    const q = search.trim().toLowerCase();
+    const q = deferredSearch.trim().toLowerCase();
     return packages.filter((p) => {
       if (cat !== 'all' && p.category !== cat) return false;
       if (!q) return true;
@@ -128,7 +129,7 @@ export const AppxView: React.FC<Props> = ({ lang }) => {
         p.description.zh.toLowerCase().includes(q)
       );
     });
-  }, [packages, cat, search]);
+  }, [packages, cat, deferredSearch]);
 
   const handleConfirmRemove = async () => {
     if (!confirmPkg) return;

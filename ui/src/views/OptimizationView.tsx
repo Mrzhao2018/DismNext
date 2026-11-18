@@ -117,6 +117,7 @@ export const OptimizationView: React.FC<Props> = ({
   const [selectedGroupId, setSelectedGroupId] = useState<string>('ALL');
   const [scope, setScope] = useState<ScopeName>('current');
   const [search, setSearch] = useState('');
+  const deferredSearch = React.useDeferredValue(search);
   const [onlyEnabled, setOnlyEnabled] = useState(false);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [presets, setPresets] = useState<OptimizationPreset[]>([]);
@@ -138,7 +139,7 @@ export const OptimizationView: React.FC<Props> = ({
   }, []);
 
   const visibleItems = useMemo(() => {
-    const q = search.trim().toLowerCase();
+    const q = deferredSearch.trim().toLowerCase();
     const list: { groupName: string; item: OptimizationGroupStatus['items'][number]; status: ScopeStatus }[] = [];
     for (const g of groups) {
       if (!q && selectedGroupId !== 'ALL' && g.id !== selectedGroupId) continue;
@@ -158,7 +159,7 @@ export const OptimizationView: React.FC<Props> = ({
       }
     }
     return list;
-  }, [groups, selectedGroupId, scope, search, onlyEnabled, lang]);
+  }, [groups, selectedGroupId, scope, deferredSearch, onlyEnabled, lang]);
 
   const handleApply = async (itemId: string, val: boolean | number) => {
     setBusyId(itemId);
