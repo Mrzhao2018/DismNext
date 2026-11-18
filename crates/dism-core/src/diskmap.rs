@@ -4,9 +4,15 @@ use anyhow::{anyhow, Result};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::ffi::OsStr;
+use std::os::windows::ffi::OsStrExt;
 use std::os::windows::fs::MetadataExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
+use windows_sys::Win32::UI::Shell::{
+    SHFileOperationW, FOF_ALLOWUNDO, FOF_NOCONFIRMATION, FOF_NOERRORUI, FOF_SILENT, FO_DELETE,
+    SHFILEOPSTRUCTW,
+};
 
 const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
 const MAX_CHILDREN_PER_NODE: usize = 60;
@@ -468,6 +474,103 @@ fn prune_node(mut raw: RawNode, depth: usize, max_depth: usize) -> DiskTreeNode 
     }
 }
 
+/// Checks whether `target` is a protected drive root or OS core folder that must never be recycled as a whole.
+pub fn is_protected_recycle_target(target: &Path) -> bool {
+    let norm = normalize_win_path(target).to_ascii_lowercase();
+    let trimmed = norm.trim_end_matches('\\');
+    if trimmed.len() <= 2 && trimmed.ends_with(':') {
+        return true;
+    }
+    let sys_root = std::env::var("SystemRoot")
+        .unwrap_or_else(|_| r"C:\Windows".to_string())
+        .to_ascii_lowercase();
+    let protected_env_dirs = [
+        sys_root.clone(),
+        format!(r"{}\system32", sys_root),
+        format!(r"{}\syswow64", sys_root),
+        format!(r"{}\winsxs", sys_root),
+        std::env::var("ProgramFiles").unwrap_or_default().to_ascii_lowercase(),
+        std::env::var("ProgramFiles(x86)").unwrap_or_default().to_ascii_lowercase(),
+        std::env::var("ProgramW6432").unwrap_or_default().to_ascii_lowercase(),
+        std::env::var("ProgramData").unwrap_or_default().to_ascii_lowercase(),
+        std::env::var("USERPROFILE").unwrap_or_default().to_ascii_lowercase(),
+        std::env::var("LOCALAPPDATA").unwrap_or_default().to_ascii_lowercase(),
+        std::env::var("APPDATA").unwrap_or_default().to_ascii_lowercase(),
+    ];
+    protected_env_dirs
+        .iter()
+        .filter(|s| !s.is_empty())
+        .any(|p| p.trim_end_matches('\\') == trimmed)
+}
+
+/// Safely moves a file or directory into the Windows Recycle Bin (`FOF_ALLOWUNDO`) and returns bytes freed.
+pub fn recycle_path(target: &Path) -> Result<u64> {
+    if !target.exists() {
+        return Err(anyhow!("Path does not exist: {}", target.display()));
+    }
+    if is_protected_recycle_target(target) {
+        return Err(anyhow!(
+            "Refusing to recycle protected system/root directory: {}",
+            target.display()
+        ));
+    }
+
+    let size_bytes = measure_path_bytes(target);
+    let clean_str = normalize_win_path(target);
+    let mut wide: Vec<u16> = OsStr::new(&clean_str).encode_wide().collect();
+    wide.push(0);
+    wide.push(0); // SHFileOperationW requires double-null terminated pFrom
+
+    let mut op: SHFILEOPSTRUCTW = unsafe { std::mem::zeroed() };
+    op.wFunc = FO_DELETE;
+    op.pFrom = wide.as_ptr();
+    op.fFlags = (FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_NOERRORUI | FOF_SILENT) as u16;
+
+    let rc = unsafe { SHFileOperationW(&mut op) };
+    if rc != 0 || op.fAnyOperationsAborted != 0 {
+        return Err(anyhow!(
+            "Failed to move '{}' to Recycle Bin (code {}, aborted={})",
+            clean_str,
+            rc,
+            op.fAnyOperationsAborted
+        ));
+    }
+
+    Ok(size_bytes)
+}
+
+fn normalize_win_path(path: &Path) -> String {
+    let pb: PathBuf = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join(path)
+    };
+    let s = pb.to_string_lossy().into_owned();
+    s.strip_prefix(r"\\?\").unwrap_or(&s).to_string()
+}
+
+fn measure_path_bytes(path: &Path) -> u64 {
+    let Ok(meta) = std::fs::symlink_metadata(path) else {
+        return 0;
+    };
+    if (meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT) != 0 {
+        return 0;
+    }
+    if meta.is_file() {
+        return meta.len();
+    }
+    let Ok(rd) = std::fs::read_dir(path) else {
+        return 0;
+    };
+    rd.flatten()
+        .collect::<Vec<_>>()
+        .par_iter()
+        .map(|e| measure_path_bytes(&e.path()))
+        .sum()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -509,5 +612,20 @@ mod tests {
         assert!(report.extensions.iter().any(|e| e.ext == "(no ext)"));
 
         let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn test_protected_recycle_targets_and_sandbox_recycle() {
+        assert!(is_protected_recycle_target(Path::new(r"C:\")));
+        assert!(is_protected_recycle_target(Path::new(r"C:\Windows")));
+        assert!(is_protected_recycle_target(Path::new(r"C:\Windows\System32")));
+        assert!(is_protected_recycle_target(Path::new(r"C:\Program Files")));
+
+        let sample = std::env::temp_dir().join(format!("dismnext_recycle_test_{}.tmp", std::process::id()));
+        File::create(&sample).unwrap().write_all(b"recycle_me").unwrap();
+        assert!(!is_protected_recycle_target(&sample));
+        let freed = recycle_path(&sample).unwrap();
+        assert_eq!(freed, 10);
+        assert!(!sample.exists());
     }
 }

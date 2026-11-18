@@ -2,6 +2,12 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Badge,
   Button,
+  Dialog,
+  DialogActions,
+  DialogBody,
+  DialogContent,
+  DialogSurface,
+  DialogTitle,
   Input,
   MessageBar,
   MessageBarBody,
@@ -17,6 +23,7 @@ import {
   ChevronDown16Regular,
   ChevronRight16Regular,
   Copy16Regular,
+  Delete16Regular,
   Document16Regular,
   Folder16Regular,
   FolderOpen16Regular,
@@ -29,6 +36,7 @@ import {
   DiskPreset,
   DiskTreeNode,
   Lang,
+  SystemInfo,
   api,
   formatBytes,
   pickText,
@@ -36,6 +44,7 @@ import {
 
 interface Props {
   lang: Lang;
+  onSystemUpdated?: (sys: SystemInfo) => void;
 }
 
 interface FlatTreeRow {
@@ -144,7 +153,7 @@ const useStyles = makeStyles({
     gap: '6px',
   },
   largeFileCols: {
-    gridTemplateColumns: 'minmax(180px, 1fr) 68px 78px 40px',
+    gridTemplateColumns: 'minmax(180px, 1fr) 68px 78px 72px',
     gap: '6px',
   },
   scrollBody: {
@@ -416,7 +425,50 @@ function findNodeByPath(node: DiskTreeNode, targetPath: string): DiskTreeNode | 
   return null;
 }
 
-export const DiskAnalyzerView: React.FC<Props> = ({ lang }) => {
+function removeNodeFromTree(
+  node: DiskTreeNode,
+  targetPath: string
+): { updated: DiskTreeNode; removedBytes: number; removedFiles: number; removedDirs: number } {
+  let removedBytes = 0;
+  let removedFiles = 0;
+  let removedDirs = 0;
+  const nextChildren: DiskTreeNode[] = [];
+
+  for (const ch of node.children) {
+    if (ch.path === targetPath && !ch.is_aggregate) {
+      removedBytes += ch.size_bytes;
+      removedFiles += ch.file_count;
+      removedDirs += ch.dir_count + (ch.is_dir ? 1 : 0);
+      continue;
+    }
+    if (ch.is_dir && ch.children.length > 0) {
+      const sub = removeNodeFromTree(ch, targetPath);
+      if (sub.removedBytes > 0 || sub.removedFiles > 0 || sub.removedDirs > 0) {
+        removedBytes += sub.removedBytes;
+        removedFiles += sub.removedFiles;
+        removedDirs += sub.removedDirs;
+      }
+      nextChildren.push(sub.updated);
+    } else {
+      nextChildren.push(ch);
+    }
+  }
+
+  return {
+    updated: {
+      ...node,
+      size_bytes: Math.max(0, node.size_bytes - removedBytes),
+      file_count: Math.max(0, node.file_count - removedFiles),
+      dir_count: Math.max(0, node.dir_count - removedDirs),
+      children: nextChildren,
+    },
+    removedBytes,
+    removedFiles,
+    removedDirs,
+  };
+}
+
+export const DiskAnalyzerView: React.FC<Props> = ({ lang, onSystemUpdated }) => {
   const styles = useStyles();
   const [presets, setPresets] = useState<DiskPreset[]>([]);
   const [targetPath, setTargetPath] = useState('');
@@ -430,6 +482,9 @@ export const DiskAnalyzerView: React.FC<Props> = ({ lang }) => {
   const [activeExt, setActiveExt] = useState<string | null>(null);
   const [hoveredLeaf, setHoveredLeaf] = useState<PaintedLeaf | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [recycleNotice, setRecycleNotice] = useState<string | null>(null);
+  const [recycleConfirmTarget, setRecycleConfirmTarget] = useState<{ path: string; size_bytes: number } | null>(null);
+  const [recycling, setRecycling] = useState(false);
   const [topHeightPct, setTopHeightPct] = useState(54);
   const [copiedNotice, setCopiedNotice] = useState(false);
 
@@ -757,6 +812,48 @@ export const DiskAnalyzerView: React.FC<Props> = ({ lang }) => {
 
   const activeDisplayNode = hoveredLeaf?.node || selectedNode;
 
+  const confirmRecycle = async () => {
+    if (!recycleConfirmTarget || !report) return;
+    const target = recycleConfirmTarget.path;
+    setRecycling(true);
+    setErrorMsg(null);
+    setRecycleNotice(null);
+    try {
+      const res = await api.recyclePath(target);
+      onSystemUpdated?.(res.system);
+      const { updated, removedBytes, removedFiles, removedDirs } = removeNodeFromTree(report.tree, target);
+      const deltaBytes = removedBytes > 0 ? removedBytes : res.freed_bytes;
+      const prefix = `${target.toLowerCase()}\\`;
+      const nextLargest = report.largest_files.filter(
+        (f) => f.path.toLowerCase() !== target.toLowerCase() && !f.path.toLowerCase().startsWith(prefix)
+      );
+      setReport({
+        ...report,
+        total_bytes: Math.max(0, report.total_bytes - deltaBytes),
+        total_files: Math.max(0, report.total_files - removedFiles),
+        total_dirs: Math.max(0, report.total_dirs - removedDirs),
+        tree: updated,
+        largest_files: nextLargest,
+      });
+      if (selectedPath === target || selectedPath?.toLowerCase().startsWith(prefix)) {
+        setSelectedPath(updated.path);
+      }
+      setZoomStack((prev) =>
+        prev.filter((p) => p.toLowerCase() !== target.toLowerCase() && !p.toLowerCase().startsWith(prefix))
+      );
+      setRecycleNotice(
+        lang === 'zh'
+          ? `已安全移入系统回收站（释放 ${formatBytes(res.freed_bytes)}）：${target}`
+          : `Moved to Recycle Bin (${formatBytes(res.freed_bytes)}): ${target}`
+      );
+      setRecycleConfirmTarget(null);
+    } catch (e) {
+      setErrorMsg(String(e));
+    } finally {
+      setRecycling(false);
+    }
+  };
+
   const formatNodeTitle = (node: DiskTreeNode) =>
     node.is_aggregate
       ? lang === 'zh'
@@ -769,6 +866,11 @@ export const DiskAnalyzerView: React.FC<Props> = ({ lang }) => {
       {errorMsg && (
         <MessageBar intent="error">
           <MessageBarBody>{errorMsg}</MessageBarBody>
+        </MessageBar>
+      )}
+      {recycleNotice && (
+        <MessageBar intent="success">
+          <MessageBarBody>{recycleNotice}</MessageBarBody>
         </MessageBar>
       )}
 
@@ -1045,15 +1147,28 @@ export const DiskAnalyzerView: React.FC<Props> = ({ lang }) => {
                           <span style={{ textAlign: 'right', fontWeight: 600 }}>
                             {formatBytes(lf.size_bytes)}
                           </span>
-                          <Button
-                            size="small"
-                            appearance="subtle"
-                            icon={<FolderOpen16Regular />}
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              api.revealInExplorer(lf.path);
-                            }}
-                          />
+                          <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 2 }}>
+                            <Button
+                              size="small"
+                              appearance="subtle"
+                              icon={<FolderOpen16Regular />}
+                              title={lang === 'zh' ? '在资源管理器中定位' : 'Reveal'}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                api.revealInExplorer(lf.path);
+                              }}
+                            />
+                            <Button
+                              size="small"
+                              appearance="subtle"
+                              icon={<Delete16Regular />}
+                              title={lang === 'zh' ? '移入回收站' : 'Move to Recycle Bin'}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setRecycleConfirmTarget({ path: lf.path, size_bytes: lf.size_bytes });
+                              }}
+                            />
+                          </div>
                         </div>
                       ))}
                     </div>
@@ -1292,17 +1407,84 @@ export const DiskAnalyzerView: React.FC<Props> = ({ lang }) => {
                 </Button>
                 <Button
                   size="small"
-                  appearance="primary"
+                  appearance="outline"
                   icon={<FolderOpen16Regular />}
                   onClick={() => api.revealInExplorer(selectedNode.path)}
                 >
-                  {lang === 'zh' ? '在资源管理器中定位' : 'Reveal in Explorer'}
+                  {lang === 'zh' ? '在资源管理器中定位' : 'Reveal'}
+                </Button>
+                <Button
+                  size="small"
+                  appearance="primary"
+                  icon={<Delete16Regular />}
+                  disabled={selectedNode.path === report.tree.path}
+                  onClick={() =>
+                    setRecycleConfirmTarget({
+                      path: selectedNode.path,
+                      size_bytes: selectedNode.size_bytes,
+                    })
+                  }
+                >
+                  {lang === 'zh' ? '移入回收站' : 'Move to Recycle Bin'}
                 </Button>
               </div>
             )}
           </div>
         </>
       )}
+
+      <Dialog
+        open={Boolean(recycleConfirmTarget)}
+        onOpenChange={(_, d) => {
+          if (!d.open && !recycling) setRecycleConfirmTarget(null);
+        }}
+      >
+        <DialogSurface>
+          <DialogBody>
+            <DialogTitle>
+              {lang === 'zh' ? '确认移入系统回收站？' : 'Move to Recycle Bin?'}
+            </DialogTitle>
+            <DialogContent>
+              <Text block>
+                {lang === 'zh'
+                  ? '以下项目将被安全移入 Windows 回收站（可随时从回收站恢复）：'
+                  : 'The following item will be safely moved to the Windows Recycle Bin:'}
+              </Text>
+              {recycleConfirmTarget && (
+                <Text
+                  block
+                  style={{
+                    marginTop: 8,
+                    fontFamily: 'Consolas, monospace',
+                    wordBreak: 'break-all',
+                    fontWeight: 600,
+                  }}
+                >
+                  {recycleConfirmTarget.path} ({formatBytes(recycleConfirmTarget.size_bytes)})
+                </Text>
+              )}
+            </DialogContent>
+            <DialogActions>
+              <Button
+                appearance="secondary"
+                disabled={recycling}
+                onClick={() => setRecycleConfirmTarget(null)}
+              >
+                {lang === 'zh' ? '取消' : 'Cancel'}
+              </Button>
+              <Button appearance="primary" disabled={recycling} onClick={confirmRecycle}>
+                {recycling
+                  ? lang === 'zh'
+                    ? '移动中...'
+                    : 'Moving...'
+                  : lang === 'zh'
+                  ? '确认移入回收站'
+                  : 'Move to Recycle Bin'}
+              </Button>
+            </DialogActions>
+          </DialogBody>
+        </DialogSurface>
+      </Dialog>
     </div>
   );
 };

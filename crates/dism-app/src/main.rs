@@ -1,10 +1,12 @@
 use anyhow::Result;
 use clap::Parser;
+use dism_core::appx::{list_appx_packages, remove_appx_package};
 use dism_core::catalog::Action;
 use dism_core::cleaner::{execute_cleanup, scan_all, scan_rule, CleanupScanResult};
-use dism_core::diskmap::{analyze_path, get_presets};
+use dism_core::diskmap::{analyze_path, get_presets, recycle_path};
 use dism_core::evaluator::eval_condition;
 use dism_core::optimizer::{apply_optimization, evaluate_all_groups, ApplyValue, ScopeName};
+use dism_core::startup::{list_startup_items, set_startup_enabled};
 use dism_core::sysinfo::relaunch_as_admin;
 use dism_core::{Catalog, SnapshotManager, SystemInfo};
 use serde::{Deserialize, Serialize};
@@ -66,6 +68,17 @@ struct DiskAnalyzeReq {
 #[derive(Deserialize)]
 struct RevealReq {
     path: String,
+}
+
+#[derive(Deserialize)]
+struct StartupToggleReq {
+    id: String,
+    enabled: bool,
+}
+
+#[derive(Deserialize)]
+struct AppxRemoveReq {
+    package_full_name: String,
 }
 
 #[derive(Serialize)]
@@ -408,6 +421,38 @@ fn dispatch_api(
                 .arg(format!("/select,{}", target.to_string_lossy()))
                 .spawn();
             Ok(serde_json::json!({ "ok": true }))
+        }
+        (&Method::Post, "/api/diskmap/recycle") => {
+            let payload: RevealReq = read_json_body(req)?;
+            let freed = recycle_path(Path::new(payload.path.trim()))?;
+            let updated_sys = SystemInfo::collect();
+            Ok(serde_json::json!({
+                "freed_bytes": freed,
+                "system": updated_sys,
+            }))
+        }
+        (&Method::Get, "/api/startup/list") => {
+            let items = list_startup_items();
+            Ok(serde_json::json!({ "items": items }))
+        }
+        (&Method::Post, "/api/startup/toggle") => {
+            let payload: StartupToggleReq = read_json_body(req)?;
+            let item = set_startup_enabled(&payload.id, payload.enabled)?;
+            let items = list_startup_items();
+            Ok(serde_json::json!({ "item": item, "items": items }))
+        }
+        (&Method::Get, "/api/appx/list") => {
+            let packages = list_appx_packages();
+            Ok(serde_json::json!({ "packages": packages }))
+        }
+        (&Method::Post, "/api/appx/remove") => {
+            let payload: AppxRemoveReq = read_json_body(req)?;
+            remove_appx_package(&payload.package_full_name)?;
+            let packages = list_appx_packages();
+            Ok(serde_json::json!({
+                "removed": payload.package_full_name,
+                "packages": packages,
+            }))
         }
         _ => Err(anyhow::anyhow!("Unknown API endpoint: {}", path)),
     }

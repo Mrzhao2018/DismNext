@@ -224,6 +224,34 @@ export interface DiskAnalysisReport {
   largest_files: LargeFileEntry[];
 }
 
+export type StartupScope = 'user' | 'system';
+
+export interface StartupItem {
+  id: string;
+  name: string;
+  command: string;
+  target_path: string | null;
+  location: string;
+  scope: StartupScope;
+  enabled: boolean;
+  target_exists: boolean;
+}
+
+export type AppxCategory = 'bloatware' | 'user_app' | 'framework' | 'system_core';
+
+export interface AppxPackageInfo {
+  package_full_name: string;
+  name: string;
+  display_name: LocalizedText;
+  description: LocalizedText;
+  version: string;
+  arch: string;
+  publisher_id: string;
+  install_location: string;
+  category: AppxCategory;
+  protected: boolean;
+}
+
 export const api = {
   getSysInfo: () => reqJson<SysInfoPayload>('/api/sysinfo'),
   elevate: () =>
@@ -267,5 +295,22 @@ export const api = {
     reqJson<{ ok: boolean }>('/api/diskmap/reveal', {
       method: 'POST',
       body: JSON.stringify({ path }),
+    }),
+  recyclePath: (path: string) =>
+    reqJson<{ freed_bytes: number; system: SystemInfo }>('/api/diskmap/recycle', {
+      method: 'POST',
+      body: JSON.stringify({ path }),
+    }),
+  getStartupItems: () => reqJson<{ items: StartupItem[] }>('/api/startup/list'),
+  toggleStartup: (id: string, enabled: boolean) =>
+    reqJson<{ item: StartupItem; items: StartupItem[] }>('/api/startup/toggle', {
+      method: 'POST',
+      body: JSON.stringify({ id, enabled }),
+    }),
+  getAppxPackages: () => reqJson<{ packages: AppxPackageInfo[] }>('/api/appx/list'),
+  removeAppxPackage: (package_full_name: string) =>
+    reqJson<{ removed: string; packages: AppxPackageInfo[] }>('/api/appx/remove', {
+      method: 'POST',
+      body: JSON.stringify({ package_full_name }),
     }),
 };

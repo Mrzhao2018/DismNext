@@ -11,9 +11,11 @@ import {
   webLightTheme,
 } from '@fluentui/react-components';
 import {
+  Apps24Regular,
   Broom24Regular,
   DataPie24Regular,
   History24Regular,
+  Rocket24Regular,
   Settings24Regular,
   ShieldCheckmark24Regular,
   WeatherMoon24Regular,
@@ -32,8 +34,10 @@ import { SpaceRecycleView } from './views/SpaceRecycleView';
 import { OptimizationView } from './views/OptimizationView';
 import { SnapshotView } from './views/SnapshotView';
 import { DiskAnalyzerView } from './views/DiskAnalyzerView';
+import { StartupView } from './views/StartupView';
+import { AppxView } from './views/AppxView';
 
-type NavTab = 'cleanup' | 'diskmap' | 'optimize' | 'snapshots';
+type NavTab = 'cleanup' | 'diskmap' | 'optimize' | 'startup' | 'appx' | 'snapshots';
 
 const useStyles = makeStyles({
   shell: {
@@ -242,6 +246,22 @@ const AppShell: React.FC<{
             </Button>
             <Button
               className={styles.navBtn}
+              appearance={tab === 'startup' ? 'primary' : 'subtle'}
+              icon={<Rocket24Regular />}
+              onClick={() => setTab('startup')}
+            >
+              {lang === 'zh' ? '开机启动项' : 'Startup'}
+            </Button>
+            <Button
+              className={styles.navBtn}
+              appearance={tab === 'appx' ? 'primary' : 'subtle'}
+              icon={<Apps24Regular />}
+              onClick={() => setTab('appx')}
+            >
+              {lang === 'zh' ? '预装应用管理' : 'AppX Manager'}
+            </Button>
+            <Button
+              className={styles.navBtn}
               appearance={tab === 'snapshots' ? 'primary' : 'subtle'}
               icon={<History24Regular />}
               onClick={() => setTab('snapshots')}
@@ -376,7 +396,16 @@ const AppShell: React.FC<{
               }}
             />
           ) : tab === 'diskmap' ? (
-            <DiskAnalyzerView lang={lang} />
+            <DiskAnalyzerView
+              lang={lang}
+              onSystemUpdated={(sys) =>
+                setSysPayload((prev) => (prev ? { ...prev, system: sys } : prev))
+              }
+            />
+          ) : tab === 'startup' ? (
+            <StartupView lang={lang} isAdmin={Boolean(sysPayload?.system.is_admin)} />
+          ) : tab === 'appx' ? (
+            <AppxView lang={lang} />
           ) : tab === 'optimize' ? (
             <OptimizationView
               lang={lang}

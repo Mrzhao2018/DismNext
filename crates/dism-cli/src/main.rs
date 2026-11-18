@@ -1,9 +1,11 @@
 use anyhow::{anyhow, Result};
 use clap::{Parser, Subcommand};
+use dism_core::appx::{list_appx_packages, remove_appx_package, AppxCategory};
 use dism_core::cleaner::{execute_cleanup, scan_all, scan_rule, FileStatus};
 use dism_core::diskmap::analyze_path;
 use dism_core::evaluator::eval_condition;
 use dism_core::optimizer::{apply_optimization, evaluate_all_groups, ApplyValue, ScopeName, ScopeStatus};
+use dism_core::startup::{list_startup_items, set_startup_enabled};
 use dism_core::{Catalog, SnapshotManager, SystemInfo};
 use std::path::PathBuf;
 
@@ -62,6 +64,44 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
+    /// Startup items manager
+    Startup {
+        #[command(subcommand)]
+        action: StartupCommands,
+    },
+    /// Modern Windows AppX/MSIX package manager
+    Appx {
+        #[command(subcommand)]
+        action: AppxCommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum StartupCommands {
+    /// List startup entries across Run keys and Startup folders
+    List {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Enable or disable a startup entry via StartupApproved
+    Toggle {
+        id: String,
+        #[arg(long)]
+        enable: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum AppxCommands {
+    /// List installed AppX/MSIX packages
+    List {
+        #[arg(long)]
+        category: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Uninstall a non-protected AppX/MSIX package
+    Remove { package_full_name: String },
 }
 
 #[derive(Subcommand)]
@@ -402,6 +442,64 @@ fn main() -> Result<()> {
                 }
             }
         }
+        Commands::Startup { action } => match action {
+            StartupCommands::List { json } => {
+                let items = list_startup_items();
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&items)?);
+                } else {
+                    println!("{:<6} {:<20} {:<28} {}", "State", "Location", "Name", "Command");
+                    println!("{}", "-".repeat(90));
+                    for it in &items {
+                        println!(
+                            "{:<6} {:<20} {:<28} {}",
+                            if it.enabled { "ON" } else { "OFF" },
+                            it.location,
+                            it.name,
+                            it.command
+                        );
+                    }
+                    println!("\nTotal startup items: {}", items.len());
+                }
+            }
+            StartupCommands::Toggle { id, enable } => {
+                let item = set_startup_enabled(&id, enable)?;
+                println!("{}", serde_json::to_string_pretty(&item)?);
+            }
+        },
+        Commands::Appx { action } => match action {
+            AppxCommands::List { category, json } => {
+                let mut pkgs = list_appx_packages();
+                if let Some(ref cat) = category {
+                    let target = cat.to_ascii_lowercase();
+                    pkgs.retain(|p| match p.category {
+                        AppxCategory::Bloatware => target == "bloatware",
+                        AppxCategory::UserApp => target == "user_app" || target == "user",
+                        AppxCategory::Framework => target == "framework",
+                        AppxCategory::SystemCore => target == "system_core" || target == "system",
+                    });
+                }
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&pkgs)?);
+                } else {
+                    for p in &pkgs {
+                        println!(
+                            "[{:?}{}] {:<30} {:<16} {}",
+                            p.category,
+                            if p.protected { "/LOCK" } else { "" },
+                            p.display_name.zh,
+                            p.version,
+                            p.package_full_name
+                        );
+                    }
+                    println!("\nTotal matching packages: {}", pkgs.len());
+                }
+            }
+            AppxCommands::Remove { package_full_name } => {
+                remove_appx_package(&package_full_name)?;
+                println!("Removed AppX package: {}", package_full_name);
+            }
+        },
     }
 
     let _ = eval_condition;
