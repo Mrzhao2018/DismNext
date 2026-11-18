@@ -159,6 +159,7 @@ fn find_inline_func_start(s: &str) -> Option<usize> {
         "?GetRegSz(",
         "?GetFileVersion(",
         "?GetIniData(",
+        "?GetNewestChild(",
         "?GetLocaleName(",
         "?ColorDialog(",
     ] {
@@ -187,10 +188,43 @@ fn eval_inline_func(name: &str, args: &[&str]) -> Option<String> {
             let key = args.get(2)?;
             read_ini_value(Path::new(path), section, key)
         }
+        "GetNewestChild" => {
+            let dir = args.first()?;
+            newest_version_child(Path::new(dir))
+        }
         "GetLocaleName" => Some("zh-Hans".to_string()),
         "ColorDialog" => None,
         _ => None,
     }
+}
+
+fn newest_version_child(dir: &Path) -> Option<String> {
+    let rd = std::fs::read_dir(dir).ok()?;
+    let mut best: Option<(Vec<u32>, String)> = None;
+    for entry in rd.flatten() {
+        let Ok(ft) = entry.file_type() else {
+            continue;
+        };
+        if !ft.is_dir() {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if !name.chars().next().is_some_and(|c| c.is_ascii_digit()) {
+            continue;
+        }
+        let parts = parse_version_parts(&name);
+        if parts.is_empty() {
+            continue;
+        }
+        let is_newer = match &best {
+            None => true,
+            Some((best_parts, best_name)) => (parts.as_slice(), &name) > (best_parts.as_slice(), best_name),
+        };
+        if is_newer {
+            best = Some((parts, name));
+        }
+    }
+    best.map(|(_, name)| name)
 }
 
 pub fn expand_env_vars(input: &str, root_ctx: Option<&str>) -> String {
@@ -797,5 +831,17 @@ mod tests {
         assert!(compare_str("11.0.19041.1", "11.", Some("N==")));
         assert!(!compare_str("11.0.19041.1", "8.", Some("N==")));
         assert!(compare_str("Off", "off", None));
+    }
+
+    #[test]
+    fn test_get_newest_child_picks_highest_semantic_version() {
+        let base = std::env::temp_dir().join(format!("dismnext_newest_child_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        for ver in ["2.1.90", "2.1.286", "2.1.299", "not-a-version"] {
+            std::fs::create_dir_all(base.join(ver)).unwrap();
+        }
+        let expr = format!("?GetNewestChild({})", base.display());
+        assert_eq!(expand_expression(&expr, None), Some("2.1.299".to_string()));
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

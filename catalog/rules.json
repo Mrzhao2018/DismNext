@@ -6040,8 +6040,8 @@
         "en": "AI & Agent Cache"
       },
       "description": {
-        "zh": "清理 Claude Code 与 Claude 桌面端的运行缓存（cache）、调试日志（debug/logs）、下载暂存（downloads）、Shell 快照（shell-snapshots）与配置自动备份，严格保留 .credentials.json、settings.json、CLAUDE.md、Skills、插件与活跃会话。",
-        "en": "Clears Claude Code and Claude Desktop runtime caches, debug logs, shell snapshots, downloads, and backup files while strictly preserving credentials, settings, CLAUDE.md, skills, plugins, and active sessions."
+        "zh": "清理 Claude Code 与 Claude 桌面端（含 Claude-3p）的运行缓存、调试日志、下载暂存、Shell 快照、已解压冗余 *.zst 压缩安装包及被取代的旧版本 claude-code（自动保留最新版本），严格保留 .credentials.json、settings.json、CLAUDE.md、Skills、插件与活跃会话。",
+        "en": "Clears Claude Code and Claude Desktop (including Claude-3p) runtime caches, debug logs, shell snapshots, leftover .zst VM archives, and superseded claude-code versions (preserving newest version), while strictly keeping credentials, settings, CLAUDE.md, skills, plugins, and active sessions."
       },
       "warning": null,
       "level": 2,
@@ -6070,6 +6070,11 @@
               {
                 "type": "FileExist",
                 "file_path": "%APPDATA%\\Claude",
+                "wow64": null
+              },
+              {
+                "type": "FileExist",
+                "file_path": "%LOCALAPPDATA%\\Claude-3p",
                 "wow64": null
               }
             ]
@@ -6175,6 +6180,100 @@
             {
               "type": "General",
               "root_path": "%APPDATA%\\Claude\\logs",
+              "flags": "Directory|File",
+              "id": null,
+              "queries": [],
+              "excluded": []
+            },
+            {
+              "type": "General",
+              "root_path": "%LOCALAPPDATA%\\Claude-3p\\vm_bundles\\claudevm.bundle",
+              "flags": "File",
+              "id": null,
+              "queries": [
+                "*.zst"
+              ],
+              "excluded": []
+            },
+            {
+              "type": "General",
+              "root_path": "%LOCALAPPDATA%\\Claude-3p\\claude-code",
+              "flags": "Directory",
+              "id": null,
+              "queries": [
+                "*.*.*"
+              ],
+              "excluded": [
+                "?GetNewestChild(%Root%)"
+              ]
+            },
+            {
+              "type": "General",
+              "root_path": "%LOCALAPPDATA%\\Claude-3p\\Cache",
+              "flags": "Directory|File",
+              "id": null,
+              "queries": [],
+              "excluded": []
+            },
+            {
+              "type": "General",
+              "root_path": "%LOCALAPPDATA%\\Claude-3p\\Code Cache",
+              "flags": "Directory|File",
+              "id": null,
+              "queries": [],
+              "excluded": []
+            },
+            {
+              "type": "General",
+              "root_path": "%LOCALAPPDATA%\\Claude-3p\\GPUCache",
+              "flags": "Directory|File",
+              "id": null,
+              "queries": [],
+              "excluded": []
+            },
+            {
+              "type": "General",
+              "root_path": "%LOCALAPPDATA%\\Claude-3p\\GrShaderCache",
+              "flags": "Directory|File",
+              "id": null,
+              "queries": [],
+              "excluded": []
+            },
+            {
+              "type": "General",
+              "root_path": "%LOCALAPPDATA%\\Claude-3p\\ShaderCache",
+              "flags": "Directory|File",
+              "id": null,
+              "queries": [],
+              "excluded": []
+            },
+            {
+              "type": "General",
+              "root_path": "%LOCALAPPDATA%\\Claude-3p\\DawnGraphiteCache",
+              "flags": "Directory|File",
+              "id": null,
+              "queries": [],
+              "excluded": []
+            },
+            {
+              "type": "General",
+              "root_path": "%LOCALAPPDATA%\\Claude-3p\\DawnWebGPUCache",
+              "flags": "Directory|File",
+              "id": null,
+              "queries": [],
+              "excluded": []
+            },
+            {
+              "type": "General",
+              "root_path": "%LOCALAPPDATA%\\Claude-3p\\Crashpad",
+              "flags": "Directory|File",
+              "id": null,
+              "queries": [],
+              "excluded": []
+            },
+            {
+              "type": "General",
+              "root_path": "%LOCALAPPDATA%\\Claude-3p\\logs",
               "flags": "Directory|File",
               "id": null,
               "queries": [],
@@ -6843,6 +6942,77 @@
             {
               "type": "General",
               "root_path": "%USERPROFILE%\\.claude\\file-history",
+              "flags": "Directory|File",
+              "id": null,
+              "queries": [],
+              "excluded": []
+            }
+          ],
+          "rescan": false,
+          "restart": null
+        }
+      ]
+    },
+    {
+      "id": "clean-093",
+      "name": {
+        "zh": "Claude Desktop 本地沙箱虚拟机镜像 (claudevm.bundle)",
+        "en": "Claude Desktop Cowork Linux VM Image (claudevm.bundle)"
+      },
+      "group": {
+        "zh": "AI 与智能体缓存",
+        "en": "AI & Agent Cache"
+      },
+      "description": {
+        "zh": "清理 Claude Desktop 为本地 Cowork / 虚拟机沙箱模式创建的 Linux 虚拟磁盘镜像（rootfs.vhdx、sessiondata.vhdx、smol-bin.vhdx、内核镜像及 claude-code-vm），可一次性释放约 8.8 GB C 盘空间。",
+        "en": "Removes the local Linux VM virtual disks (rootfs.vhdx, sessiondata.vhdx, smol-bin.vhdx, kernel images) and claude-code-vm runtime created by Claude Desktop Cowork sandbox mode (~8.8 GB)."
+      },
+      "warning": {
+        "zh": "仅影响 Claude Desktop 桌面客户端的本地虚拟机沙箱（Cowork）功能，不影响终端版 Claude Code CLI；删除后若再次在桌面端启用虚拟机沙箱，客户端将重新下载镜像。",
+        "en": "Only affects Claude Desktop's local VM sandbox (Cowork); terminal Claude Code CLI is unaffected. Claude Desktop will re-download the VM bundle if Cowork sandbox mode is used again."
+      },
+      "level": 1,
+      "work": null,
+      "source": "win11-modern",
+      "scans": [
+        {
+          "work": 10,
+          "scan_type": null,
+          "name_override": null,
+          "description_override": null,
+          "warning_override": null,
+          "applicable": {
+            "type": "Or",
+            "children": [
+              {
+                "type": "FileExist",
+                "file_path": "%LOCALAPPDATA%\\Claude-3p\\vm_bundles\\claudevm.bundle",
+                "wow64": null
+              },
+              {
+                "type": "FileExist",
+                "file_path": "%LOCALAPPDATA%\\Claude-3p\\claude-code-vm",
+                "wow64": null
+              }
+            ]
+          },
+          "named_applicables": {},
+          "actions": [
+            {
+              "type": "General",
+              "root_path": "%LOCALAPPDATA%\\Claude-3p\\vm_bundles\\claudevm.bundle",
+              "flags": "File",
+              "id": null,
+              "queries": [
+                "*.vhdx",
+                "initrd",
+                "vmlinuz"
+              ],
+              "excluded": []
+            },
+            {
+              "type": "General",
+              "root_path": "%LOCALAPPDATA%\\Claude-3p\\claude-code-vm",
               "flags": "Directory|File",
               "id": null,
               "queries": [],
