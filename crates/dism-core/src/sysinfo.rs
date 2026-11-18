@@ -1,8 +1,9 @@
+use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 use std::ffi::OsStr;
 use std::os::windows::ffi::OsStrExt;
 use windows_sys::Win32::Storage::FileSystem::{GetDiskFreeSpaceExW, GetDriveTypeW, GetLogicalDrives};
-use windows_sys::Win32::UI::Shell::IsUserAnAdmin;
+use windows_sys::Win32::UI::Shell::{IsUserAnAdmin, ShellExecuteW};
 use winreg::enums::HKEY_LOCAL_MACHINE;
 use winreg::RegKey;
 
@@ -170,4 +171,45 @@ pub fn enumerate_fixed_drives() -> Vec<String> {
         }
     }
     drives
+}
+
+/// Relaunches the current executable with an elevated UAC prompt (`runas`).
+/// Returns `Ok(())` only if ShellExecuteW successfully launched the elevated process (return value > 32).
+pub fn relaunch_as_admin(extra_args: &[String]) -> Result<()> {
+    let exe = std::env::current_exe()?;
+    let op: Vec<u16> = OsStr::new("runas").encode_wide().chain(Some(0)).collect();
+    let file: Vec<u16> = exe.as_os_str().encode_wide().chain(Some(0)).collect();
+    let params_str = extra_args
+        .iter()
+        .map(|a| {
+            if a.contains(' ') {
+                format!("\"{}\"", a)
+            } else {
+                a.clone()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    let params: Vec<u16> = OsStr::new(&params_str).encode_wide().chain(Some(0)).collect();
+    let cwd = std::env::current_dir().unwrap_or_else(|_| exe.parent().unwrap_or(std::path::Path::new(".")).to_path_buf());
+    let dir: Vec<u16> = cwd.as_os_str().encode_wide().chain(Some(0)).collect();
+
+    let res = unsafe {
+        ShellExecuteW(
+            std::ptr::null_mut(),
+            op.as_ptr(),
+            file.as_ptr(),
+            params.as_ptr(),
+            dir.as_ptr(),
+            1, // SW_SHOWNORMAL
+        )
+    } as isize;
+
+    if res <= 32 {
+        return Err(anyhow!(
+            "UAC elevation cancelled or failed (ShellExecuteW code {})",
+            res
+        ));
+    }
+    Ok(())
 }

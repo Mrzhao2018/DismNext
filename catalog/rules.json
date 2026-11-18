@@ -5360,6 +5360,635 @@
           "restart": null
         }
       ]
+    },
+    {
+      "id": "clean-079",
+      "name": {
+        "zh": "Microsoft Edge (Chromium) 浏览器缓存",
+        "en": "Microsoft Edge (Chromium) Browser Cache"
+      },
+      "group": {
+        "zh": "缓存文件",
+        "en": "Cache files"
+      },
+      "description": {
+        "zh": "清理新版 Chromium 内核 Edge 浏览器的页面缓存、JS 代码缓存与 GPU 缓存，不影响书签、密码与登录状态。",
+        "en": "Clears Chromium-based Microsoft Edge HTTP cache, code cache, and GPU cache without touching bookmarks or logins."
+      },
+      "warning": null,
+      "level": 2,
+      "work": null,
+      "source": "win11-modern",
+      "scans": [
+        {
+          "work": 1,
+          "scan_type": null,
+          "name_override": null,
+          "description_override": null,
+          "warning_override": null,
+          "applicable": {
+            "type": "FileExist",
+            "file_path": "%LOCALAPPDATA%\\Microsoft\\Edge\\User Data",
+            "wow64": null
+          },
+          "named_applicables": {},
+          "actions": [
+            {
+              "type": "General",
+              "root_path": "%LOCALAPPDATA%\\Microsoft\\Edge\\User Data\\*\\Cache",
+              "flags": "Directory|File",
+              "id": null,
+              "queries": [],
+              "excluded": []
+            },
+            {
+              "type": "General",
+              "root_path": "%LOCALAPPDATA%\\Microsoft\\Edge\\User Data\\*\\Code Cache",
+              "flags": "Directory|File",
+              "id": null,
+              "queries": [],
+              "excluded": []
+            },
+            {
+              "type": "General",
+              "root_path": "%LOCALAPPDATA%\\Microsoft\\Edge\\User Data\\*\\GPUCache",
+              "flags": "Directory|File",
+              "id": null,
+              "queries": [],
+              "excluded": []
+            }
+          ],
+          "rescan": false,
+          "restart": null
+        }
+      ]
+    },
+    {
+      "id": "clean-080",
+      "name": {
+        "zh": "Google Chrome 浏览器缓存",
+        "en": "Google Chrome Browser Cache"
+      },
+      "group": {
+        "zh": "缓存文件",
+        "en": "Cache files"
+      },
+      "description": {
+        "zh": "清理 Google Chrome 的页面缓存、JS 代码缓存与 GPU 缓存，不影响书签、扩展与登录状态。",
+        "en": "Clears Google Chrome cache, code cache, and GPU cache without touching bookmarks or logins."
+      },
+      "warning": null,
+      "level": 2,
+      "work": null,
+      "source": "win11-modern",
+      "scans": [
+        {
+          "work": 1,
+          "scan_type": null,
+          "name_override": null,
+          "description_override": null,
+          "warning_override": null,
+          "applicable": {
+            "type": "FileExist",
+            "file_path": "%LOCALAPPDATA%\\Google\\Chrome\\User Data",
+            "wow64": null
+          },
+          "named_applicables": {},
+          "actions": [
+            {
+              "type": "General",
+              "root_path": "%LOCALAPPDATA%\\Google\\Chrome\\User Data\\*\\Cache",
+              "flags": "Directory|File",
+              "id": null,
+              "queries": [],
+              "excluded": []
+            },
+            {
+              "type": "General",
+              "root_path": "%LOCALAPPDATA%\\Google\\Chrome\\User Data\\*\\Code Cache",
+              "flags": "Directory|File",
+              "id": null,
+              "queries": [],
+              "excluded": []
+            },
+            {
+              "type": "General",
+              "root_path": "%LOCALAPPDATA%\\Google\\Chrome\\User Data\\*\\GPUCache",
+              "flags": "Directory|File",
+              "id": null,
+              "queries": [],
+              "excluded": []
+            }
+          ],
+          "rescan": false,
+          "restart": null
+        }
+      ]
+    },
+    {
+      "id": "clean-081",
+      "name": {
+        "zh": "Electron / Squirrel 桌面应用更新残留",
+        "en": "Electron / Squirrel App Updater Leftovers"
+      },
+      "group": {
+        "zh": "临时文件",
+        "en": "Temprorary Files"
+      },
+      "description": {
+        "zh": "清理现代桌面应用（*-updater 目录及 SquirrelTemp）自动更新后残留的旧安装包缓存。",
+        "en": "Cleans leftover installer packages inside *-updater and SquirrelTemp folders from modern Electron/Squirrel desktop apps."
+      },
+      "warning": null,
+      "level": 3,
+      "work": null,
+      "source": "win11-modern",
+      "scans": [
+        {
+          "work": 1,
+          "scan_type": null,
+          "name_override": null,
+          "description_override": null,
+          "warning_override": null,
+          "applicable": {
+            "type": "Or",
+            "children": [
+              {
+                "type": "FileExist",
+                "file_path": "%LOCALAPPDATA%\\*-updater",
+                "wow64": null
+              },
+              {
+                "type": "FileExist",
+                "file_path": "%LOCALAPPDATA%\\SquirrelTemp",
+                "wow64": null
+              }
+            ]
+          },
+          "named_applicables": {},
+          "actions": [
+            {
+              "type": "General",
+              "root_path": "%LOCALAPPDATA%\\*-updater",
+              "flags": "Directory|File",
+              "id": null,
+              "queries": [],
+              "excluded": []
+            },
+            {
+              "type": "General",
+              "root_path": "%LOCALAPPDATA%\\SquirrelTemp",
+              "flags": "Directory|File",
+              "id": null,
+              "queries": [],
+              "excluded": []
+            }
+          ],
+          "rescan": false,
+          "restart": null
+        }
+      ]
+    },
+    {
+      "id": "clean-082",
+      "name": {
+        "zh": "AMD 显卡着色器缓存",
+        "en": "AMD Graphics Shader Cache"
+      },
+      "group": {
+        "zh": "缓存文件",
+        "en": "Cache files"
+      },
+      "description": {
+        "zh": "清理 AMD 显卡驱动生成的 DxCache / GLCache / VkCache 着色器缓存，游戏首次运行会重新编译。",
+        "en": "Clears AMD Radeon DirectX/OpenGL/Vulkan shader caches. Safe to delete; games recompile on next launch."
+      },
+      "warning": null,
+      "level": 2,
+      "work": null,
+      "source": "win11-modern",
+      "scans": [
+        {
+          "work": 1,
+          "scan_type": null,
+          "name_override": null,
+          "description_override": null,
+          "warning_override": null,
+          "applicable": {
+            "type": "Or",
+            "children": [
+              {
+                "type": "FileExist",
+                "file_path": "%LOCALAPPDATA%\\AMD\\DxCache",
+                "wow64": null
+              },
+              {
+                "type": "FileExist",
+                "file_path": "%LOCALAPPDATA%\\AMD\\GLCache",
+                "wow64": null
+              },
+              {
+                "type": "FileExist",
+                "file_path": "%LOCALAPPDATA%\\AMD\\VkCache",
+                "wow64": null
+              }
+            ]
+          },
+          "named_applicables": {},
+          "actions": [
+            {
+              "type": "General",
+              "root_path": "%LOCALAPPDATA%\\AMD\\DxCache",
+              "flags": "Directory|File",
+              "id": null,
+              "queries": [],
+              "excluded": []
+            },
+            {
+              "type": "General",
+              "root_path": "%LOCALAPPDATA%\\AMD\\GLCache",
+              "flags": "Directory|File",
+              "id": null,
+              "queries": [],
+              "excluded": []
+            },
+            {
+              "type": "General",
+              "root_path": "%LOCALAPPDATA%\\AMD\\VkCache",
+              "flags": "Directory|File",
+              "id": null,
+              "queries": [],
+              "excluded": []
+            }
+          ],
+          "rescan": false,
+          "restart": null
+        }
+      ]
+    },
+    {
+      "id": "clean-083",
+      "name": {
+        "zh": "Intel 显卡着色器缓存",
+        "en": "Intel Graphics Shader Cache"
+      },
+      "group": {
+        "zh": "缓存文件",
+        "en": "Cache files"
+      },
+      "description": {
+        "zh": "清理 Intel 核显/锐炫显卡生成的 ShaderCache 着色器缓存。",
+        "en": "Clears Intel Graphics ShaderCache directory."
+      },
+      "warning": null,
+      "level": 2,
+      "work": null,
+      "source": "win11-modern",
+      "scans": [
+        {
+          "work": 1,
+          "scan_type": null,
+          "name_override": null,
+          "description_override": null,
+          "warning_override": null,
+          "applicable": {
+            "type": "FileExist",
+            "file_path": "%LOCALAPPDATA%\\Intel\\ShaderCache",
+            "wow64": null
+          },
+          "named_applicables": {},
+          "actions": [
+            {
+              "type": "General",
+              "root_path": "%LOCALAPPDATA%\\Intel\\ShaderCache",
+              "flags": "Directory|File",
+              "id": null,
+              "queries": [],
+              "excluded": []
+            }
+          ],
+          "rescan": false,
+          "restart": null
+        }
+      ]
+    },
+    {
+      "id": "clean-084",
+      "name": {
+        "zh": "Windows 大版本升级与诊断日志（Panther / USOShared）",
+        "en": "Windows Upgrade & Diagnostic Logs (Panther / USOShared)"
+      },
+      "group": {
+        "zh": "系统相关",
+        "en": "System"
+      },
+      "description": {
+        "zh": "清理系统升级迁移阶段留在 C:\\Windows\\Panther、USOShared\\Logs 的日志以及 LiveKernelReports 核崩溃转储。",
+        "en": "Clears Windows feature upgrade logs in Panther/USOShared and LiveKernelReports dumps."
+      },
+      "warning": null,
+      "level": 2,
+      "work": null,
+      "source": "win11-modern",
+      "scans": [
+        {
+          "work": 1,
+          "scan_type": null,
+          "name_override": null,
+          "description_override": null,
+          "warning_override": null,
+          "applicable": {
+            "type": "And",
+            "children": [
+              {
+                "type": "OSVersion",
+                "compare": ">=",
+                "version": "10.0"
+              },
+              {
+                "type": "Or",
+                "children": [
+                  {
+                    "type": "FileExist",
+                    "file_path": "%SystemRoot%\\Panther",
+                    "wow64": null
+                  },
+                  {
+                    "type": "FileExist",
+                    "file_path": "%ProgramData%\\USOShared\\Logs",
+                    "wow64": null
+                  },
+                  {
+                    "type": "FileExist",
+                    "file_path": "%SystemRoot%\\LiveKernelReports",
+                    "wow64": null
+                  }
+                ]
+              }
+            ]
+          },
+          "named_applicables": {},
+          "actions": [
+            {
+              "type": "General",
+              "root_path": "%SystemRoot%\\Panther",
+              "flags": "File",
+              "id": null,
+              "queries": [
+                "*.log",
+                "*.xml",
+                "*.bak",
+                "*.etl"
+              ],
+              "excluded": []
+            },
+            {
+              "type": "General",
+              "root_path": "%ProgramData%\\USOShared\\Logs",
+              "flags": "Directory|File",
+              "id": null,
+              "queries": [],
+              "excluded": []
+            },
+            {
+              "type": "General",
+              "root_path": "%SystemRoot%\\LiveKernelReports",
+              "flags": "File",
+              "id": null,
+              "queries": [
+                "*.dmp"
+              ],
+              "excluded": []
+            }
+          ],
+          "rescan": false,
+          "restart": null
+        }
+      ]
+    },
+    {
+      "id": "clean-085",
+      "name": {
+        "zh": "WebView2 / CEF 与现代应用崩溃报告",
+        "en": "WebView2 / CEF & Modern Crashpad Reports"
+      },
+      "group": {
+        "zh": "临时文件",
+        "en": "Temprorary Files"
+      },
+      "description": {
+        "zh": "清理桌面软件内置浏览器组件（CEF/WebView）缓存及 CrashReportClient / Crashpad 崩溃日志。",
+        "en": "Clears embedded CEF caches and CrashReportClient / Crashpad crash reports."
+      },
+      "warning": null,
+      "level": 2,
+      "work": null,
+      "source": "win11-modern",
+      "scans": [
+        {
+          "work": 1,
+          "scan_type": null,
+          "name_override": null,
+          "description_override": null,
+          "warning_override": null,
+          "applicable": {
+            "type": "Or",
+            "children": [
+              {
+                "type": "FileExist",
+                "file_path": "%LOCALAPPDATA%\\CEF\\User Data",
+                "wow64": null
+              },
+              {
+                "type": "FileExist",
+                "file_path": "%LOCALAPPDATA%\\CrashReportClient",
+                "wow64": null
+              },
+              {
+                "type": "FileExist",
+                "file_path": "%LOCALAPPDATA%\\Crashpad\\reports",
+                "wow64": null
+              }
+            ]
+          },
+          "named_applicables": {},
+          "actions": [
+            {
+              "type": "General",
+              "root_path": "%LOCALAPPDATA%\\CEF\\User Data\\*\\Cache",
+              "flags": "Directory|File",
+              "id": null,
+              "queries": [],
+              "excluded": []
+            },
+            {
+              "type": "General",
+              "root_path": "%LOCALAPPDATA%\\CrashReportClient",
+              "flags": "Directory|File",
+              "id": null,
+              "queries": [],
+              "excluded": []
+            },
+            {
+              "type": "General",
+              "root_path": "%LOCALAPPDATA%\\Crashpad\\reports",
+              "flags": "Directory|File",
+              "id": null,
+              "queries": [],
+              "excluded": []
+            }
+          ],
+          "rescan": false,
+          "restart": null
+        }
+      ]
+    },
+    {
+      "id": "clean-086",
+      "name": {
+        "zh": "Node.js 包管理器缓存（npm / pnpm）",
+        "en": "Node.js Package Manager Cache (npm / pnpm)"
+      },
+      "group": {
+        "zh": "开发者缓存",
+        "en": "Developer Cache"
+      },
+      "description": {
+        "zh": "清理 npm-cache 与 pnpm-cache 中的离线依赖包 tarball 缓存。",
+        "en": "Clears cached package tarballs stored by npm and pnpm."
+      },
+      "warning": {
+        "zh": "清理后首次执行 npm/pnpm install 将重新从网络下载所需依赖包。",
+        "en": "Next npm/pnpm install will re-download package archives from the registry."
+      },
+      "level": 2,
+      "work": null,
+      "source": "win11-modern",
+      "scans": [
+        {
+          "work": 1,
+          "scan_type": null,
+          "name_override": null,
+          "description_override": null,
+          "warning_override": null,
+          "applicable": {
+            "type": "Or",
+            "children": [
+              {
+                "type": "FileExist",
+                "file_path": "%LOCALAPPDATA%\\npm-cache",
+                "wow64": null
+              },
+              {
+                "type": "FileExist",
+                "file_path": "%APPDATA%\\npm-cache",
+                "wow64": null
+              },
+              {
+                "type": "FileExist",
+                "file_path": "%LOCALAPPDATA%\\pnpm-cache",
+                "wow64": null
+              }
+            ]
+          },
+          "named_applicables": {},
+          "actions": [
+            {
+              "type": "General",
+              "root_path": "%LOCALAPPDATA%\\npm-cache",
+              "flags": "Directory|File",
+              "id": null,
+              "queries": [],
+              "excluded": []
+            },
+            {
+              "type": "General",
+              "root_path": "%APPDATA%\\npm-cache",
+              "flags": "Directory|File",
+              "id": null,
+              "queries": [],
+              "excluded": []
+            },
+            {
+              "type": "General",
+              "root_path": "%LOCALAPPDATA%\\pnpm-cache",
+              "flags": "Directory|File",
+              "id": null,
+              "queries": [],
+              "excluded": []
+            }
+          ],
+          "rescan": false,
+          "restart": null
+        }
+      ]
+    },
+    {
+      "id": "clean-087",
+      "name": {
+        "zh": "Python 包管理器缓存（uv / pip）",
+        "en": "Python Package Manager Cache (uv / pip)"
+      },
+      "group": {
+        "zh": "开发者缓存",
+        "en": "Developer Cache"
+      },
+      "description": {
+        "zh": "清理 Python 包管理工具 uv 与 pip 下载的 wheel / 源码包本地缓存。",
+        "en": "Clears cached Python wheels and archives stored by uv and pip."
+      },
+      "warning": {
+        "zh": "清理后首次执行 uv/pip install 将重新从网络下载包缓存。",
+        "en": "Next uv/pip install will re-download packages from PyPI/mirrors."
+      },
+      "level": 2,
+      "work": null,
+      "source": "win11-modern",
+      "scans": [
+        {
+          "work": 1,
+          "scan_type": null,
+          "name_override": null,
+          "description_override": null,
+          "warning_override": null,
+          "applicable": {
+            "type": "Or",
+            "children": [
+              {
+                "type": "FileExist",
+                "file_path": "%LOCALAPPDATA%\\uv\\cache",
+                "wow64": null
+              },
+              {
+                "type": "FileExist",
+                "file_path": "%LOCALAPPDATA%\\pip\\cache",
+                "wow64": null
+              }
+            ]
+          },
+          "named_applicables": {},
+          "actions": [
+            {
+              "type": "General",
+              "root_path": "%LOCALAPPDATA%\\uv\\cache",
+              "flags": "Directory|File",
+              "id": null,
+              "queries": [],
+              "excluded": []
+            },
+            {
+              "type": "General",
+              "root_path": "%LOCALAPPDATA%\\pip\\cache",
+              "flags": "Directory|File",
+              "id": null,
+              "queries": [],
+              "excluded": []
+            }
+          ],
+          "rescan": false,
+          "restart": null
+        }
+      ]
     }
   ],
   "optimization_groups": [
@@ -6816,6 +7445,101 @@
             "false_restart": null
           },
           "system": null
+        },
+        {
+          "name": {
+            "zh": "开启“任务栏右键直接结束任务 (End Task)”（Win11 23H2+）",
+            "en": "Enable 'End Task' in Taskbar Right-Click Menu (Win11 23H2+)"
+          },
+          "item_type": "CheckBox",
+          "applicable": {
+            "type": "OSVersion",
+            "compare": ">=",
+            "version": "10.0.22621"
+          },
+          "current": {
+            "kind": "checkbox",
+            "state": {
+              "type": "RegExist",
+              "key": "HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Advanced",
+              "value": "TaskbarEndTask",
+              "reg_type": "REG_DWORD",
+              "data": "1",
+              "compare": null,
+              "wow64": null
+            },
+            "true_actions": [
+              {
+                "type": "RegWrite",
+                "key": "HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Advanced",
+                "value": "TaskbarEndTask",
+                "reg_type": "REG_DWORD",
+                "data": "1",
+                "operator": "=",
+                "wow64": null,
+                "fun": false
+              }
+            ],
+            "true_warning": null,
+            "true_restart": null,
+            "false_actions": [
+              {
+                "type": "RegWrite",
+                "key": "HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Advanced",
+                "value": "TaskbarEndTask",
+                "reg_type": "REG_DWORD",
+                "data": "0",
+                "operator": "=",
+                "wow64": null,
+                "fun": false
+              }
+            ],
+            "false_warning": null,
+            "false_restart": null
+          },
+          "default": {
+            "kind": "checkbox",
+            "state": {
+              "type": "RegExist",
+              "key": "HKEY_USERS\\DEFAULT\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Advanced",
+              "value": "TaskbarEndTask",
+              "reg_type": "REG_DWORD",
+              "data": "1",
+              "compare": null,
+              "wow64": null
+            },
+            "true_actions": [
+              {
+                "type": "RegWrite",
+                "key": "HKEY_USERS\\DEFAULT\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Advanced",
+                "value": "TaskbarEndTask",
+                "reg_type": "REG_DWORD",
+                "data": "1",
+                "operator": "=",
+                "wow64": null,
+                "fun": false
+              }
+            ],
+            "true_warning": null,
+            "true_restart": null,
+            "false_actions": [
+              {
+                "type": "RegWrite",
+                "key": "HKEY_USERS\\DEFAULT\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Advanced",
+                "value": "TaskbarEndTask",
+                "reg_type": "REG_DWORD",
+                "data": "0",
+                "operator": "=",
+                "wow64": null,
+                "fun": false
+              }
+            ],
+            "false_warning": null,
+            "false_restart": null
+          },
+          "system": null,
+          "id": "opt-168",
+          "source": "win11-modern"
         }
       ]
     },
@@ -8277,6 +9001,258 @@
             "false_warning": null,
             "false_restart": null
           }
+        },
+        {
+          "name": {
+            "zh": "禁用 Windows Recall（回顾 / AI 屏幕快照分析，Win11 24H2+）",
+            "en": "Disable Windows Recall & AI Snapshots (Win11 24H2+)"
+          },
+          "item_type": "CheckBox",
+          "applicable": {
+            "type": "OSVersion",
+            "compare": ">=",
+            "version": "10.0.26100"
+          },
+          "current": {
+            "kind": "checkbox",
+            "state": {
+              "type": "RegExist",
+              "key": "HKEY_CURRENT_USER\\Software\\Policies\\Microsoft\\Windows\\WindowsAI",
+              "value": "DisableAIDataAnalysis",
+              "reg_type": "REG_DWORD",
+              "data": "1",
+              "compare": null,
+              "wow64": null
+            },
+            "true_actions": [
+              {
+                "type": "RegWrite",
+                "key": "HKEY_CURRENT_USER\\Software\\Policies\\Microsoft\\Windows\\WindowsAI",
+                "value": "DisableAIDataAnalysis",
+                "reg_type": "REG_DWORD",
+                "data": "1",
+                "operator": "=",
+                "wow64": null,
+                "fun": false
+              }
+            ],
+            "true_warning": null,
+            "true_restart": null,
+            "false_actions": [
+              {
+                "type": "RegDelete",
+                "key": "HKEY_CURRENT_USER\\Software\\Policies\\Microsoft\\Windows\\WindowsAI",
+                "value": "DisableAIDataAnalysis",
+                "reg_type": null,
+                "data": null,
+                "skip_error": 2,
+                "wow64": null
+              }
+            ],
+            "false_warning": null,
+            "false_restart": null
+          },
+          "default": null,
+          "system": {
+            "kind": "checkbox",
+            "state": {
+              "type": "RegExist",
+              "key": "HKEY_LOCAL_MACHINE\\SOFTWARE\\Policies\\Microsoft\\Windows\\WindowsAI",
+              "value": "DisableAIDataAnalysis",
+              "reg_type": "REG_DWORD",
+              "data": "1",
+              "compare": null,
+              "wow64": null
+            },
+            "true_actions": [
+              {
+                "type": "RegWrite",
+                "key": "HKEY_LOCAL_MACHINE\\SOFTWARE\\Policies\\Microsoft\\Windows\\WindowsAI",
+                "value": "DisableAIDataAnalysis",
+                "reg_type": "REG_DWORD",
+                "data": "1",
+                "operator": "=",
+                "wow64": null,
+                "fun": false
+              }
+            ],
+            "true_warning": null,
+            "true_restart": null,
+            "false_actions": [
+              {
+                "type": "RegDelete",
+                "key": "HKEY_LOCAL_MACHINE\\SOFTWARE\\Policies\\Microsoft\\Windows\\WindowsAI",
+                "value": "DisableAIDataAnalysis",
+                "reg_type": null,
+                "data": null,
+                "skip_error": 2,
+                "wow64": null
+              }
+            ],
+            "false_warning": null,
+            "false_restart": null
+          },
+          "id": "opt-169",
+          "source": "win11-modern"
+        },
+        {
+          "name": {
+            "zh": "Windows 原生 Sudo 命令模式（Win11 24H2+）",
+            "en": "Native Windows Sudo Command Mode (Win11 24H2+)"
+          },
+          "item_type": "Combo",
+          "applicable": {
+            "type": "OSVersion",
+            "compare": ">=",
+            "version": "10.0.26100"
+          },
+          "current": null,
+          "default": null,
+          "system": {
+            "kind": "combo",
+            "dropdowns": [
+              {
+                "name": {
+                  "zh": "禁用（默认）",
+                  "en": "Disabled (Default)"
+                },
+                "applicable": {
+                  "type": "Or",
+                  "children": [
+                    {
+                      "type": "Not",
+                      "children": [
+                        {
+                          "type": "RegExist",
+                          "key": "HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Sudo",
+                          "value": "Enabled",
+                          "reg_type": null,
+                          "data": null,
+                          "compare": null,
+                          "wow64": null
+                        }
+                      ]
+                    },
+                    {
+                      "type": "RegExist",
+                      "key": "HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Sudo",
+                      "value": "Enabled",
+                      "reg_type": "REG_DWORD",
+                      "data": "0",
+                      "compare": null,
+                      "wow64": null
+                    }
+                  ]
+                },
+                "actions": [
+                  {
+                    "type": "RegWrite",
+                    "key": "HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Sudo",
+                    "value": "Enabled",
+                    "reg_type": "REG_DWORD",
+                    "data": "0",
+                    "operator": "=",
+                    "wow64": null,
+                    "fun": false
+                  }
+                ],
+                "warning": null,
+                "restart": null
+              },
+              {
+                "name": {
+                  "zh": "在新窗口中运行（Force new window）",
+                  "en": "Force New Window"
+                },
+                "applicable": {
+                  "type": "RegExist",
+                  "key": "HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Sudo",
+                  "value": "Enabled",
+                  "reg_type": "REG_DWORD",
+                  "data": "1",
+                  "compare": null,
+                  "wow64": null
+                },
+                "actions": [
+                  {
+                    "type": "RegWrite",
+                    "key": "HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Sudo",
+                    "value": "Enabled",
+                    "reg_type": "REG_DWORD",
+                    "data": "1",
+                    "operator": "=",
+                    "wow64": null,
+                    "fun": false
+                  }
+                ],
+                "warning": null,
+                "restart": null
+              },
+              {
+                "name": {
+                  "zh": "禁用输入模式（Disable input）",
+                  "en": "Disable Input"
+                },
+                "applicable": {
+                  "type": "RegExist",
+                  "key": "HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Sudo",
+                  "value": "Enabled",
+                  "reg_type": "REG_DWORD",
+                  "data": "2",
+                  "compare": null,
+                  "wow64": null
+                },
+                "actions": [
+                  {
+                    "type": "RegWrite",
+                    "key": "HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Sudo",
+                    "value": "Enabled",
+                    "reg_type": "REG_DWORD",
+                    "data": "2",
+                    "operator": "=",
+                    "wow64": null,
+                    "fun": false
+                  }
+                ],
+                "warning": null,
+                "restart": null
+              },
+              {
+                "name": {
+                  "zh": "内联运行（Inline）",
+                  "en": "Inline (Recommended for CLI)"
+                },
+                "applicable": {
+                  "type": "RegExist",
+                  "key": "HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Sudo",
+                  "value": "Enabled",
+                  "reg_type": "REG_DWORD",
+                  "data": "3",
+                  "compare": null,
+                  "wow64": null
+                },
+                "actions": [
+                  {
+                    "type": "RegWrite",
+                    "key": "HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Sudo",
+                    "value": "Enabled",
+                    "reg_type": "REG_DWORD",
+                    "data": "3",
+                    "operator": "=",
+                    "wow64": null,
+                    "fun": false
+                  }
+                ],
+                "warning": {
+                  "zh": "内联模式在当前终端直接提权执行命令。",
+                  "en": "Inline mode runs elevated commands directly in the current terminal."
+                },
+                "restart": null
+              }
+            ]
+          },
+          "id": "opt-171",
+          "source": "win11-modern"
         }
       ]
     },
@@ -10031,6 +11007,154 @@
             "false_restart": null
           },
           "system": null
+        },
+        {
+          "name": {
+            "zh": "彻底禁用 Windows Copilot 全局策略（Win11 23H2+）",
+            "en": "Disable Windows Copilot via Policy (Win11 23H2+)"
+          },
+          "item_type": "CheckBox",
+          "applicable": {
+            "type": "OSVersion",
+            "compare": ">=",
+            "version": "10.0.22621"
+          },
+          "current": {
+            "kind": "checkbox",
+            "state": {
+              "type": "RegExist",
+              "key": "HKEY_CURRENT_USER\\Software\\Policies\\Microsoft\\Windows\\WindowsCopilot",
+              "value": "TurnOffWindowsCopilot",
+              "reg_type": "REG_DWORD",
+              "data": "1",
+              "compare": null,
+              "wow64": null
+            },
+            "true_actions": [
+              {
+                "type": "RegWrite",
+                "key": "HKEY_CURRENT_USER\\Software\\Policies\\Microsoft\\Windows\\WindowsCopilot",
+                "value": "TurnOffWindowsCopilot",
+                "reg_type": "REG_DWORD",
+                "data": "1",
+                "operator": "=",
+                "wow64": null,
+                "fun": false
+              }
+            ],
+            "true_warning": null,
+            "true_restart": null,
+            "false_actions": [
+              {
+                "type": "RegDelete",
+                "key": "HKEY_CURRENT_USER\\Software\\Policies\\Microsoft\\Windows\\WindowsCopilot",
+                "value": "TurnOffWindowsCopilot",
+                "reg_type": null,
+                "data": null,
+                "skip_error": 2,
+                "wow64": null
+              }
+            ],
+            "false_warning": null,
+            "false_restart": null
+          },
+          "default": null,
+          "system": {
+            "kind": "checkbox",
+            "state": {
+              "type": "RegExist",
+              "key": "HKEY_LOCAL_MACHINE\\SOFTWARE\\Policies\\Microsoft\\Windows\\WindowsCopilot",
+              "value": "TurnOffWindowsCopilot",
+              "reg_type": "REG_DWORD",
+              "data": "1",
+              "compare": null,
+              "wow64": null
+            },
+            "true_actions": [
+              {
+                "type": "RegWrite",
+                "key": "HKEY_LOCAL_MACHINE\\SOFTWARE\\Policies\\Microsoft\\Windows\\WindowsCopilot",
+                "value": "TurnOffWindowsCopilot",
+                "reg_type": "REG_DWORD",
+                "data": "1",
+                "operator": "=",
+                "wow64": null,
+                "fun": false
+              }
+            ],
+            "true_warning": null,
+            "true_restart": null,
+            "false_actions": [
+              {
+                "type": "RegDelete",
+                "key": "HKEY_LOCAL_MACHINE\\SOFTWARE\\Policies\\Microsoft\\Windows\\WindowsCopilot",
+                "value": "TurnOffWindowsCopilot",
+                "reg_type": null,
+                "data": null,
+                "skip_error": 2,
+                "wow64": null
+              }
+            ],
+            "false_warning": null,
+            "false_restart": null
+          },
+          "id": "opt-170",
+          "source": "win11-modern"
+        },
+        {
+          "name": {
+            "zh": "禁用 Windows 搜索框的 Bing 网页搜索联想（加快本地搜索）",
+            "en": "Disable Bing Web Suggestions in Windows Search"
+          },
+          "item_type": "CheckBox",
+          "applicable": {
+            "type": "OSVersion",
+            "compare": ">=",
+            "version": "10.0"
+          },
+          "current": {
+            "kind": "checkbox",
+            "state": {
+              "type": "RegExist",
+              "key": "HKEY_CURRENT_USER\\Software\\Policies\\Microsoft\\Windows\\Explorer",
+              "value": "DisableSearchBoxSuggestions",
+              "reg_type": "REG_DWORD",
+              "data": "1",
+              "compare": null,
+              "wow64": null
+            },
+            "true_actions": [
+              {
+                "type": "RegWrite",
+                "key": "HKEY_CURRENT_USER\\Software\\Policies\\Microsoft\\Windows\\Explorer",
+                "value": "DisableSearchBoxSuggestions",
+                "reg_type": "REG_DWORD",
+                "data": "1",
+                "operator": "=",
+                "wow64": null,
+                "fun": false
+              }
+            ],
+            "true_warning": null,
+            "true_restart": null,
+            "false_actions": [
+              {
+                "type": "RegDelete",
+                "key": "HKEY_CURRENT_USER\\Software\\Policies\\Microsoft\\Windows\\Explorer",
+                "value": "DisableSearchBoxSuggestions",
+                "reg_type": null,
+                "data": null,
+                "skip_error": 2,
+                "wow64": null
+              }
+            ],
+            "false_warning": null,
+            "false_restart": null
+          },
+          "default": null,
+          "system": null,
+          "id": "opt-174",
+          "source": "win11-modern"
         }
       ]
     },
@@ -14277,6 +15401,151 @@
             "false_restart": null
           },
           "system": null
+        },
+        {
+          "name": {
+            "zh": "禁用文件夹“自动类型发现”（解决打开多文件目录卡顿）",
+            "en": "Disable Automatic Folder Type Discovery (Speed up Explorer)"
+          },
+          "item_type": "CheckBox",
+          "applicable": {
+            "type": "OSVersion",
+            "compare": ">=",
+            "version": "10.0"
+          },
+          "current": {
+            "kind": "checkbox",
+            "state": {
+              "type": "RegExist",
+              "key": "HKEY_CURRENT_USER\\Software\\Classes\\Local Settings\\Software\\Microsoft\\Windows\\Shell\\Bags\\AllFolders\\Shell",
+              "value": "FolderType",
+              "reg_type": "REG_SZ",
+              "data": "NotSpecified",
+              "compare": null,
+              "wow64": null
+            },
+            "true_actions": [
+              {
+                "type": "RegWrite",
+                "key": "HKEY_CURRENT_USER\\Software\\Classes\\Local Settings\\Software\\Microsoft\\Windows\\Shell\\Bags\\AllFolders\\Shell",
+                "value": "FolderType",
+                "reg_type": "REG_SZ",
+                "data": "NotSpecified",
+                "operator": "=",
+                "wow64": null,
+                "fun": false
+              }
+            ],
+            "true_warning": null,
+            "true_restart": null,
+            "false_actions": [
+              {
+                "type": "RegDelete",
+                "key": "HKEY_CURRENT_USER\\Software\\Classes\\Local Settings\\Software\\Microsoft\\Windows\\Shell\\Bags\\AllFolders\\Shell",
+                "value": "FolderType",
+                "reg_type": null,
+                "data": null,
+                "skip_error": 2,
+                "wow64": null
+              }
+            ],
+            "false_warning": null,
+            "false_restart": null
+          },
+          "default": null,
+          "system": null,
+          "id": "opt-173",
+          "source": "win11-modern"
+        },
+        {
+          "name": {
+            "zh": "关闭资源管理器与开始菜单中的 OneDrive / 账户通知横幅",
+            "en": "Disable OneDrive & Account Ads in Explorer and Start Menu"
+          },
+          "item_type": "CheckBox",
+          "applicable": {
+            "type": "OSVersion",
+            "compare": ">=",
+            "version": "10.0.22000"
+          },
+          "current": {
+            "kind": "checkbox",
+            "state": {
+              "type": "And",
+              "children": [
+                {
+                  "type": "RegExist",
+                  "key": "HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Advanced",
+                  "value": "ShowSyncProviderNotifications",
+                  "reg_type": "REG_DWORD",
+                  "data": "0",
+                  "compare": null,
+                  "wow64": null
+                },
+                {
+                  "type": "RegExist",
+                  "key": "HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Advanced",
+                  "value": "Start_AccountNotifications",
+                  "reg_type": "REG_DWORD",
+                  "data": "0",
+                  "compare": null,
+                  "wow64": null
+                }
+              ]
+            },
+            "true_actions": [
+              {
+                "type": "RegWrite",
+                "key": "HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Advanced",
+                "value": "ShowSyncProviderNotifications",
+                "reg_type": "REG_DWORD",
+                "data": "0",
+                "operator": "=",
+                "wow64": null,
+                "fun": false
+              },
+              {
+                "type": "RegWrite",
+                "key": "HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Advanced",
+                "value": "Start_AccountNotifications",
+                "reg_type": "REG_DWORD",
+                "data": "0",
+                "operator": "=",
+                "wow64": null,
+                "fun": false
+              }
+            ],
+            "true_warning": null,
+            "true_restart": null,
+            "false_actions": [
+              {
+                "type": "RegWrite",
+                "key": "HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Advanced",
+                "value": "ShowSyncProviderNotifications",
+                "reg_type": "REG_DWORD",
+                "data": "1",
+                "operator": "=",
+                "wow64": null,
+                "fun": false
+              },
+              {
+                "type": "RegWrite",
+                "key": "HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Advanced",
+                "value": "Start_AccountNotifications",
+                "reg_type": "REG_DWORD",
+                "data": "1",
+                "operator": "=",
+                "wow64": null,
+                "fun": false
+              }
+            ],
+            "false_warning": null,
+            "false_restart": null
+          },
+          "default": null,
+          "system": null,
+          "id": "opt-175",
+          "source": "win11-modern"
         }
       ]
     },
@@ -17231,6 +18500,62 @@
             "false_warning": null,
             "false_restart": "Explorer"
           }
+        },
+        {
+          "name": {
+            "zh": "隐藏资源管理器左侧导航栏“图库 (Gallery)”（Win11 23H2+）",
+            "en": "Hide 'Gallery' in File Explorer Navigation Pane (Win11 23H2+)"
+          },
+          "item_type": "CheckBox",
+          "applicable": {
+            "type": "OSVersion",
+            "compare": ">=",
+            "version": "10.0.22621"
+          },
+          "current": {
+            "kind": "checkbox",
+            "state": {
+              "type": "RegExist",
+              "key": "HKEY_CURRENT_USER\\Software\\Classes\\CLSID\\{e88863ea-0cf1-45ef-9f4c-23ff7e35b71c}",
+              "value": "System.IsPinnedToNameSpaceTree",
+              "reg_type": "REG_DWORD",
+              "data": "0",
+              "compare": null,
+              "wow64": null
+            },
+            "true_actions": [
+              {
+                "type": "RegWrite",
+                "key": "HKEY_CURRENT_USER\\Software\\Classes\\CLSID\\{e88863ea-0cf1-45ef-9f4c-23ff7e35b71c}",
+                "value": "System.IsPinnedToNameSpaceTree",
+                "reg_type": "REG_DWORD",
+                "data": "0",
+                "operator": "=",
+                "wow64": null,
+                "fun": false
+              }
+            ],
+            "true_warning": null,
+            "true_restart": null,
+            "false_actions": [
+              {
+                "type": "RegWrite",
+                "key": "HKEY_CURRENT_USER\\Software\\Classes\\CLSID\\{e88863ea-0cf1-45ef-9f4c-23ff7e35b71c}",
+                "value": "System.IsPinnedToNameSpaceTree",
+                "reg_type": "REG_DWORD",
+                "data": "1",
+                "operator": "=",
+                "wow64": null,
+                "fun": false
+              }
+            ],
+            "false_warning": null,
+            "false_restart": null
+          },
+          "default": null,
+          "system": null,
+          "id": "opt-172",
+          "source": "win11-modern"
         }
       ]
     },

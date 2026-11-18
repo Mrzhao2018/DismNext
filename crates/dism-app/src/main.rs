@@ -4,6 +4,7 @@ use dism_core::catalog::Action;
 use dism_core::cleaner::{execute_cleanup, scan_all, scan_rule, CleanupScanResult};
 use dism_core::evaluator::eval_condition;
 use dism_core::optimizer::{apply_optimization, evaluate_all_groups, ApplyValue, ScopeName};
+use dism_core::sysinfo::relaunch_as_admin;
 use dism_core::{Catalog, SnapshotManager, SystemInfo};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -30,6 +31,7 @@ struct Args {
 }
 
 struct AppState {
+    port: u16,
     catalog: Catalog,
     snap_mgr: SnapshotManager,
     scan_cache: RwLock<HashMap<String, CleanupScanResult>>,
@@ -66,6 +68,7 @@ fn main() -> Result<()> {
     let ui_dir = resolve_ui_dir(args.ui_dir);
 
     let state = Arc::new(AppState {
+        port: args.port,
         catalog,
         snap_mgr,
         scan_cache: RwLock::new(HashMap::new()),
@@ -73,8 +76,7 @@ fn main() -> Result<()> {
     });
 
     let addr = format!("127.0.0.1:{}", args.port);
-    let server = Server::http(&addr)
-        .map_err(|e| anyhow::anyhow!("Failed to bind {}: {}", addr, e))?;
+    let server = bind_with_retry(&addr)?;
     let url = format!("http://{}", addr);
     println!("DismNext server listening on {}", url);
     if let Some(ref d) = state.ui_dir {
@@ -95,6 +97,22 @@ fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+fn bind_with_retry(addr: &str) -> Result<Server> {
+    let mut last_err = String::new();
+    for attempt in 0..20 {
+        match Server::http(addr) {
+            Ok(srv) => return Ok(srv),
+            Err(e) => {
+                last_err = e.to_string();
+                if attempt < 19 {
+                    std::thread::sleep(std::time::Duration::from_millis(150));
+                }
+            }
+        }
+    }
+    Err(anyhow::anyhow!("Failed to bind {}: {}", addr, last_err))
 }
 
 fn resolve_ui_dir(explicit: Option<PathBuf>) -> Option<PathBuf> {
@@ -189,6 +207,26 @@ fn dispatch_api(
                 "optimization_items_total": state.catalog.optimization_groups.iter().map(|g| g.items.len()).sum::<usize>(),
             }
         })),
+        (&Method::Post, "/api/sys/elevate") => {
+            if sys.is_admin {
+                return Ok(serde_json::json!({ "already_admin": true, "relaunching": false }));
+            }
+            let mut extra_args = vec![
+                "--port".to_string(),
+                state.port.to_string(),
+                "--no-window".to_string(),
+            ];
+            if let Some(ref ui) = state.ui_dir {
+                extra_args.push("--ui-dir".to_string());
+                extra_args.push(ui.to_string_lossy().into_owned());
+            }
+            relaunch_as_admin(&extra_args)?;
+            std::thread::spawn(|| {
+                std::thread::sleep(std::time::Duration::from_millis(200));
+                std::process::exit(0);
+            });
+            Ok(serde_json::json!({ "already_admin": false, "relaunching": true }))
+        }
         (&Method::Get, "/api/cleanup/rules") => {
             let cache = state.scan_cache.read().unwrap();
             let mut list = Vec::new();

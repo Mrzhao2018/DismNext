@@ -181,6 +181,10 @@ async function reqJson<T>(url: string, init?: RequestInit): Promise<T> {
 
 export const api = {
   getSysInfo: () => reqJson<SysInfoPayload>('/api/sysinfo'),
+  elevate: () =>
+    reqJson<{ already_admin: boolean; relaunching: boolean }>('/api/sys/elevate', {
+      method: 'POST',
+    }),
   getCleanupRules: () => reqJson<{ items: CleanupRuleEntry[] }>('/api/cleanup/rules'),
   scanCleanup: () => reqJson<{ items: CleanupScanResult[] }>('/api/cleanup/scan', { method: 'POST' }),
   previewCleanup: (id: string) =>

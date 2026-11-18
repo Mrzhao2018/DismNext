@@ -115,25 +115,60 @@ const AppShell: React.FC<{
   const [scanning, setScanning] = useState(false);
   const [optGroups, setOptGroups] = useState<OptimizationGroupStatus[]>([]);
   const [snapshots, setSnapshots] = useState<RegistrySnapshot[]>([]);
+  const [elevating, setElevating] = useState(false);
+  const [elevateErr, setElevateErr] = useState<string | null>(null);
+
+  const loadInitialData = async () => {
+    const [sys, rulesRes, optRes, snapRes] = await Promise.all([
+      api.getSysInfo(),
+      api.getCleanupRules(),
+      api.getOptimizerGroups(),
+      api.getSnapshots(),
+    ]);
+    setSysPayload(sys);
+    setCleanupEntries(rulesRes.items);
+    setOptGroups(optRes.groups);
+    setSnapshots(snapRes.snapshots);
+  };
 
   useEffect(() => {
     (async () => {
       try {
-        const [sys, rulesRes, optRes, snapRes] = await Promise.all([
-          api.getSysInfo(),
-          api.getCleanupRules(),
-          api.getOptimizerGroups(),
-          api.getSnapshots(),
-        ]);
-        setSysPayload(sys);
-        setCleanupEntries(rulesRes.items);
-        setOptGroups(optRes.groups);
-        setSnapshots(snapRes.snapshots);
+        await loadInitialData();
       } finally {
         setLoading(false);
       }
     })();
   }, []);
+
+  const handleElevate = async () => {
+    setElevating(true);
+    setElevateErr(null);
+    try {
+      const res = await api.elevate();
+      if (res.relaunching) {
+        // Poll until elevated backend binds the port and responds with is_admin=true
+        for (let i = 0; i < 25; i++) {
+          await new Promise((r) => setTimeout(r, 300));
+          try {
+            const sys = await api.getSysInfo();
+            if (sys.system.is_admin) {
+              await loadInitialData();
+              setElevating(false);
+              return;
+            }
+          } catch {
+            // Backend is restarting during UAC handoff
+          }
+        }
+      }
+      await loadInitialData();
+    } catch (e) {
+      setElevateErr(String(e));
+    } finally {
+      setElevating(false);
+    }
+  };
 
   const handleScan = async () => {
     setScanning(true);
@@ -254,6 +289,27 @@ const AppShell: React.FC<{
                       ? '标准用户（部分系统项只读）'
                       : 'Standard User'}
                   </Badge>
+                  {!sysPayload.system.is_admin && (
+                    <Button
+                      size="small"
+                      appearance="primary"
+                      disabled={elevating}
+                      onClick={handleElevate}
+                    >
+                      {elevating
+                        ? lang === 'zh'
+                          ? '正在提权重启...'
+                          : 'Elevating...'
+                        : lang === 'zh'
+                        ? '一键提权为管理员'
+                        : 'Elevate to Admin'}
+                    </Button>
+                  )}
+                  {elevateErr && (
+                    <Text size={100} style={{ color: tokens.colorPaletteRedForeground1 }}>
+                      {elevateErr}
+                    </Text>
+                  )}
                 </div>
                 <Text size={200} style={{ color: tokens.colorNeutralForeground3 }}>
                   {lang === 'zh'

@@ -66,6 +66,7 @@ EXTRA_EN: dict[str, str] = {
     "禁用Win11加入的新右键菜单，默认显示更多选项（by LittleCircleOO）": "Restore Classic Context Menu on Windows 11 (Show More Options)",
     "默认输入模式（by iliGPU）：": "Default IME Input Mode",
     "Windows To Go标记(关闭以允许大版本更新)(By 玩火)": "Windows To Go Flag (Disable to allow feature updates)",
+    "开发者缓存": "Developer Cache",
 }
 
 
@@ -488,6 +489,480 @@ def build_catalog() -> dict[str, Any]:
 
     ingest_opt_section(main_root.find("SystemOptimization"), "official-1002.2")
     ingest_opt_section(custom_root.find("SystemOptimization"), "win11-modern")
+
+    # 3. Append modern Windows 11 (23H2/24H2/25H2/26H2) cleanup rules
+    def zh_en(zh: str, en: str) -> dict[str, str]:
+        return {"zh": zh, "en": en}
+
+    def gen_act(root: str, flags: str = "Directory|File", queries: list[str] | None = None) -> dict[str, Any]:
+        return {
+            "type": "General",
+            "root_path": root,
+            "flags": flags,
+            "id": None,
+            "queries": queries or [],
+            "excluded": [],
+        }
+
+    def fe(path: str) -> dict[str, Any]:
+        return {"type": "FileExist", "file_path": path, "wow64": None}
+
+    modern_cleanup = [
+        {
+            "name": zh_en("Microsoft Edge (Chromium) 浏览器缓存", "Microsoft Edge (Chromium) Browser Cache"),
+            "group": loc("缓存文件", en_map),
+            "description": zh_en(
+                "清理新版 Chromium 内核 Edge 浏览器的页面缓存、JS 代码缓存与 GPU 缓存，不影响书签、密码与登录状态。",
+                "Clears Chromium-based Microsoft Edge HTTP cache, code cache, and GPU cache without touching bookmarks or logins.",
+            ),
+            "warning": None,
+            "level": 2,
+            "applicable": fe(r"%LOCALAPPDATA%\Microsoft\Edge\User Data"),
+            "actions": [
+                gen_act(r"%LOCALAPPDATA%\Microsoft\Edge\User Data\*\Cache"),
+                gen_act(r"%LOCALAPPDATA%\Microsoft\Edge\User Data\*\Code Cache"),
+                gen_act(r"%LOCALAPPDATA%\Microsoft\Edge\User Data\*\GPUCache"),
+            ],
+        },
+        {
+            "name": zh_en("Google Chrome 浏览器缓存", "Google Chrome Browser Cache"),
+            "group": loc("缓存文件", en_map),
+            "description": zh_en(
+                "清理 Google Chrome 的页面缓存、JS 代码缓存与 GPU 缓存，不影响书签、扩展与登录状态。",
+                "Clears Google Chrome cache, code cache, and GPU cache without touching bookmarks or logins.",
+            ),
+            "warning": None,
+            "level": 2,
+            "applicable": fe(r"%LOCALAPPDATA%\Google\Chrome\User Data"),
+            "actions": [
+                gen_act(r"%LOCALAPPDATA%\Google\Chrome\User Data\*\Cache"),
+                gen_act(r"%LOCALAPPDATA%\Google\Chrome\User Data\*\Code Cache"),
+                gen_act(r"%LOCALAPPDATA%\Google\Chrome\User Data\*\GPUCache"),
+            ],
+        },
+        {
+            "name": zh_en("Electron / Squirrel 桌面应用更新残留", "Electron / Squirrel App Updater Leftovers"),
+            "group": loc("临时文件", en_map),
+            "description": zh_en(
+                "清理现代桌面应用（*-updater 目录及 SquirrelTemp）自动更新后残留的旧安装包缓存。",
+                "Cleans leftover installer packages inside *-updater and SquirrelTemp folders from modern Electron/Squirrel desktop apps.",
+            ),
+            "warning": None,
+            "level": 3,
+            "applicable": {"type": "Or", "children": [fe(r"%LOCALAPPDATA%\*-updater"), fe(r"%LOCALAPPDATA%\SquirrelTemp")]},
+            "actions": [
+                gen_act(r"%LOCALAPPDATA%\*-updater"),
+                gen_act(r"%LOCALAPPDATA%\SquirrelTemp"),
+            ],
+        },
+        {
+            "name": zh_en("AMD 显卡着色器缓存", "AMD Graphics Shader Cache"),
+            "group": loc("缓存文件", en_map),
+            "description": zh_en(
+                "清理 AMD 显卡驱动生成的 DxCache / GLCache / VkCache 着色器缓存，游戏首次运行会重新编译。",
+                "Clears AMD Radeon DirectX/OpenGL/Vulkan shader caches. Safe to delete; games recompile on next launch.",
+            ),
+            "warning": None,
+            "level": 2,
+            "applicable": {
+                "type": "Or",
+                "children": [
+                    fe(r"%LOCALAPPDATA%\AMD\DxCache"),
+                    fe(r"%LOCALAPPDATA%\AMD\GLCache"),
+                    fe(r"%LOCALAPPDATA%\AMD\VkCache"),
+                ],
+            },
+            "actions": [
+                gen_act(r"%LOCALAPPDATA%\AMD\DxCache"),
+                gen_act(r"%LOCALAPPDATA%\AMD\GLCache"),
+                gen_act(r"%LOCALAPPDATA%\AMD\VkCache"),
+            ],
+        },
+        {
+            "name": zh_en("Intel 显卡着色器缓存", "Intel Graphics Shader Cache"),
+            "group": loc("缓存文件", en_map),
+            "description": zh_en(
+                "清理 Intel 核显/锐炫显卡生成的 ShaderCache 着色器缓存。",
+                "Clears Intel Graphics ShaderCache directory.",
+            ),
+            "warning": None,
+            "level": 2,
+            "applicable": fe(r"%LOCALAPPDATA%\Intel\ShaderCache"),
+            "actions": [gen_act(r"%LOCALAPPDATA%\Intel\ShaderCache")],
+        },
+        {
+            "name": zh_en("Windows 大版本升级与诊断日志（Panther / USOShared）", "Windows Upgrade & Diagnostic Logs (Panther / USOShared)"),
+            "group": loc("系统相关", en_map),
+            "description": zh_en(
+                "清理系统升级迁移阶段留在 C:\\Windows\\Panther、USOShared\\Logs 的日志以及 LiveKernelReports 核崩溃转储。",
+                "Clears Windows feature upgrade logs in Panther/USOShared and LiveKernelReports dumps.",
+            ),
+            "warning": None,
+            "level": 2,
+            "applicable": {
+                "type": "And",
+                "children": [
+                    {"type": "OSVersion", "compare": ">=", "version": "10.0"},
+                    {
+                        "type": "Or",
+                        "children": [
+                            fe(r"%SystemRoot%\Panther"),
+                            fe(r"%ProgramData%\USOShared\Logs"),
+                            fe(r"%SystemRoot%\LiveKernelReports"),
+                        ],
+                    },
+                ],
+            },
+            "actions": [
+                gen_act(r"%SystemRoot%\Panther", "File", ["*.log", "*.xml", "*.bak", "*.etl"]),
+                gen_act(r"%ProgramData%\USOShared\Logs"),
+                gen_act(r"%SystemRoot%\LiveKernelReports", "File", ["*.dmp"]),
+            ],
+        },
+        {
+            "name": zh_en("WebView2 / CEF 与现代应用崩溃报告", "WebView2 / CEF & Modern Crashpad Reports"),
+            "group": loc("临时文件", en_map),
+            "description": zh_en(
+                "清理桌面软件内置浏览器组件（CEF/WebView）缓存及 CrashReportClient / Crashpad 崩溃日志。",
+                "Clears embedded CEF caches and CrashReportClient / Crashpad crash reports.",
+            ),
+            "warning": None,
+            "level": 2,
+            "applicable": {
+                "type": "Or",
+                "children": [
+                    fe(r"%LOCALAPPDATA%\CEF\User Data"),
+                    fe(r"%LOCALAPPDATA%\CrashReportClient"),
+                    fe(r"%LOCALAPPDATA%\Crashpad\reports"),
+                ],
+            },
+            "actions": [
+                gen_act(r"%LOCALAPPDATA%\CEF\User Data\*\Cache"),
+                gen_act(r"%LOCALAPPDATA%\CrashReportClient"),
+                gen_act(r"%LOCALAPPDATA%\Crashpad\reports"),
+            ],
+        },
+        {
+            "name": zh_en("Node.js 包管理器缓存（npm / pnpm）", "Node.js Package Manager Cache (npm / pnpm)"),
+            "group": loc("开发者缓存", en_map),
+            "description": zh_en(
+                "清理 npm-cache 与 pnpm-cache 中的离线依赖包 tarball 缓存。",
+                "Clears cached package tarballs stored by npm and pnpm.",
+            ),
+            "warning": zh_en(
+                "清理后首次执行 npm/pnpm install 将重新从网络下载所需依赖包。",
+                "Next npm/pnpm install will re-download package archives from the registry.",
+            ),
+            "level": 2,
+            "applicable": {
+                "type": "Or",
+                "children": [
+                    fe(r"%LOCALAPPDATA%\npm-cache"),
+                    fe(r"%APPDATA%\npm-cache"),
+                    fe(r"%LOCALAPPDATA%\pnpm-cache"),
+                ],
+            },
+            "actions": [
+                gen_act(r"%LOCALAPPDATA%\npm-cache"),
+                gen_act(r"%APPDATA%\npm-cache"),
+                gen_act(r"%LOCALAPPDATA%\pnpm-cache"),
+            ],
+        },
+        {
+            "name": zh_en("Python 包管理器缓存（uv / pip）", "Python Package Manager Cache (uv / pip)"),
+            "group": loc("开发者缓存", en_map),
+            "description": zh_en(
+                "清理 Python 包管理工具 uv 与 pip 下载的 wheel / 源码包本地缓存。",
+                "Clears cached Python wheels and archives stored by uv and pip.",
+            ),
+            "warning": zh_en(
+                "清理后首次执行 uv/pip install 将重新从网络下载包缓存。",
+                "Next uv/pip install will re-download packages from PyPI/mirrors.",
+            ),
+            "level": 2,
+            "applicable": {
+                "type": "Or",
+                "children": [fe(r"%LOCALAPPDATA%\uv\cache"), fe(r"%LOCALAPPDATA%\pip\cache")],
+            },
+            "actions": [
+                gen_act(r"%LOCALAPPDATA%\uv\cache"),
+                gen_act(r"%LOCALAPPDATA%\pip\cache"),
+            ],
+        },
+    ]
+
+    for mc in modern_cleanup:
+        cleanup_rules.append(
+            {
+                "id": f"clean-{idx:03d}",
+                "name": mc["name"],
+                "group": mc["group"],
+                "description": mc["description"],
+                "warning": mc["warning"],
+                "level": mc["level"],
+                "work": None,
+                "source": "win11-modern",
+                "scans": [
+                    {
+                        "work": 1,
+                        "scan_type": None,
+                        "name_override": None,
+                        "description_override": None,
+                        "warning_override": None,
+                        "applicable": mc["applicable"],
+                        "named_applicables": {},
+                        "actions": mc["actions"],
+                        "rescan": False,
+                        "restart": None,
+                    }
+                ],
+            }
+        )
+        idx += 1
+
+    # 4. Append modern Windows 11 (23H2/24H2/25H2/26H2) optimization tweaks into matching groups
+    def reg_ex(key: str, val: str, rtype: str | None = None, data: str | None = None) -> dict[str, Any]:
+        return {
+            "type": "RegExist",
+            "key": key,
+            "value": val,
+            "reg_type": rtype,
+            "data": data,
+            "compare": None,
+            "wow64": None,
+        }
+
+    def reg_wr(key: str, val: str, rtype: str, data: str) -> dict[str, Any]:
+        return {
+            "type": "RegWrite",
+            "key": key,
+            "value": val,
+            "reg_type": rtype,
+            "data": data,
+            "operator": "=",
+            "wow64": None,
+            "fun": False,
+        }
+
+    def reg_del(key: str, val: str) -> dict[str, Any]:
+        return {
+            "type": "RegDelete",
+            "key": key,
+            "value": val,
+            "reg_type": None,
+            "data": None,
+            "skip_error": 2,
+            "wow64": None,
+        }
+
+    def cb_scope(
+        key: str,
+        val: str,
+        enable_data: str = "1",
+        disable_data: str | None = "0",
+        rtype: str = "REG_DWORD",
+        warning: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        false_acts = [reg_wr(key, val, rtype, disable_data)] if disable_data is not None else [reg_del(key, val)]
+        return {
+            "kind": "checkbox",
+            "state": reg_ex(key, val, rtype, enable_data),
+            "true_actions": [reg_wr(key, val, rtype, enable_data)],
+            "true_warning": warning,
+            "true_restart": None,
+            "false_actions": false_acts,
+            "false_warning": None,
+            "false_restart": None,
+        }
+
+    def add_modern_opt(group_zh: str, item: dict[str, Any]) -> None:
+        nonlocal opt_idx
+        grp = group_by_zh[group_zh]
+        item["id"] = f"opt-{opt_idx:03d}"
+        item["source"] = "win11-modern"
+        grp["items"].append(item)
+        opt_idx += 1
+
+    # 1) Taskbar End Task (23H2+)
+    add_modern_opt(
+        "任务栏相关设置",
+        {
+            "name": zh_en("开启“任务栏右键直接结束任务 (End Task)”（Win11 23H2+）", "Enable 'End Task' in Taskbar Right-Click Menu (Win11 23H2+)"),
+            "item_type": "CheckBox",
+            "applicable": {"type": "OSVersion", "compare": ">=", "version": "10.0.22621"},
+            "current": cb_scope(r"HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced", "TaskbarEndTask", "1", "0"),
+            "default": cb_scope(r"HKEY_USERS\DEFAULT\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced", "TaskbarEndTask", "1", "0"),
+            "system": None,
+        },
+    )
+
+    # 2) Disable Windows Recall (24H2+)
+    add_modern_opt(
+        "安全相关设置",
+        {
+            "name": zh_en("禁用 Windows Recall（回顾 / AI 屏幕快照分析，Win11 24H2+）", "Disable Windows Recall & AI Snapshots (Win11 24H2+)"),
+            "item_type": "CheckBox",
+            "applicable": {"type": "OSVersion", "compare": ">=", "version": "10.0.26100"},
+            "current": cb_scope(r"HKEY_CURRENT_USER\Software\Policies\Microsoft\Windows\WindowsAI", "DisableAIDataAnalysis", "1", None),
+            "default": None,
+            "system": cb_scope(r"HKEY_LOCAL_MACHINE\SOFTWARE\Policies\Microsoft\Windows\WindowsAI", "DisableAIDataAnalysis", "1", None),
+        },
+    )
+
+    # 3) Disable Windows Copilot Policy (23H2+)
+    add_modern_opt(
+        "开始菜单以及Windows体验",
+        {
+            "name": zh_en("彻底禁用 Windows Copilot 全局策略（Win11 23H2+）", "Disable Windows Copilot via Policy (Win11 23H2+)"),
+            "item_type": "CheckBox",
+            "applicable": {"type": "OSVersion", "compare": ">=", "version": "10.0.22621"},
+            "current": cb_scope(r"HKEY_CURRENT_USER\Software\Policies\Microsoft\Windows\WindowsCopilot", "TurnOffWindowsCopilot", "1", None),
+            "default": None,
+            "system": cb_scope(r"HKEY_LOCAL_MACHINE\SOFTWARE\Policies\Microsoft\Windows\WindowsCopilot", "TurnOffWindowsCopilot", "1", None),
+        },
+    )
+
+    # 4) Native Windows Sudo mode (24H2+)
+    sudo_key = r"HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\Sudo"
+    add_modern_opt(
+        "安全相关设置",
+        {
+            "name": zh_en("Windows 原生 Sudo 命令模式（Win11 24H2+）", "Native Windows Sudo Command Mode (Win11 24H2+)"),
+            "item_type": "Combo",
+            "applicable": {"type": "OSVersion", "compare": ">=", "version": "10.0.26100"},
+            "current": None,
+            "default": None,
+            "system": {
+                "kind": "combo",
+                "dropdowns": [
+                    {
+                        "name": zh_en("禁用（默认）", "Disabled (Default)"),
+                        "applicable": {
+                            "type": "Or",
+                            "children": [
+                                {"type": "Not", "children": [reg_ex(sudo_key, "Enabled")]},
+                                reg_ex(sudo_key, "Enabled", "REG_DWORD", "0"),
+                            ],
+                        },
+                        "actions": [reg_wr(sudo_key, "Enabled", "REG_DWORD", "0")],
+                        "warning": None,
+                        "restart": None,
+                    },
+                    {
+                        "name": zh_en("在新窗口中运行（Force new window）", "Force New Window"),
+                        "applicable": reg_ex(sudo_key, "Enabled", "REG_DWORD", "1"),
+                        "actions": [reg_wr(sudo_key, "Enabled", "REG_DWORD", "1")],
+                        "warning": None,
+                        "restart": None,
+                    },
+                    {
+                        "name": zh_en("禁用输入模式（Disable input）", "Disable Input"),
+                        "applicable": reg_ex(sudo_key, "Enabled", "REG_DWORD", "2"),
+                        "actions": [reg_wr(sudo_key, "Enabled", "REG_DWORD", "2")],
+                        "warning": None,
+                        "restart": None,
+                    },
+                    {
+                        "name": zh_en("内联运行（Inline）", "Inline (Recommended for CLI)"),
+                        "applicable": reg_ex(sudo_key, "Enabled", "REG_DWORD", "3"),
+                        "actions": [reg_wr(sudo_key, "Enabled", "REG_DWORD", "3")],
+                        "warning": zh_en("内联模式在当前终端直接提权执行命令。", "Inline mode runs elevated commands directly in the current terminal."),
+                        "restart": None,
+                    },
+                ],
+            },
+        },
+    )
+
+    # 5) Hide File Explorer Gallery (23H2+)
+    add_modern_opt(
+        "资源管理器导航窗口图标管理",
+        {
+            "name": zh_en("隐藏资源管理器左侧导航栏“图库 (Gallery)”（Win11 23H2+）", "Hide 'Gallery' in File Explorer Navigation Pane (Win11 23H2+)"),
+            "item_type": "CheckBox",
+            "applicable": {"type": "OSVersion", "compare": ">=", "version": "10.0.22621"},
+            "current": cb_scope(
+                r"HKEY_CURRENT_USER\Software\Classes\CLSID\{e88863ea-0cf1-45ef-9f4c-23ff7e35b71c}",
+                "System.IsPinnedToNameSpaceTree",
+                "0",
+                "1",
+            ),
+            "default": None,
+            "system": None,
+        },
+    )
+
+    # 6) Disable Explorer Automatic Folder Type Discovery
+    add_modern_opt(
+        "Explorer",
+        {
+            "name": zh_en("禁用文件夹“自动类型发现”（解决打开多文件目录卡顿）", "Disable Automatic Folder Type Discovery (Speed up Explorer)"),
+            "item_type": "CheckBox",
+            "applicable": {"type": "OSVersion", "compare": ">=", "version": "10.0"},
+            "current": cb_scope(
+                r"HKEY_CURRENT_USER\Software\Classes\Local Settings\Software\Microsoft\Windows\Shell\Bags\AllFolders\Shell",
+                "FolderType",
+                "NotSpecified",
+                None,
+                "REG_SZ",
+            ),
+            "default": None,
+            "system": None,
+        },
+    )
+
+    # 7) Disable Bing Search in Windows Search
+    add_modern_opt(
+        "开始菜单以及Windows体验",
+        {
+            "name": zh_en("禁用 Windows 搜索框的 Bing 网页搜索联想（加快本地搜索）", "Disable Bing Web Suggestions in Windows Search"),
+            "item_type": "CheckBox",
+            "applicable": {"type": "OSVersion", "compare": ">=", "version": "10.0"},
+            "current": cb_scope(
+                r"HKEY_CURRENT_USER\Software\Policies\Microsoft\Windows\Explorer",
+                "DisableSearchBoxSuggestions",
+                "1",
+                None,
+            ),
+            "default": None,
+            "system": None,
+        },
+    )
+
+    # 8) Disable OneDrive / Account Ad Banners in Explorer & Start
+    adv_key = r"HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced"
+    add_modern_opt(
+        "Explorer",
+        {
+            "name": zh_en("关闭资源管理器与开始菜单中的 OneDrive / 账户通知横幅", "Disable OneDrive & Account Ads in Explorer and Start Menu"),
+            "item_type": "CheckBox",
+            "applicable": {"type": "OSVersion", "compare": ">=", "version": "10.0.22000"},
+            "current": {
+                "kind": "checkbox",
+                "state": {
+                    "type": "And",
+                    "children": [
+                        reg_ex(adv_key, "ShowSyncProviderNotifications", "REG_DWORD", "0"),
+                        reg_ex(adv_key, "Start_AccountNotifications", "REG_DWORD", "0"),
+                    ],
+                },
+                "true_actions": [
+                    reg_wr(adv_key, "ShowSyncProviderNotifications", "REG_DWORD", "0"),
+                    reg_wr(adv_key, "Start_AccountNotifications", "REG_DWORD", "0"),
+                ],
+                "true_warning": None,
+                "true_restart": None,
+                "false_actions": [
+                    reg_wr(adv_key, "ShowSyncProviderNotifications", "REG_DWORD", "1"),
+                    reg_wr(adv_key, "Start_AccountNotifications", "REG_DWORD", "1"),
+                ],
+                "false_warning": None,
+                "false_restart": None,
+            },
+            "default": None,
+            "system": None,
+        },
+    )
 
     return {
         "schema_version": 1,
