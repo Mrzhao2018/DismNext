@@ -1,6 +1,7 @@
 pub mod appx;
 pub mod catalog;
 pub mod cleaner;
+mod disk_allocation;
 pub mod diskmap;
 pub mod drivers;
 pub mod duplicate_recycle;

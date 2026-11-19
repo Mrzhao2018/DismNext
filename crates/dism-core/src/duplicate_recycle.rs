@@ -55,9 +55,30 @@ pub enum DuplicateSkipReason {
 }
 
 #[derive(PartialEq, Eq, Hash)]
-struct FileIdentity {
+pub(crate) struct FileIdentity {
     volume: u64,
     index: u128,
+}
+
+impl FileIdentity {
+    pub(crate) fn read(file: &File) -> io::Result<Self> {
+        let mut info: FILE_ID_INFO = unsafe { std::mem::zeroed() };
+        let ok = unsafe {
+            GetFileInformationByHandleEx(
+                file.as_raw_handle(),
+                FileIdInfo,
+                (&mut info as *mut FILE_ID_INFO).cast(),
+                std::mem::size_of::<FILE_ID_INFO>() as u32,
+            )
+        };
+        if ok == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(Self {
+            volume: info.VolumeSerialNumber,
+            index: u128::from_le_bytes(info.FileId.Identifier),
+        })
+    }
 }
 
 #[derive(PartialEq, Eq)]
@@ -76,23 +97,8 @@ impl FileState {
                 "Expected a regular file",
             ));
         }
-        let mut info: FILE_ID_INFO = unsafe { std::mem::zeroed() };
-        let ok = unsafe {
-            GetFileInformationByHandleEx(
-                file.as_raw_handle(),
-                FileIdInfo,
-                (&mut info as *mut FILE_ID_INFO).cast(),
-                std::mem::size_of::<FILE_ID_INFO>() as u32,
-            )
-        };
-        if ok == 0 {
-            return Err(io::Error::last_os_error());
-        }
         Ok(Self {
-            identity: FileIdentity {
-                volume: info.VolumeSerialNumber,
-                index: u128::from_le_bytes(info.FileId.Identifier),
-            },
+            identity: FileIdentity::read(file)?,
             modified: meta.last_write_time(),
             size: meta.len(),
         })

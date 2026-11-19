@@ -42,7 +42,7 @@ cargo build --release --workspace --locked
 | 功能 | 你可以用它做什么 |
 | --- | --- |
 | 空间回收 | 扫描系统临时文件和应用缓存，按规则预览，查看占用或受保护的文件。支持自定义规则、排除项、Dry Run 和跨规则目标去重。 |
-| 磁盘分析 | 按目录、文件类型和大文件查看占用。空间分析、查重与清理规则全量扫描都有进度和取消操作。 |
+| 磁盘分析 | 按目录、文件类型和大文件查看逻辑大小。可选统计 NTFS 文件数据占用，并对硬链接去重。空间分析、查重与清理规则全量扫描都有进度和取消操作。 |
 | 重复文件 | 按内容找出重复文件，选择保留最新副本。回收前重新核对文件，界面逐项显示移入回收站、跳过和失败的结果。 |
 | 系统优化 | 查看和应用 Windows 设置，记录相关注册表修改的快照，并从快照历史执行回滚。 |
 | 应用与系统管理 | 管理启动项、服务、计划任务、AppX/MSIX 和 Windows 可选功能。支持 Win32 应用卸载与残留扫描，以及第三方驱动枚举和备份。 |
@@ -61,11 +61,14 @@ $cli = '.\target\release\dism-cli.exe'
 & $cli preview clean-042
 & $cli clean clean-042
 & $cli diskmap "$env:TEMP" --depth 2
+& $cli diskmap "$env:TEMP" --depth 2 --allocated
 & $cli opt list
 & $cli snapshot list
 ```
 
 `clean-042` 是内置的「临时文件」规则。`clean` 默认执行 Dry Run，确认目标后，用 `clean clean-042 --execute` 执行实际清理。用 `--help` 查看所有命令，或用 `drivers --help`、`snapshot --help` 查看子命令。`info`、`scan` 和 `preview` 等命令支持 `--json`。
+
+`diskmap --allocated` 会额外读取 NTFS 文件数据的分配空间，并报告无法测量的文件。目录树、文件类型和大文件排名按逻辑大小计算。
 
 ## MCP 接入
 

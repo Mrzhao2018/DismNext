@@ -248,6 +248,7 @@ export interface LargeFileEntry {
   name: string;
   ext: string;
   size_bytes: number;
+  allocated_bytes?: number;
 }
 
 export interface DiskPreset {
@@ -259,12 +260,23 @@ export interface DiskAnalysisReport {
   root_path: string;
   elapsed_ms: number;
   total_bytes: number;
+  allocation?: DiskAllocation;
   total_files: number;
   total_dirs: number;
   tree: DiskTreeNode;
   extensions: ExtensionStat[];
   largest_files: LargeFileEntry[];
 }
+
+export type DiskAllocation =
+  | {
+      status: 'measured';
+      allocated_bytes: number;
+      hard_link_aliases: number;
+      unmeasured_files: number;
+      unreadable_entries: number;
+    }
+  | { status: 'unsupported_file_system' | 'unavailable' };
 
 export type StartupScope = 'user' | 'system';
 
@@ -467,7 +479,7 @@ export interface ScanProgress {
 }
 
 export type ScanRequest =
-  | { kind: 'disk_analysis'; path: string; max_depth: number }
+  | { kind: 'disk_analysis'; path: string; max_depth: number; measure_allocation?: boolean }
   | { kind: 'duplicate_files'; path: string; min_size_bytes: number }
   | { kind: 'cleanup_rules' };
 

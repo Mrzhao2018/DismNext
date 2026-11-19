@@ -1,6 +1,6 @@
 use crate::catalog::Catalog;
 use crate::cleaner::{execute_cleanup, scan_all_with_summary, scan_rule_preview};
-use crate::diskmap::{analyze_path, find_duplicate_files, find_orphaned_app_dirs};
+use crate::diskmap::{analyze_path_with_options, find_duplicate_files, find_orphaned_app_dirs};
 use crate::drivers::{default_backup_dir, export_drivers, list_drivers};
 use crate::features::{list_optional_features, FeatureCategory};
 use crate::lockcheck::find_locking_processes;
@@ -314,6 +314,10 @@ pub fn tool_definitions() -> Vec<Value> {
                         "minimum": 1,
                         "maximum": 8,
                         "description": "Maximum tree recursion depth (default 3)."
+                    },
+                    "measure_allocation": {
+                        "type": "boolean",
+                        "description": "Also measure allocated file data on NTFS and count hard links once (default false)."
                     }
                 },
                 "additionalProperties": false
@@ -593,7 +597,11 @@ fn dispatch_tool_call(name: &str, args: &Value, catalog: &Catalog) -> Result<Val
                 .and_then(|v| v.as_u64())
                 .unwrap_or(3)
                 .clamp(1, 8) as usize;
-            let report = analyze_path(&target, max_depth)?;
+            let measure_allocation = args
+                .get("measure_allocation")
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false);
+            let report = analyze_path_with_options(&target, max_depth, measure_allocation, None)?;
             Ok(serde_json::to_value(report)?)
         }
         "dismnext_find_duplicates" => {

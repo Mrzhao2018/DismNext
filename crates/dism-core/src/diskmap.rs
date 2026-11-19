@@ -1,4 +1,6 @@
 use crate::catalog::LocalizedText;
+use crate::disk_allocation::AllocationScan;
+pub use crate::disk_allocation::DiskAllocation;
 use crate::duplicate_recycle::FileState;
 use crate::scan_progress::{ScanPhase, ScanProgress};
 use crate::sysinfo::SystemInfo;
@@ -67,6 +69,8 @@ pub struct LargeFileEntry {
     pub name: String,
     pub ext: String,
     pub size_bytes: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allocated_bytes: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -80,6 +84,8 @@ pub struct DiskAnalysisReport {
     pub root_path: String,
     pub elapsed_ms: u64,
     pub total_bytes: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allocation: Option<DiskAllocation>,
     pub total_files: usize,
     pub total_dirs: usize,
     pub tree: DiskTreeNode,
@@ -165,18 +171,24 @@ pub fn get_presets(sys: &SystemInfo) -> Vec<DiskPreset> {
 
 /// Performs a parallel directory tree & extension analysis without following NTFS reparse points.
 pub fn analyze_path(root: &Path, max_depth: usize) -> Result<DiskAnalysisReport> {
-    analyze_path_inner(root, max_depth, None)
+    analyze_path_with_options(root, max_depth, false, None)
 }
 
 pub fn analyze_path_with_progress(root: &Path, max_depth: usize, progress: &ScanProgress) -> Result<DiskAnalysisReport> {
-    analyze_path_inner(root, max_depth, Some(progress))
+    analyze_path_with_options(root, max_depth, false, Some(progress))
 }
 
 fn check_scan(progress: Option<&ScanProgress>) -> Result<()> {
     progress.map_or(Ok(()), ScanProgress::check)
 }
 
-fn analyze_path_inner(root: &Path, max_depth: usize, progress: Option<&ScanProgress>) -> Result<DiskAnalysisReport> {
+/// Optionally measures NTFS file data allocation without changing logical-size rankings.
+pub fn analyze_path_with_options(
+    root: &Path,
+    max_depth: usize,
+    measure_allocation: bool,
+    progress: Option<&ScanProgress>,
+) -> Result<DiskAnalysisReport> {
     check_scan(progress)?;
     if !root.exists() {
         return Err(anyhow!("Path does not exist: {}", root.display()));
@@ -184,7 +196,9 @@ fn analyze_path_inner(root: &Path, max_depth: usize, progress: Option<&ScanProgr
     let started = Instant::now();
     let depth_limit = max_depth.clamp(1, 6);
 
-    let acc = scan_recursive(root, Some(depth_limit), progress)?;
+    let allocation = measure_allocation.then(|| AllocationScan::for_path(root));
+    let tracker = allocation.as_ref().and_then(|result| result.as_ref().ok());
+    let acc = scan_recursive(root, Some(depth_limit), progress, tracker)?;
     if let Some(progress) = progress {
         progress.set_phase(ScanPhase::Finishing, None);
     }
@@ -237,6 +251,10 @@ fn analyze_path_inner(root: &Path, max_depth: usize, progress: Option<&ScanProgr
         root_path: root.to_string_lossy().into_owned(),
         elapsed_ms: started.elapsed().as_millis() as u64,
         total_bytes,
+        allocation: allocation.map(|result| match result {
+            Ok(scan) => scan.summary(),
+            Err(status) => status,
+        }),
         total_files,
         total_dirs,
         tree,
@@ -245,7 +263,12 @@ fn analyze_path_inner(root: &Path, max_depth: usize, progress: Option<&ScanProgr
     })
 }
 
-fn scan_recursive(path: &Path, visible_depth: Option<usize>, progress: Option<&ScanProgress>) -> Result<ScanAccumulator> {
+fn scan_recursive(
+    path: &Path,
+    visible_depth: Option<usize>,
+    progress: Option<&ScanProgress>,
+    allocation: Option<&AllocationScan>,
+) -> Result<ScanAccumulator> {
     check_scan(progress)?;
     let (name, path_str) = if visible_depth.is_some() {
         let path_str = path.to_string_lossy().into_owned();
@@ -263,6 +286,9 @@ fn scan_recursive(path: &Path, visible_depth: Option<usize>, progress: Option<&S
     let child_depth = visible_depth.and_then(|depth| depth.checked_sub(1));
 
     let Ok(meta) = std::fs::symlink_metadata(path) else {
+        if let Some(scan) = allocation {
+            scan.record_unreadable();
+        }
         return Ok(empty_acc(name, path_str, false));
     };
 
@@ -281,6 +307,8 @@ fn scan_recursive(path: &Path, visible_depth: Option<usize>, progress: Option<&S
             name: name.clone(),
             ext: ext.clone(),
             size_bytes: size,
+            allocated_bytes: allocation
+                .and_then(|scan| scan.record_file(path, meta.file_attributes())),
         }];
         return Ok(ScanAccumulator {
             node: RawNode {
@@ -300,6 +328,9 @@ fn scan_recursive(path: &Path, visible_depth: Option<usize>, progress: Option<&S
     }
 
     let Ok(rd) = std::fs::read_dir(path) else {
+        if let Some(scan) = allocation {
+            scan.record_unreadable();
+        }
         return Ok(empty_acc(name, path_str, true));
     };
 
@@ -312,9 +343,15 @@ fn scan_recursive(path: &Path, visible_depth: Option<usize>, progress: Option<&S
     let mut top_files: Vec<LargeFileEntry> = Vec::new();
     let mut sub_dirs: Vec<PathBuf> = Vec::new();
 
-    for entry in rd.flatten() {
+    for entry in rd {
         check_scan(progress)?;
-        let Ok(c_meta) = entry.metadata() else {
+        let Ok((entry, c_meta)) = entry.and_then(|entry| {
+            let metadata = entry.metadata()?;
+            Ok((entry, metadata))
+        }) else {
+            if let Some(scan) = allocation {
+                scan.record_unreadable();
+            }
             continue;
         };
         if (c_meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT) != 0 {
@@ -356,6 +393,8 @@ fn scan_recursive(path: &Path, visible_depth: Option<usize>, progress: Option<&S
                 name: c_name,
                 ext,
                 size_bytes: sz,
+                allocated_bytes: allocation
+                    .and_then(|scan| scan.record_file(&child_path, c_meta.file_attributes())),
             });
             if top_files.len() == MAX_LARGEST_FILES * 2 {
                 trim_largest_files(&mut top_files);
@@ -370,7 +409,7 @@ fn scan_recursive(path: &Path, visible_depth: Option<usize>, progress: Option<&S
         check_scan(progress)?;
         let child_accs = batch
             .par_iter()
-            .map(|path| scan_recursive(path, child_depth, progress))
+            .map(|path| scan_recursive(path, child_depth, progress, allocation))
             .collect::<Result<Vec<_>>>()?;
         for c in child_accs {
             total_bytes = total_bytes.saturating_add(c.node.size_bytes);
@@ -1287,6 +1326,51 @@ mod tests {
         assert!(analyze_path_with_progress(&base, 2, &progress).unwrap_err().is::<crate::scan_progress::ScanCancelled>());
 
         let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn ntfs_allocation_counts_hard_links_once_across_directories() {
+        let root =
+            std::env::temp_dir().join(format!("dismnext_allocation_{}", std::process::id()));
+        let first_dir = root.join("first");
+        let second_dir = root.join("second");
+        fs::create_dir(&root).unwrap();
+        fs::create_dir(&first_dir).unwrap();
+        fs::create_dir(&second_dir).unwrap();
+        let original = first_dir.join("original.bin");
+        let alias = second_dir.join("alias.bin");
+        fs::write(&original, vec![0x89; 8192]).unwrap();
+        fs::hard_link(&original, &alias).unwrap();
+
+        let logical = analyze_path(&root, 1).unwrap();
+        assert!(logical.allocation.is_none());
+        assert!(serde_json::to_value(&logical).unwrap().get("allocation").is_none());
+        let measured = analyze_path_with_options(&root, 1, true, None).unwrap();
+        assert_eq!(measured.total_bytes, 16_384);
+        assert_eq!(measured.total_bytes, logical.total_bytes);
+        assert_eq!(measured.total_files, 2);
+        let DiskAllocation::Measured {
+            allocated_bytes,
+            hard_link_aliases,
+            unmeasured_files,
+            unreadable_entries,
+        } = measured.allocation.unwrap() else {
+            panic!("Expected NTFS allocation data from the test volume");
+        };
+        assert!(allocated_bytes > 0);
+        assert_eq!(hard_link_aliases, 1);
+        assert_eq!(unmeasured_files, 0);
+        assert_eq!(unreadable_entries, 0);
+        assert!(measured
+            .largest_files
+            .iter()
+            .all(|file| file.allocated_bytes == Some(allocated_bytes)));
+        assert_eq!(measured.largest_files.len(), 2);
+        fs::remove_file(alias).unwrap();
+        fs::remove_file(original).unwrap();
+        fs::remove_dir(second_dir).unwrap();
+        fs::remove_dir(first_dir).unwrap();
+        fs::remove_dir(root).unwrap();
     }
 
     #[test]

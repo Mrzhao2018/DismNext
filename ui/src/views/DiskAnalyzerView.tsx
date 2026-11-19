@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Badge,
   Button,
+  Checkbox,
   Dialog,
   DialogActions,
   DialogBody,
@@ -490,6 +491,8 @@ export const DiskAnalyzerView: React.FC<Props> = ({ lang, onSystemUpdated }) => 
   const [targetPath, setTargetPath] = useState('');
   const scan = useScanJob();
   const [report, setReport] = useState<DiskAnalysisReport | null>(null);
+  const [measureAllocation, setMeasureAllocation] = useState(false);
+  const [allocationStale, setAllocationStale] = useState(false);
   const [expandedPaths, setExpandedPaths] = useState<Set<string>>(new Set());
   const [loadingDirs, setLoadingDirs] = useState<Set<string>>(new Set());
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
@@ -555,11 +558,17 @@ export const DiskAnalyzerView: React.FC<Props> = ({ lang, onSystemUpdated }) => 
     if (!trimmed || scan.active || recycling) return;
     setErrorMsg(null);
     try {
-      const res = await scan.run({ kind: 'disk_analysis', path: trimmed, max_depth: 4 });
+      const res = await scan.run({
+        kind: 'disk_analysis',
+        path: trimmed,
+        max_depth: 4,
+        measure_allocation: measureAllocation,
+      });
       if (!res) return;
       setActiveExt(null);
       setHoveredLeaf(null);
       setReport(res);
+      setAllocationStale(false);
       setTargetPath(res.root_path);
       setExpandedPaths(new Set([res.tree.path]));
       setSelectedPath(res.tree.path);
@@ -905,7 +914,7 @@ export const DiskAnalyzerView: React.FC<Props> = ({ lang, onSystemUpdated }) => 
       }
       const recycled = items.filter((item) => item.status === 'recycled');
       const targets = recycled.map((item) => item.path);
-      let totalFreed = 0;
+      let movedSize = 0;
       let nextTree = report.tree;
       let nextTotalBytes = report.total_bytes;
       let nextTotalFiles = report.total_files;
@@ -913,7 +922,7 @@ export const DiskAnalyzerView: React.FC<Props> = ({ lang, onSystemUpdated }) => 
       let nextLargest = report.largest_files;
 
       for (const { path: target, size_bytes } of recycled) {
-        totalFreed += size_bytes;
+        movedSize += size_bytes;
         const { updated, removedBytes, removedFiles, removedDirs } = removeNodeFromTree(
           nextTree,
           target
@@ -931,12 +940,14 @@ export const DiskAnalyzerView: React.FC<Props> = ({ lang, onSystemUpdated }) => 
 
       setReport({
         ...report,
+        allocation: targets.length > 0 ? undefined : report.allocation,
         total_bytes: nextTotalBytes,
         total_files: nextTotalFiles,
         total_dirs: nextTotalDirs,
         tree: { ...nextTree, file_count: nextTotalFiles, size_bytes: nextTotalBytes },
         largest_files: nextLargest,
       });
+      if (targets.length > 0 && report.allocation?.status === 'measured') setAllocationStale(true);
 
       const recycledLower = new Set(targets.map((t) => t.toLowerCase()));
       const staleDuplicates = new Set(recycledLower);
@@ -982,8 +993,8 @@ export const DiskAnalyzerView: React.FC<Props> = ({ lang, onSystemUpdated }) => 
       const skipped = items.filter((item) => item.status === 'skipped').length;
       const failed = items.length - targets.length - skipped;
       setRecycleNotice(lang === 'zh'
-        ? `已移入回收站 ${targets.length} 项（${formatBytes(totalFreed)}），跳过 ${skipped} 项，失败 ${failed} 项。`
-        : `Moved ${targets.length} to the Recycle Bin (${formatBytes(totalFreed)}), skipped ${skipped}, failed ${failed}.`);
+        ? `已移入回收站 ${targets.length} 项（逻辑大小 ${formatBytes(movedSize)}），跳过 ${skipped} 项，失败 ${failed} 项。`
+        : `Moved ${targets.length} to the Recycle Bin (${formatBytes(movedSize)} logical size), skipped ${skipped}, failed ${failed}.`);
       setRecycleResults(items);
       setRecycleConfirmTarget(null);
     } catch (e) {
@@ -999,6 +1010,8 @@ export const DiskAnalyzerView: React.FC<Props> = ({ lang, onSystemUpdated }) => 
         ? `[其余 ${node.aggregate_count} 个较小项]`
         : `[+${node.aggregate_count} smaller items]`
       : node.name;
+  const logicalSizeLabel = lang === 'zh' ? '逻辑大小' : 'Logical size';
+  const allocation = report?.allocation;
 
   return (
     <div className={styles.root}>
@@ -1072,11 +1085,24 @@ export const DiskAnalyzerView: React.FC<Props> = ({ lang, onSystemUpdated }) => 
             </Button>
           </div>
 
+          <Checkbox
+            checked={measureAllocation}
+            disabled={Boolean(scan.active) || recycling}
+            onChange={(_, data) => setMeasureAllocation(data.checked === true)}
+            label={lang === 'zh' ? '统计 NTFS 磁盘占用' : 'Measure NTFS allocation'}
+            title={lang === 'zh' ? '额外读取每个文件的分配信息，扫描可能更慢。' : 'Reads allocation information for each file and may take longer.'}
+          />
+
           {report && (
             <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
               <Badge size="small" appearance="tint" color="brand">
-                {formatBytes(report.total_bytes)}
+                {logicalSizeLabel} · {formatBytes(report.total_bytes)}
               </Badge>
+              {allocation?.status === 'measured' && (
+                <Badge size="small" appearance="tint" color="informative">
+                  {lang === 'zh' ? '已测得占用' : 'Measured allocation'} · {formatBytes(allocation.allocated_bytes)}
+                </Badge>
+              )}
               <Badge size="small" appearance="outline">
                 {report.total_files.toLocaleString()} {lang === 'zh' ? '文件' : 'files'}
               </Badge>
@@ -1089,6 +1115,27 @@ export const DiskAnalyzerView: React.FC<Props> = ({ lang, onSystemUpdated }) => 
             </div>
           )}
         </div>
+        {allocation?.status === 'measured' && (
+          <Text size={200} style={{ color: tokens.colorNeutralForeground3 }}>
+            {lang === 'zh'
+              ? `统计普通文件数据的分配量 · ${allocation.hard_link_aliases} 个重复硬链接已去重`
+              : `Regular file data allocation · ${allocation.hard_link_aliases} hard-link aliases excluded`}
+            {(allocation.unmeasured_files > 0 || allocation.unreadable_entries > 0) && (
+              lang === 'zh'
+                ? ` · ${allocation.unmeasured_files} 个文件未测得占用，${allocation.unreadable_entries} 项无法读取`
+                : ` · ${allocation.unmeasured_files} unmeasured files, ${allocation.unreadable_entries} unreadable entries`
+            )}
+          </Text>
+        )}
+        {allocation?.status === 'unsupported_file_system' && (
+          <Text size={200}>{lang === 'zh' ? '磁盘占用测量支持 NTFS 卷。' : 'Allocation measurement is supported on NTFS volumes.'}</Text>
+        )}
+        {allocation?.status === 'unavailable' && (
+          <Text size={200}>{lang === 'zh' ? '无法读取目标卷的分配信息。' : 'Could not read target volume information for allocation measurement.'}</Text>
+        )}
+        {allocationStale && (
+          <Text size={200}>{lang === 'zh' ? '文件已变更。重新分析可更新磁盘占用。' : 'Files changed. Analyze again to update disk allocation.'}</Text>
+        )}
       </div>
 
       <ScanStatusBar active={scan.active} cancelled={scan.cancelled} cancel={scan.cancel} lang={lang} />
@@ -1120,7 +1167,7 @@ export const DiskAnalyzerView: React.FC<Props> = ({ lang, onSystemUpdated }) => 
                       <span>{lang === 'zh' ? '名称' : 'Name'}</span>
                       <span>{lang === 'zh' ? '占比条' : 'Subtree %'}</span>
                       <span style={{ textAlign: 'right' }}>{lang === 'zh' ? '比例' : '%'}</span>
-                      <span style={{ textAlign: 'right' }}>{lang === 'zh' ? '大小' : 'Size'}</span>
+                      <span style={{ textAlign: 'right' }}>{logicalSizeLabel}</span>
                       <span style={{ textAlign: 'right' }}>{lang === 'zh' ? '文件' : 'Files'}</span>
                     </div>
                     <div className={styles.scrollBody}>
@@ -1257,7 +1304,7 @@ export const DiskAnalyzerView: React.FC<Props> = ({ lang, onSystemUpdated }) => 
                     <div className={`${styles.tableHeader} ${styles.largeFileCols}`}>
                       <span>{lang === 'zh' ? '文件路径' : 'File Path'}</span>
                       <span>{lang === 'zh' ? '类型' : 'Ext'}</span>
-                      <span style={{ textAlign: 'right' }}>{lang === 'zh' ? '大小' : 'Size'}</span>
+                      <span style={{ textAlign: 'right' }}>{logicalSizeLabel}</span>
                       <span style={{ textAlign: 'center' }}>{lang === 'zh' ? '定位' : 'Open'}</span>
                     </div>
                     <div className={styles.scrollBody}>
@@ -1285,6 +1332,12 @@ export const DiskAnalyzerView: React.FC<Props> = ({ lang, onSystemUpdated }) => 
                           </Badge>
                           <span style={{ textAlign: 'right', fontWeight: 600 }}>
                             {formatBytes(lf.size_bytes)}
+                            {allocation?.status === 'measured' && (
+                              <Text block size={100} style={{ color: tokens.colorNeutralForeground3 }}>
+                                {lang === 'zh' ? '占用' : 'Allocated'}{' '}
+                                {lf.allocated_bytes === undefined ? '—' : formatBytes(lf.allocated_bytes)}
+                              </Text>
+                            )}
                           </span>
                           <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 2 }}>
                             <Button
@@ -1330,8 +1383,8 @@ export const DiskAnalyzerView: React.FC<Props> = ({ lang, onSystemUpdated }) => 
                       <Text size={200} weight="semibold">
                         {dupReport
                           ? lang === 'zh'
-                            ? `扫描耗时 ${dupReport.elapsed_ms}ms · ${dupReport.total_groups} 组重复文件 · 可节省 ${formatBytes(dupReport.total_wasted_bytes)}`
-                            : `${dupReport.total_groups} duplicate groups · ${formatBytes(dupReport.total_wasted_bytes)} wasted (${dupReport.elapsed_ms}ms)`
+                            ? `扫描耗时 ${dupReport.elapsed_ms}ms · ${dupReport.total_groups} 组重复文件 · 候选副本逻辑大小 ${formatBytes(dupReport.total_wasted_bytes)}`
+                            : `${dupReport.total_groups} duplicate groups · ${formatBytes(dupReport.total_wasted_bytes)} candidate logical size (${dupReport.elapsed_ms}ms)`
                           : lang === 'zh'
                           ? '重复文件扫描'
                           : 'Duplicate file scan'}
@@ -1378,7 +1431,7 @@ export const DiskAnalyzerView: React.FC<Props> = ({ lang, onSystemUpdated }) => 
                                 </Badge>
                                 <Text size={200} weight="semibold">
                                   {g.files[0]?.name} · {formatBytes(g.size_bytes)} (
-                                  {lang === 'zh' ? '可省' : 'wasted'} {formatBytes(g.wasted_bytes)})
+                                  {lang === 'zh' ? '候选副本' : 'candidate copies'} {formatBytes(g.wasted_bytes)})
                                 </Text>
                               </div>
                               <Button
@@ -1579,7 +1632,7 @@ export const DiskAnalyzerView: React.FC<Props> = ({ lang, onSystemUpdated }) => 
                   <span>{lang === 'zh' ? '扩展名' : 'Ext'}</span>
                   <span>{lang === 'zh' ? '色' : 'C'}</span>
                   <span>{lang === 'zh' ? '描述' : 'Description'}</span>
-                  <span style={{ textAlign: 'right' }}>{lang === 'zh' ? '大小' : 'Size'}</span>
+                  <span style={{ textAlign: 'right' }}>{logicalSizeLabel}</span>
                   <span style={{ textAlign: 'right' }}>{lang === 'zh' ? '占比' : '%'}</span>
                   <span style={{ textAlign: 'right' }}>{lang === 'zh' ? '文件' : 'Files'}</span>
                 </div>
@@ -1749,7 +1802,7 @@ export const DiskAnalyzerView: React.FC<Props> = ({ lang, onSystemUpdated }) => 
                     {activeDisplayNode.path}
                   </Text>
                   <Badge size="small" appearance="tint" color="brand">
-                    {formatBytes(activeDisplayNode.size_bytes)}
+                    {logicalSizeLabel} · {formatBytes(activeDisplayNode.size_bytes)}
                   </Badge>
                   {activeDisplayNode.ext && extDescMap.get(activeDisplayNode.ext) && (
                     <Text size={100} style={{ color: tokens.colorNeutralForeground3 }}>

@@ -2,7 +2,7 @@ use anyhow::{anyhow, Result};
 use clap::{Parser, Subcommand};
 use dism_core::appx::{list_appx_packages, remove_appx_package, AppxCategory};
 use dism_core::cleaner::{execute_cleanup, scan_all, scan_all_with_summary, scan_rule_preview, FileStatus};
-use dism_core::diskmap::analyze_path;
+use dism_core::diskmap::{analyze_path_with_options, DiskAllocation};
 use dism_core::drivers::{delete_driver, export_drivers, list_drivers};
 use dism_core::evaluator::eval_condition;
 use dism_core::features::{list_optional_features, set_feature_enabled, FeatureCategory};
@@ -64,6 +64,9 @@ enum Commands {
         path: Option<PathBuf>,
         #[arg(long, default_value_t = 4)]
         depth: usize,
+        /// Also measure allocated file data on NTFS, counting hard links once
+        #[arg(long)]
+        allocated: bool,
         #[arg(long)]
         json: bool,
     },
@@ -444,14 +447,14 @@ fn main() -> Result<()> {
                 println!("Restored snapshot {} ({})", restored.id, restored.item_name.zh);
             }
         },
-        Commands::Diskmap { path, depth, json } => {
+        Commands::Diskmap { path, depth, allocated, json } => {
             let target = match path {
                 Some(p) => p,
                 None => PathBuf::from(
                     std::env::var("LOCALAPPDATA").unwrap_or_else(|_| r"C:\".to_string()),
                 ),
             };
-            let report = analyze_path(&target, depth)?;
+            let report = analyze_path_with_options(&target, depth, allocated, None)?;
             if json {
                 println!("{}", serde_json::to_string_pretty(&report)?);
             } else {
@@ -460,11 +463,33 @@ fn main() -> Result<()> {
                     report.root_path, report.elapsed_ms
                 );
                 println!(
-                    "Total: {} | Files: {} | Dirs: {}",
+                    "Logical size: {} | Files: {} | Dirs: {}",
                     fmt_bytes(report.total_bytes),
                     report.total_files,
                     report.total_dirs
                 );
+                if let Some(allocation) = &report.allocation {
+                    match allocation {
+                        DiskAllocation::Measured {
+                            allocated_bytes,
+                            hard_link_aliases,
+                            unmeasured_files,
+                            unreadable_entries,
+                        } => println!(
+                            "Measured NTFS file data: {} | Hard-link aliases excluded: {} | Unmeasured files: {} | Unreadable entries: {}",
+                            fmt_bytes(*allocated_bytes),
+                            hard_link_aliases,
+                            unmeasured_files,
+                            unreadable_entries
+                        ),
+                        DiskAllocation::UnsupportedFileSystem => {
+                            println!("Allocation measurement is supported on NTFS volumes.")
+                        }
+                        DiskAllocation::Unavailable => {
+                            println!("Could not query the target volume for allocation measurement.")
+                        }
+                    }
+                }
                 println!("\nTop Subdirectories / Entries:");
                 for ch in report.tree.children.iter().take(15) {
                     let pct = if report.total_bytes > 0 {
@@ -489,9 +514,12 @@ fn main() -> Result<()> {
                         ext.file_count
                     );
                 }
-                println!("\nTop Largest Files:");
+                println!("\nLargest Files by Logical Size:");
                 for lf in report.largest_files.iter().take(10) {
-                    println!("  {:>10}  {}", fmt_bytes(lf.size_bytes), lf.path);
+                    let allocation = lf.allocated_bytes
+                        .map(|bytes| format!(" (allocated {})", fmt_bytes(bytes)))
+                        .unwrap_or_default();
+                    println!("  {:>10}  {}{}", fmt_bytes(lf.size_bytes), lf.path, allocation);
                 }
             }
         }

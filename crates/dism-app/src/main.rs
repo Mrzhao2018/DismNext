@@ -6,7 +6,7 @@ use dism_core::cleaner::{
     scan_rule_preview, CleanupBatchScan, CleanupScanResult,
 };
 use dism_core::diskmap::{
-    analyze_path, analyze_path_with_progress, find_duplicate_files,
+    analyze_path_with_options, find_duplicate_files,
     find_duplicate_files_with_progress, find_orphaned_app_dirs, get_presets, recycle_path,
 };
 use dism_core::drivers::{default_backup_dir, delete_driver, export_drivers, list_drivers};
@@ -135,12 +135,19 @@ struct RestoreReq {
 struct DiskAnalyzeReq {
     path: String,
     max_depth: Option<usize>,
+    #[serde(default)]
+    measure_allocation: bool,
 }
 
 #[derive(Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum ScanRequest {
-    DiskAnalysis { path: String, max_depth: Option<usize> },
+    DiskAnalysis {
+        path: String,
+        max_depth: Option<usize>,
+        #[serde(default)]
+        measure_allocation: bool,
+    },
     DuplicateFiles { path: String, min_size_bytes: Option<u64> },
     CleanupRules,
 }
@@ -505,8 +512,13 @@ fn dispatch_api(
             let payload: ScanRequest = read_json_body(req)?;
             let app = Arc::clone(state);
             let id = state.scan_jobs.start(move |progress| match payload {
-                ScanRequest::DiskAnalysis { path, max_depth } => {
-                    let report = analyze_path_with_progress(Path::new(path.trim()), max_depth.unwrap_or(4), progress)?;
+                ScanRequest::DiskAnalysis { path, max_depth, measure_allocation } => {
+                    let report = analyze_path_with_options(
+                        Path::new(path.trim()),
+                        max_depth.unwrap_or(4),
+                        measure_allocation,
+                        Some(progress),
+                    )?;
                     Ok(serde_json::to_value(report)?)
                 }
                 ScanRequest::DuplicateFiles { path, min_size_bytes } => {
@@ -708,9 +720,11 @@ fn dispatch_api(
         }
         (&Method::Post, "/api/diskmap/analyze") => {
             let payload: DiskAnalyzeReq = read_json_body(req)?;
-            let report = state.scan_jobs.run_inline(|| analyze_path(
+            let report = state.scan_jobs.run_inline(|| analyze_path_with_options(
                 Path::new(payload.path.trim()),
                 payload.max_depth.unwrap_or(4),
+                payload.measure_allocation,
+                None,
             ))?;
             Ok(serde_json::to_value(report)?)
         }
