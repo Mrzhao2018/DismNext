@@ -1,4 +1,5 @@
 use crate::diskmap::{invalidate_orphans_cache, is_protected_recycle_target, measure_dir_stats};
+use crate::path_recycle::{recycle_paths, PathSnapshot};
 use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -17,12 +18,21 @@ const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
 const UNINSTALL_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Uninstall";
 
-mod leftover_recycle;
-use leftover_recycle::FolderSnapshot;
-pub use leftover_recycle::{
-    recycle_app_leftovers, LeftoverRecycleItem, LeftoverRecycleOutcome, LeftoverRecycleTarget,
-    LeftoverReview, LeftoverSkipReason,
+pub use crate::path_recycle::{
+    RecycleItem as LeftoverRecycleItem, RecycleOutcome as LeftoverRecycleOutcome,
+    RecycleSkipReason as LeftoverSkipReason, RecycleTarget as LeftoverRecycleTarget,
 };
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum LeftoverReview {
+    Ready { stamp: String },
+    Blocked { reason: LeftoverSkipReason },
+}
+
+pub fn recycle_app_leftovers(targets: &[LeftoverRecycleTarget]) -> Vec<LeftoverRecycleItem> {
+    recycle_paths(targets, Some(true))
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Win32AppInfo {
@@ -303,7 +313,7 @@ fn scan_leftovers(
             return;
         }
         let (size_bytes, file_count, review) = if reviewable {
-            match FolderSnapshot::capture(path) {
+            match PathSnapshot::capture(path, Some(true)) {
                 Ok(snapshot) => (
                     snapshot.size_bytes,
                     snapshot.file_count,
@@ -333,7 +343,7 @@ fn scan_leftovers(
     let clean_install = install_location.trim().trim_matches('"');
     if !clean_install.is_empty() {
         let p = PathBuf::from(clean_install);
-        if p.is_dir() && !is_protected_recycle_target(&p) && !is_broad_program_root(&p) {
+        if p.is_dir() && !is_protected_recycle_target(&p) {
             record(&p, "install_dir", LeftoverMatch::RegisteredInstallLocation);
         }
     }
@@ -406,35 +416,6 @@ fn scan_leftovers(
 
     results.sort_by(|a, b| b.size_bytes.cmp(&a.size_bytes));
     results
-}
-
-fn is_broad_program_root(p: &Path) -> bool {
-    let norm = normalize_lower_path(p);
-    let sys_root = std::env::var("SystemRoot")
-        .unwrap_or_else(|_| r"C:\Windows".to_string())
-        .to_ascii_lowercase();
-    let users = format!(
-        r"{}\users",
-        std::env::var("SystemDrive")
-            .unwrap_or_else(|_| "C:".to_string())
-            .to_ascii_lowercase()
-    );
-    let blocked = [
-        sys_root,
-        users,
-        std::env::var("ProgramFiles").unwrap_or_default().to_ascii_lowercase(),
-        std::env::var("ProgramFiles(x86)").unwrap_or_default().to_ascii_lowercase(),
-        std::env::var("ProgramW6432").unwrap_or_default().to_ascii_lowercase(),
-        format!(
-            r"{}\Common Files",
-            std::env::var("ProgramFiles").unwrap_or_default()
-        )
-        .to_ascii_lowercase(),
-    ];
-    blocked
-        .iter()
-        .filter(|b| !b.is_empty())
-        .any(|b| b.trim_end_matches('\\') == norm)
 }
 
 fn is_reserved_app_folder(dir_lower: &str) -> bool {

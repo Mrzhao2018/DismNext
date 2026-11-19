@@ -7,7 +7,7 @@ use dism_core::cleaner::{
 };
 use dism_core::diskmap::{
     analyze_path_with_options, find_duplicate_files,
-    find_duplicate_files_with_progress, find_orphaned_app_dirs, get_presets, recycle_path,
+    find_duplicate_files_with_progress, find_orphaned_app_dirs, get_presets,
 };
 use dism_core::drivers::{default_backup_dir, delete_driver, export_drivers, list_drivers};
 use dism_core::duplicate_recycle::{recycle_duplicates, DuplicateRecycleTarget};
@@ -19,6 +19,7 @@ use dism_core::optimizer::{
     apply_optimization, apply_optimization_batch, evaluate_all_groups, export_optimization_profile,
     get_optimization_presets, ApplyValue, OptimizationProfileEntry, ScopeName,
 };
+use dism_core::path_recycle::{recycle_reviewed_path, review_recycle_path, RecycleTarget};
 use dism_core::report::generate_health_report;
 use dism_core::rescue::{create_restore_point, list_restore_points, run_rescue_action};
 use dism_core::startup::{
@@ -301,6 +302,13 @@ struct DuplicatesReq {
 struct RecycleDuplicatesReq {
     keeper: DuplicateRecycleTarget,
     candidates: Vec<DuplicateRecycleTarget>,
+}
+
+#[derive(Deserialize)]
+struct RecycleReviewReq {
+    path: PathBuf,
+    is_dir: bool,
+    scan_started_at: String,
 }
 
 #[derive(Deserialize)]
@@ -823,14 +831,21 @@ fn dispatch_api(
             Ok(serde_json::json!({ "ok": true }))
         }
         (&Method::Post, "/api/diskmap/recycle") => {
-            let payload: RevealReq = read_json_body(req)?;
+            let payload: RecycleTarget = read_json_body(req)?;
             let _operation = state.begin_cleanup_mutation();
-            let freed = recycle_path(Path::new(payload.path.trim()))?;
-            let updated_sys = SystemInfo::collect();
+            let item = state.scan_jobs.run_inline(|| Ok(recycle_reviewed_path(&payload)))?;
             Ok(serde_json::json!({
-                "freed_bytes": freed,
-                "system": updated_sys,
+                "item": item,
+                "system": SystemInfo::collect(),
             }))
+        }
+        (&Method::Post, "/api/diskmap/recycle/review") => {
+            let payload: RecycleReviewReq = read_json_body(req)?;
+            let cutoff = payload.scan_started_at.parse()?;
+            let review = state.scan_jobs.run_inline(|| {
+                Ok(review_recycle_path(&payload.path, payload.is_dir, cutoff))
+            })?;
+            Ok(serde_json::to_value(review)?)
         }
         (&Method::Post, "/api/diskmap/recycle-duplicates") => {
             let payload: RecycleDuplicatesReq = read_json_body(req)?;

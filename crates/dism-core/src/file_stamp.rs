@@ -57,18 +57,7 @@ impl TargetStamp {
         let contents = if directory {
             None
         } else {
-            let mut info: FILE_BASIC_INFO = unsafe { std::mem::zeroed() };
-            let ok = unsafe {
-                GetFileInformationByHandleEx(
-                    file.as_raw_handle(),
-                    FileBasicInfo,
-                    (&mut info as *mut FILE_BASIC_INFO).cast(),
-                    std::mem::size_of_val(&info) as u32,
-                )
-            };
-            if ok == 0 {
-                return Err(io::Error::last_os_error());
-            }
+            let info = read_basic_info(file)?;
             Some(FileRevision {
                 size: metadata.len(),
                 written: info.LastWriteTime,
@@ -84,5 +73,32 @@ impl TargetStamp {
 
     pub(crate) fn file_size(&self) -> Option<u64> {
         self.contents.as_ref().map(|revision| revision.size)
+    }
+
+    pub(crate) fn latest_file_change(&self) -> i64 {
+        self.contents.as_ref().map_or(0, |revision| {
+            if revision.changed > 0 {
+                revision.changed
+            } else {
+                revision.written.max(self.created as i64)
+            }
+        })
+    }
+}
+
+pub(crate) fn read_basic_info(file: &File) -> io::Result<FILE_BASIC_INFO> {
+    let mut info: FILE_BASIC_INFO = unsafe { std::mem::zeroed() };
+    let ok = unsafe {
+        GetFileInformationByHandleEx(
+            file.as_raw_handle(),
+            FileBasicInfo,
+            (&mut info as *mut FILE_BASIC_INFO).cast(),
+            std::mem::size_of_val(&info) as u32,
+        )
+    };
+    if ok == 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(info)
     }
 }

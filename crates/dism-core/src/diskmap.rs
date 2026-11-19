@@ -2,6 +2,7 @@ use crate::catalog::LocalizedText;
 use crate::disk_allocation::AllocationScan;
 pub use crate::disk_allocation::DiskAllocation;
 use crate::duplicate_recycle::FileState;
+use crate::path_recycle::{recycle_path_immediately, scan_timestamp};
 use crate::scan_progress::{ScanPhase, ScanProgress};
 use crate::sysinfo::SystemInfo;
 use anyhow::{anyhow, Result};
@@ -10,10 +11,8 @@ use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet};
-use std::ffi::OsStr;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
-use std::os::windows::ffi::OsStrExt;
 use std::os::windows::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::{OnceLock, RwLock};
@@ -23,10 +22,6 @@ use winreg::enums::{
     HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ, KEY_WOW64_32KEY, KEY_WOW64_64KEY,
 };
 use winreg::RegKey;
-use windows_sys::Win32::UI::Shell::{
-    SHFileOperationW, FOF_ALLOWUNDO, FOF_NOCONFIRMATION, FOF_NOERRORUI, FOF_SILENT, FO_DELETE,
-    SHFILEOPSTRUCTW,
-};
 
 const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
 const MAX_CHILDREN_PER_NODE: usize = 60;
@@ -82,6 +77,8 @@ pub struct DiskPreset {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DiskAnalysisReport {
     pub root_path: String,
+    #[serde(default)]
+    pub scan_started_at: String,
     pub elapsed_ms: u64,
     pub total_bytes: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -194,6 +191,7 @@ pub fn analyze_path_with_options(
         return Err(anyhow!("Path does not exist: {}", root.display()));
     }
     let started = Instant::now();
+    let scan_started_at = scan_timestamp();
     let depth_limit = max_depth.clamp(1, 6);
 
     let allocation = measure_allocation.then(|| AllocationScan::for_path(root));
@@ -249,6 +247,7 @@ pub fn analyze_path_with_options(
     check_scan(progress)?;
     Ok(DiskAnalysisReport {
         root_path: root.to_string_lossy().into_owned(),
+        scan_started_at,
         elapsed_ms: started.elapsed().as_millis() as u64,
         total_bytes,
         allocation: allocation.map(|result| match result {
@@ -632,7 +631,7 @@ fn into_disk_tree(raw: RawNode) -> DiskTreeNode {
 
 /// Checks whether `target` is a protected drive root or OS core folder that must never be recycled as a whole.
 pub fn is_protected_recycle_target(target: &Path) -> bool {
-    let norm = normalize_win_path(target).to_ascii_lowercase();
+    let norm = normalize_win_path(target).replace('/', "\\").to_ascii_lowercase();
     let trimmed = norm.trim_end_matches('\\');
     if trimmed.len() <= 2 && trimmed.ends_with(':') {
         return true;
@@ -640,12 +639,16 @@ pub fn is_protected_recycle_target(target: &Path) -> bool {
     let sys_root = std::env::var("SystemRoot")
         .unwrap_or_else(|_| r"C:\Windows".to_string())
         .to_ascii_lowercase();
+    let sys_drive = std::env::var("SystemDrive").unwrap_or_else(|_| "C:".to_string());
+    let program_files = std::env::var("ProgramFiles").unwrap_or_default();
     let protected_env_dirs = [
         sys_root.clone(),
         format!(r"{}\system32", sys_root),
         format!(r"{}\syswow64", sys_root),
         format!(r"{}\winsxs", sys_root),
-        std::env::var("ProgramFiles").unwrap_or_default().to_ascii_lowercase(),
+        format!(r"{sys_drive}\Users").to_ascii_lowercase(),
+        format!(r"{program_files}\Common Files").to_ascii_lowercase(),
+        program_files.to_ascii_lowercase(),
         std::env::var("ProgramFiles(x86)").unwrap_or_default().to_ascii_lowercase(),
         std::env::var("ProgramW6432").unwrap_or_default().to_ascii_lowercase(),
         std::env::var("ProgramData").unwrap_or_default().to_ascii_lowercase(),
@@ -659,41 +662,9 @@ pub fn is_protected_recycle_target(target: &Path) -> bool {
         .any(|p| p.trim_end_matches('\\') == trimmed)
 }
 
-/// Safely moves a file or directory into the Windows Recycle Bin (`FOF_ALLOWUNDO`) and returns bytes freed.
+/// Verifies and moves a file or directory into the Windows Recycle Bin, returning its logical size.
 pub fn recycle_path(target: &Path) -> Result<u64> {
-    if !target.exists() {
-        return Err(anyhow!("Path does not exist: {}", target.display()));
-    }
-    if is_protected_recycle_target(target) {
-        return Err(anyhow!(
-            "Refusing to recycle protected system/root directory: {}",
-            target.display()
-        ));
-    }
-
-    let size_bytes = measure_path_bytes(target);
-    let clean_str = normalize_win_path(target);
-    let mut wide: Vec<u16> = OsStr::new(&clean_str).encode_wide().collect();
-    wide.push(0);
-    wide.push(0); // SHFileOperationW requires double-null terminated pFrom
-
-    let mut op: SHFILEOPSTRUCTW = unsafe { std::mem::zeroed() };
-    op.wFunc = FO_DELETE;
-    op.pFrom = wide.as_ptr();
-    op.fFlags = (FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_NOERRORUI | FOF_SILENT) as u16;
-
-    let rc = unsafe { SHFileOperationW(&mut op) };
-    if rc != 0 || op.fAnyOperationsAborted != 0 {
-        return Err(anyhow!(
-            "Failed to move '{}' to Recycle Bin (code {}, aborted={})",
-            clean_str,
-            rc,
-            op.fAnyOperationsAborted
-        ));
-    }
-
-    invalidate_orphans_cache();
-    Ok(size_bytes)
+    recycle_path_immediately(target)
 }
 
 fn normalize_win_path(path: &Path) -> String {
@@ -706,37 +677,6 @@ fn normalize_win_path(path: &Path) -> String {
     };
     let s = pb.to_string_lossy().into_owned();
     s.strip_prefix(r"\\?\").unwrap_or(&s).to_string()
-}
-
-fn measure_path_bytes(path: &Path) -> u64 {
-    let Ok(meta) = std::fs::symlink_metadata(path) else {
-        return 0;
-    };
-    if (meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT) != 0 {
-        return 0;
-    }
-    if meta.is_file() {
-        return meta.len();
-    }
-    let Ok(rd) = std::fs::read_dir(path) else {
-        return 0;
-    };
-    let mut total = 0u64;
-    let mut sub_dirs = Vec::new();
-    for entry in rd.flatten() {
-        let Ok(m) = entry.metadata() else {
-            continue;
-        };
-        if (m.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT) != 0 {
-            continue;
-        }
-        if m.is_file() {
-            total = total.saturating_add(m.len());
-        } else if m.is_dir() {
-            sub_dirs.push(entry.path());
-        }
-    }
-    total.saturating_add(sub_dirs.par_iter().map(|d| measure_path_bytes(d)).sum::<u64>())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -774,6 +714,8 @@ pub struct OrphanDirEntry {
     pub size_bytes: u64,
     pub file_count: usize,
     pub modified_date: String,
+    #[serde(default)]
+    pub scan_started_at: String,
 }
 
 /// Three-stage parallel duplicate file finder (`size -> 4KB head/tail sample -> 128-bit full hash`).
@@ -1021,6 +963,7 @@ pub fn find_orphaned_app_dirs() -> Vec<OrphanDirEntry> {
 }
 
 fn compute_orphaned_app_dirs() -> Vec<OrphanDirEntry> {
+    let scan_started_at = scan_timestamp();
     let (installed_tokens, installed_dirs) = collect_installed_app_tokens();
     let mut safelist: HashSet<&'static str> = [
         "microsoft",
@@ -1148,6 +1091,7 @@ fn compute_orphaned_app_dirs() -> Vec<OrphanDirEntry> {
                 size_bytes,
                 file_count,
                 modified_date: modified_date.to_string(),
+                scan_started_at: scan_started_at.clone(),
             })
         })
         .collect();

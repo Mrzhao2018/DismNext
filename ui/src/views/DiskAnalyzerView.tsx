@@ -42,6 +42,8 @@ import {
   DuplicateScanReport,
   Lang,
   OrphanDirEntry,
+  PathRecyclePreview,
+  PathRecycleResult,
   SystemInfo,
   api,
   formatBytes,
@@ -433,6 +435,16 @@ function findNodeByPath(node: DiskTreeNode, targetPath: string): DiskTreeNode | 
   return null;
 }
 
+function recyclePathKey(path: string) {
+  return path.replace(/\//g, '\\').replace(/\\+$/, '').toLowerCase();
+}
+
+function sameOrBelow(path: string, parent: string) {
+  const key = recyclePathKey(path);
+  const parentKey = recyclePathKey(parent);
+  return key === parentKey || key.startsWith(`${parentKey}\\`);
+}
+
 function removeNodeFromTree(
   node: DiskTreeNode,
   targetPath: string
@@ -443,7 +455,7 @@ function removeNodeFromTree(
   const nextChildren: DiskTreeNode[] = [];
 
   for (const ch of node.children) {
-    if (ch.path === targetPath && !ch.is_aggregate) {
+    if (!ch.is_aggregate && recyclePathKey(ch.path) === recyclePathKey(targetPath)) {
       removedBytes += ch.size_bytes;
       removedFiles += ch.file_count;
       removedDirs += ch.dir_count + (ch.is_dir ? 1 : 0);
@@ -478,11 +490,12 @@ function removeNodeFromTree(
 
 const skipReasons = {
   keeper_unavailable: { zh: '保留文件已变化或不可用', en: 'The file to keep changed or is unavailable' },
-  changed: { zh: '文件自扫描后已变化', en: 'File changed since the scan' },
-  missing: { zh: '文件已不存在', en: 'File is missing' },
+  changed: { zh: '目标自扫描后已变化，请重新扫描。', en: 'The target changed since the scan. Scan again.' },
+  missing: { zh: '目标已不在原路径。', en: 'The target is no longer at the original path.' },
   same_file: { zh: '与保留文件或已处理文件指向同一文件', en: 'Refers to the file being kept or already processed' },
-  protected: { zh: '目标受保护或不是普通文件', en: 'Protected target or non-regular file' },
+  protected: { zh: '目标受保护或路径包含重定向。', en: 'The target is protected or the path contains a redirect.' },
   different_content: { zh: '与保留文件内容不同', en: 'Content differs from the file being kept' },
+  unverifiable: { zh: '无法完整核对目标。', en: 'The target could not be completely verified.' },
 };
 
 export const DiskAnalyzerView: React.FC<Props> = ({ lang, onSystemUpdated }) => {
@@ -505,11 +518,13 @@ export const DiskAnalyzerView: React.FC<Props> = ({ lang, onSystemUpdated }) => 
   const [hoveredLeaf, setHoveredLeaf] = useState<PaintedLeaf | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [recycleNotice, setRecycleNotice] = useState<string | null>(null);
-  const [recycleResults, setRecycleResults] = useState<DuplicateRecycleResult[]>([]);
+  const [recycleResults, setRecycleResults] = useState<(DuplicateRecycleResult | PathRecycleResult)[]>([]);
   const [recycleConfirmTarget, setRecycleConfirmTarget] = useState<{
     paths: string[];
     size_bytes: number;
     label: string;
+    review?: PathRecyclePreview;
+    reviewError?: string;
     duplicateGroup?: {
       hash: string;
       keeper: DuplicateRecycleTarget;
@@ -887,33 +902,47 @@ export const DiskAnalyzerView: React.FC<Props> = ({ lang, onSystemUpdated }) => 
 
   const activeDisplayNode = hoveredLeaf?.node || selectedNode;
 
+  const prepareRecycle = async (path: string, isDir: boolean, scanStartedAt: string) => {
+    if (scan.active || recycling) return;
+    const request = { paths: [path], label: path, size_bytes: 0 };
+    setRecycleConfirmTarget(request);
+    try {
+      const review = await api.reviewRecyclePath(path, isDir, scanStartedAt);
+      setRecycleConfirmTarget((current) => current === request
+        ? { ...request, review, size_bytes: review.status === 'ready' ? review.size_bytes : 0 }
+        : current);
+    } catch (error) {
+      setRecycleConfirmTarget((current) => current === request
+        ? { ...request, reviewError: String(error) }
+        : current);
+    }
+  };
+
   const confirmRecycle = async () => {
     if (!recycleConfirmTarget || !report || scan.active || recycling) return;
-    const { paths, duplicateGroup } = recycleConfirmTarget;
+    const { paths, duplicateGroup, review } = recycleConfirmTarget;
+    if (!duplicateGroup && review?.status !== 'ready') return;
     setRecycling(true);
     setErrorMsg(null);
     setRecycleNotice(null);
     setRecycleResults([]);
     try {
-      let items: DuplicateRecycleResult[];
+      let items: (DuplicateRecycleResult | PathRecycleResult)[];
       if (duplicateGroup) {
         const response = await api.recycleDuplicates(duplicateGroup.keeper, duplicateGroup.candidates);
         items = response.items;
         onSystemUpdated?.(response.system);
+      } else if (review?.status === 'ready') {
+        const response = await api.recyclePath(paths[0], review.stamp);
+        items = [response.item];
+        onSystemUpdated?.(response.system);
       } else {
-        items = [];
-        for (const path of paths) {
-          try {
-            const response = await api.recyclePath(path);
-            items.push({ path, status: 'recycled', size_bytes: response.freed_bytes });
-            onSystemUpdated?.(response.system);
-          } catch (error) {
-            items.push({ path, status: 'failed', error: String(error) });
-          }
-        }
+        return;
       }
       const recycled = items.filter((item) => item.status === 'recycled');
       const targets = recycled.map((item) => item.path);
+      const rootRemoved = targets.some((target) => sameOrBelow(report.root_path, target));
+      const withinReport = recycled.filter(({ path }) => sameOrBelow(path, report.root_path));
       let movedSize = 0;
       let nextTree = report.tree;
       let nextTotalBytes = report.total_bytes;
@@ -921,8 +950,11 @@ export const DiskAnalyzerView: React.FC<Props> = ({ lang, onSystemUpdated }) => 
       let nextTotalDirs = report.total_dirs;
       let nextLargest = report.largest_files;
 
-      for (const { path: target, size_bytes } of recycled) {
-        movedSize += size_bytes;
+      for (const item of recycled) {
+        movedSize += item.size_bytes;
+      }
+      for (const item of withinReport) {
+        const { path: target, size_bytes } = item;
         const { updated, removedBytes, removedFiles, removedDirs } = removeNodeFromTree(
           nextTree,
           target
@@ -930,33 +962,34 @@ export const DiskAnalyzerView: React.FC<Props> = ({ lang, onSystemUpdated }) => 
         nextTree = updated;
         const deltaBytes = removedBytes > 0 ? removedBytes : size_bytes;
         nextTotalBytes = Math.max(0, nextTotalBytes - deltaBytes);
-        nextTotalFiles = Math.max(0, nextTotalFiles - (duplicateGroup ? 1 : removedFiles));
-        nextTotalDirs = Math.max(0, nextTotalDirs - removedDirs);
-        const prefix = `${target.toLowerCase()}\\`;
-        nextLargest = nextLargest.filter(
-          (f) => f.path.toLowerCase() !== target.toLowerCase() && !f.path.toLowerCase().startsWith(prefix)
-        );
+        const fileCount = 'file_count' in item ? item.file_count : 1;
+        const dirCount = 'dir_count' in item ? item.dir_count : 0;
+        nextTotalFiles = Math.max(0, nextTotalFiles - (removedFiles || fileCount));
+        nextTotalDirs = Math.max(0, nextTotalDirs - (removedDirs || dirCount));
+        nextLargest = nextLargest.filter((file) => !sameOrBelow(file.path, target));
       }
 
-      setReport({
-        ...report,
-        allocation: targets.length > 0 ? undefined : report.allocation,
-        total_bytes: nextTotalBytes,
-        total_files: nextTotalFiles,
-        total_dirs: nextTotalDirs,
-        tree: { ...nextTree, file_count: nextTotalFiles, size_bytes: nextTotalBytes },
-        largest_files: nextLargest,
-      });
-      if (targets.length > 0 && report.allocation?.status === 'measured') setAllocationStale(true);
+      if (rootRemoved || withinReport.length > 0) {
+        setReport(rootRemoved ? null : {
+          ...report,
+          allocation: undefined,
+          total_bytes: nextTotalBytes,
+          total_files: nextTotalFiles,
+          total_dirs: nextTotalDirs,
+          tree: { ...nextTree, file_count: nextTotalFiles, dir_count: nextTotalDirs, size_bytes: nextTotalBytes },
+          largest_files: nextLargest,
+        });
+        if (report.allocation?.status === 'measured') setAllocationStale(true);
+      }
 
-      const recycledLower = new Set(targets.map((t) => t.toLowerCase()));
-      const staleDuplicates = new Set(recycledLower);
+      const wasRecycled = (path: string) => targets.some((target) => sameOrBelow(path, target));
+      const staleDuplicates = new Set<string>();
       let keeperUnavailable = false;
       for (const item of items) {
-        if (item.status !== 'skipped') continue;
+        if (!duplicateGroup || item.status !== 'skipped') continue;
         if (item.reason === 'keeper_unavailable') keeperUnavailable = true;
-        if (item.reason !== 'protected' && item.reason !== 'keeper_unavailable') {
-          staleDuplicates.add(item.path.toLowerCase());
+        if (item.reason !== 'protected' && item.reason !== 'keeper_unavailable' && item.reason !== 'unverifiable') {
+          staleDuplicates.add(recyclePathKey(item.path));
         }
       }
       setDupReport((prev) => {
@@ -964,7 +997,7 @@ export const DiskAnalyzerView: React.FC<Props> = ({ lang, onSystemUpdated }) => 
         const nextGroups = prev.groups
           .filter((group) => !keeperUnavailable || group.hash_hex !== duplicateGroup?.hash)
           .map((g) => {
-            const keptFiles = g.files.filter((f) => !staleDuplicates.has(f.path.toLowerCase()));
+            const keptFiles = g.files.filter((file) => !staleDuplicates.has(recyclePathKey(file.path)) && !wasRecycled(file.path));
             return {
               ...g,
               files: keptFiles,
@@ -983,13 +1016,11 @@ export const DiskAnalyzerView: React.FC<Props> = ({ lang, onSystemUpdated }) => 
         };
       });
       setOrphanDirs((prev) =>
-        prev ? prev.filter((o) => !recycledLower.has(o.path.toLowerCase())) : prev
+        prev ? prev.filter((entry) => !wasRecycled(entry.path)) : prev
       );
 
-      if (targets.length > 0) setSelectedPath(nextTree.path);
-      setZoomStack((prev) =>
-        prev.filter((p) => !targets.some((t) => p.toLowerCase() === t.toLowerCase() || p.toLowerCase().startsWith(`${t.toLowerCase()}\\`)))
-      );
+      if (rootRemoved || withinReport.length > 0) setSelectedPath(rootRemoved ? null : nextTree.path);
+      setZoomStack((prev) => prev.filter((path) => !wasRecycled(path)));
       const skipped = items.filter((item) => item.status === 'skipped').length;
       const failed = items.length - targets.length - skipped;
       setRecycleNotice(lang === 'zh'
@@ -1357,11 +1388,7 @@ export const DiskAnalyzerView: React.FC<Props> = ({ lang, onSystemUpdated }) => 
                               title={lang === 'zh' ? '移入回收站' : 'Move to Recycle Bin'}
                               onClick={(e) => {
                                 e.stopPropagation();
-                                setRecycleConfirmTarget({
-                                  paths: [lf.path],
-                                  size_bytes: lf.size_bytes,
-                                  label: lf.path,
-                                });
+                                void prepareRecycle(lf.path, false, report.scan_started_at);
                               }}
                             />
                           </div>
@@ -1580,13 +1607,7 @@ export const DiskAnalyzerView: React.FC<Props> = ({ lang, onSystemUpdated }) => 
                                 size="small"
                                 appearance="outline"
                                 icon={<Delete16Regular />}
-                                onClick={() =>
-                                  setRecycleConfirmTarget({
-                                    paths: [od.path],
-                                    size_bytes: od.size_bytes,
-                                    label: od.path,
-                                  })
-                                }
+                                onClick={() => void prepareRecycle(od.path, true, od.scan_started_at)}
                               >
                                 {lang === 'zh' ? '回收站' : 'Recycle'}
                               </Button>
@@ -1850,13 +1871,7 @@ export const DiskAnalyzerView: React.FC<Props> = ({ lang, onSystemUpdated }) => 
                   appearance="primary"
                   icon={<Delete16Regular />}
                   disabled={selectedNode.path === report.tree.path}
-                  onClick={() =>
-                    setRecycleConfirmTarget({
-                      paths: [selectedNode.path],
-                      size_bytes: selectedNode.size_bytes,
-                      label: selectedNode.path,
-                    })
-                  }
+                  onClick={() => void prepareRecycle(selectedNode.path, selectedNode.is_dir, report.scan_started_at)}
                 >
                   {lang === 'zh' ? '移入回收站' : 'Move to Recycle Bin'}
                 </Button>
@@ -1882,9 +1897,9 @@ export const DiskAnalyzerView: React.FC<Props> = ({ lang, onSystemUpdated }) => 
                 {recycleConfirmTarget?.duplicateGroup
                   ? (lang === 'zh' ? '确认后逐项核对内容，仍与保留文件相同的副本才会移入回收站。'
                     : 'Each copy will be compared with the file to keep before it is moved to the Recycle Bin.')
-                  : lang === 'zh'
-                  ? '以下项目将被安全移入 Windows 回收站（可随时从回收站恢复）：'
-                  : 'The following item will be safely moved to the Windows Recycle Bin:'}
+                  : (lang === 'zh'
+                    ? '确认后会再次核对目标。内容变化、路径重定向或无法完整读取时会跳过。'
+                    : 'The target will be checked again. Changed, redirected, or unreadable items will be skipped.')}
               </Text>
               {recycleConfirmTarget && (
                 <div style={{ marginTop: 8, display: 'flex', flexDirection: 'column', gap: 4 }}>
@@ -1896,7 +1911,9 @@ export const DiskAnalyzerView: React.FC<Props> = ({ lang, onSystemUpdated }) => 
                       fontWeight: 600,
                     }}
                   >
-                    {recycleConfirmTarget.label} ({formatBytes(recycleConfirmTarget.size_bytes)})
+                    {recycleConfirmTarget.label}
+                    {(recycleConfirmTarget.duplicateGroup || recycleConfirmTarget.review?.status === 'ready')
+                      && ` (${formatBytes(recycleConfirmTarget.size_bytes)})`}
                   </Text>
                   {recycleConfirmTarget.paths.length > 1 &&
                     recycleConfirmTarget.paths.slice(0, 5).map((p) => (
@@ -1911,6 +1928,25 @@ export const DiskAnalyzerView: React.FC<Props> = ({ lang, onSystemUpdated }) => 
                     ))}
                 </div>
               )}
+              {recycleConfirmTarget && !recycleConfirmTarget.duplicateGroup && (
+                <div style={{ marginTop: 8 }}>
+                  {recycleConfirmTarget.reviewError ? (
+                    <MessageBar intent="error"><MessageBarBody>{recycleConfirmTarget.reviewError}</MessageBarBody></MessageBar>
+                  ) : recycleConfirmTarget.review?.status === 'blocked' ? (
+                    <MessageBar intent="warning">
+                      <MessageBarBody>{skipReasons[recycleConfirmTarget.review.reason][lang]}</MessageBarBody>
+                    </MessageBar>
+                  ) : recycleConfirmTarget.review?.status === 'ready' ? (
+                    <Text size={200}>
+                      {lang === 'zh'
+                        ? `${recycleConfirmTarget.review.file_count} 个文件 · ${recycleConfirmTarget.review.dir_count} 个目录`
+                        : `${recycleConfirmTarget.review.file_count} files · ${recycleConfirmTarget.review.dir_count} folders`}
+                    </Text>
+                  ) : (
+                    <Spinner size="small" label={lang === 'zh' ? '正在核对目标…' : 'Reviewing target…'} />
+                  )}
+                </div>
+              )}
             </DialogContent>
             <DialogActions>
               <Button
@@ -1920,7 +1956,12 @@ export const DiskAnalyzerView: React.FC<Props> = ({ lang, onSystemUpdated }) => 
               >
                 {lang === 'zh' ? '取消' : 'Cancel'}
               </Button>
-              <Button appearance="primary" disabled={recycling || Boolean(scan.active)} onClick={confirmRecycle}>
+              <Button
+                appearance="primary"
+                disabled={recycling || Boolean(scan.active)
+                  || (!recycleConfirmTarget?.duplicateGroup && recycleConfirmTarget?.review?.status !== 'ready')}
+                onClick={confirmRecycle}
+              >
                 {recycling
                   ? lang === 'zh'
                     ? '移动中...'

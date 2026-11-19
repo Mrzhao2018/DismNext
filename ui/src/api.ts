@@ -274,6 +274,7 @@ export interface DiskPreset {
 
 export interface DiskAnalysisReport {
   root_path: string;
+  scan_started_at: string;
   elapsed_ms: number;
   total_bytes: number;
   allocation?: DiskAllocation;
@@ -516,6 +517,18 @@ export type DuplicateRecycleResult = { path: string } & (
   | { status: 'failed'; error: string }
 );
 
+export type PathRecycleSkipReason = 'changed' | 'missing' | 'protected' | 'unverifiable';
+
+export type PathRecyclePreview =
+  | { status: 'ready'; stamp: string; size_bytes: number; file_count: number; dir_count: number }
+  | { status: 'blocked'; reason: PathRecycleSkipReason };
+
+export type PathRecycleResult = { path: string } & (
+  | { status: 'recycled'; size_bytes: number; file_count: number; dir_count: number }
+  | { status: 'skipped'; reason: PathRecycleSkipReason }
+  | { status: 'failed'; error: string }
+);
+
 export interface DuplicateGroup {
   hash_hex: string;
   size_bytes: number;
@@ -556,6 +569,7 @@ export interface OrphanDirEntry {
   size_bytes: number;
   file_count: number;
   modified_date: string;
+  scan_started_at: string;
 }
 
 export interface Win32AppInfo {
@@ -706,10 +720,15 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ path }),
     }),
-  recyclePath: (path: string) =>
-    reqJson<{ freed_bytes: number; system: SystemInfo }>('/api/diskmap/recycle', {
+  reviewRecyclePath: (path: string, is_dir: boolean, scan_started_at: string) =>
+    reqJson<PathRecyclePreview>('/api/diskmap/recycle/review', {
       method: 'POST',
-      body: JSON.stringify({ path }),
+      body: JSON.stringify({ path, is_dir, scan_started_at }),
+    }),
+  recyclePath: (path: string, stamp: string) =>
+    reqJson<{ item: PathRecycleResult; system: SystemInfo }>('/api/diskmap/recycle', {
+      method: 'POST',
+      body: JSON.stringify({ path, stamp }),
     }),
   recycleDuplicates: (keeper: DuplicateRecycleTarget, candidates: DuplicateRecycleTarget[]) =>
     reqJson<{ items: DuplicateRecycleResult[]; system: SystemInfo }>('/api/diskmap/recycle-duplicates', {

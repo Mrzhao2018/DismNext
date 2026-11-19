@@ -12,6 +12,7 @@ pub mod lockcheck;
 pub mod mcp;
 pub mod offline_wim;
 pub mod optimizer;
+pub mod path_recycle;
 pub mod report;
 pub mod rescue;
 pub mod scan_progress;
