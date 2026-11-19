@@ -49,8 +49,8 @@ pub fn generate_health_report(
     let sys = SystemInfo::collect();
     let owned_scans;
     let scans: &[CleanupScanResult] = match cached_scans {
-        Some(s) if !s.is_empty() => s,
-        _ => {
+        Some(s) => s,
+        None => {
             owned_scans = scan_all(&catalog.cleanup_rules, &sys);
             &owned_scans
         }

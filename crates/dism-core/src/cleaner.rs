@@ -5,6 +5,7 @@ use crate::evaluator::{
 use crate::sysinfo::SystemInfo;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
+use std::cmp::Reverse;
 use std::collections::HashSet;
 use std::ffi::OsStr;
 use std::os::windows::ffi::OsStrExt;
@@ -84,12 +85,50 @@ pub struct CleanupExecutionReport {
 }
 
 struct CollectedTargets {
-    files: Vec<PreviewFile>,
+    files: CollectedFiles,
     removable_dirs: Vec<PathBuf>,
     driver_targets: Vec<(String, u64)>,
     is_system_task: bool,
     system_task_proc: Option<String>,
     system_task_hint: Option<LocalizedText>,
+}
+
+#[derive(Default)]
+struct FileTotals {
+    bytes: u64,
+    count: usize,
+}
+
+#[derive(Default)]
+struct CollectedFiles {
+    preview_only: bool,
+    items: Vec<PreviewFile>,
+    ready: FileTotals,
+    locked: FileTotals,
+    protected: FileTotals,
+}
+
+impl CollectedFiles {
+    fn push(&mut self, file: PreviewFile) {
+        if self.preview_only {
+            let totals = match file.status {
+                FileStatus::Ready => &mut self.ready,
+                FileStatus::Locked => &mut self.locked,
+                FileStatus::Protected => &mut self.protected,
+            };
+            totals.bytes += file.size_bytes;
+            totals.count += 1;
+        }
+        self.items.push(file);
+        if self.preview_only && self.items.len() == MAX_PREVIEW_FILES * 2 {
+            self.trim_preview();
+        }
+    }
+
+    fn trim_preview(&mut self) {
+        self.items.sort_by_key(|file| Reverse(file.size_bytes));
+        self.items.truncate(MAX_PREVIEW_FILES);
+    }
 }
 
 /// Returns true if the Builtin custom proc is triggered via dedicated system task actions
@@ -194,34 +233,8 @@ fn scan_rule_with_budget(
         .clone()
         .or_else(|| rule.warning.clone());
 
-    let collected = collect_scan_targets(active_scan, sys, probe_budget);
-    let mut cleanable_bytes = 0u64;
-    let mut cleanable_count = 0usize;
-    let mut skipped_locked_bytes = 0u64;
-    let mut skipped_locked_count = 0usize;
-    let mut skipped_protected_bytes = 0u64;
-    let mut skipped_protected_count = 0usize;
-
-    for f in &collected.files {
-        match f.status {
-            FileStatus::Ready => {
-                cleanable_bytes += f.size_bytes;
-                cleanable_count += 1;
-            }
-            FileStatus::Locked => {
-                skipped_locked_bytes += f.size_bytes;
-                skipped_locked_count += 1;
-            }
-            FileStatus::Protected => {
-                skipped_protected_bytes += f.size_bytes;
-                skipped_protected_count += 1;
-            }
-        }
-    }
-
-    let mut preview_files = collected.files;
-    preview_files.sort_by(|a, b| b.size_bytes.cmp(&a.size_bytes));
-    preview_files.truncate(MAX_PREVIEW_FILES);
+    let mut collected = collect_scan_targets(active_scan, sys, probe_budget, true);
+    collected.files.trim_preview();
 
     CleanupScanResult {
         id: rule.id.clone(),
@@ -235,13 +248,13 @@ fn scan_rule_with_budget(
         is_system_task: collected.is_system_task,
         system_task_proc: collected.system_task_proc,
         system_task_hint: collected.system_task_hint,
-        cleanable_bytes,
-        cleanable_count,
-        skipped_locked_bytes,
-        skipped_locked_count,
-        skipped_protected_bytes,
-        skipped_protected_count,
-        preview_files,
+        cleanable_bytes: collected.files.ready.bytes,
+        cleanable_count: collected.files.ready.count,
+        skipped_locked_bytes: collected.files.locked.bytes,
+        skipped_locked_count: collected.files.locked.count,
+        skipped_protected_bytes: collected.files.protected.bytes,
+        skipped_protected_count: collected.files.protected.count,
+        preview_files: collected.files.items,
     }
 }
 
@@ -294,7 +307,7 @@ fn execute_single_rule(rule: &CleanupRule, sys: &SystemInfo, dry_run: bool) -> R
         };
     };
 
-    let collected = collect_scan_targets(active_scan, sys, usize::MAX);
+    let collected = collect_scan_targets(active_scan, sys, usize::MAX, false);
     let mut deleted_bytes = 0u64;
     let mut deleted_files = 0usize;
     let mut skipped_locked_files = 0usize;
@@ -323,7 +336,7 @@ fn execute_single_rule(rule: &CleanupRule, sys: &SystemInfo, dry_run: bool) -> R
             }
         }
     } else {
-        for f in &collected.files {
+        for f in &collected.files.items {
             match f.status {
                 FileStatus::Locked => {
                     skipped_locked_files += 1;
@@ -431,8 +444,12 @@ fn collect_scan_targets(
     scan: &CleanupScan,
     sys: &SystemInfo,
     mut probe_budget: usize,
+    preview_only: bool,
 ) -> CollectedTargets {
-    let mut files = Vec::new();
+    let mut files = CollectedFiles {
+        preview_only,
+        ..CollectedFiles::default()
+    };
     let mut seen_paths = HashSet::<String>::new();
     let mut removable_dirs = Vec::new();
     let mut driver_targets = Vec::new();
@@ -503,7 +520,7 @@ fn collect_general_action(
     queries: &[String],
     excluded: &[String],
     sys: &SystemInfo,
-    files: &mut Vec<PreviewFile>,
+    files: &mut CollectedFiles,
     seen_paths: &mut HashSet<String>,
     removable_dirs: &mut Vec<PathBuf>,
     probe_budget: &mut usize,
@@ -612,7 +629,7 @@ fn collect_general_action(
 fn handle_custom_proc(
     proc_name: &str,
     sys: &SystemInfo,
-    files: &mut Vec<PreviewFile>,
+    files: &mut CollectedFiles,
     seen_paths: &mut HashSet<String>,
     removable_dirs: &mut Vec<PathBuf>,
     driver_targets: &mut Vec<(String, u64)>,
@@ -749,7 +766,9 @@ fn handle_custom_proc(
                         )),
                         locking_processes: Vec::new(),
                     });
-                    driver_targets.push((d.published_name.clone(), d.size_bytes));
+                    if !files.preview_only {
+                        driver_targets.push((d.published_name.clone(), d.size_bytes));
+                    }
                 }
             }
             *is_system_task = false;
@@ -819,12 +838,11 @@ fn walk_dir_filtered(
     allow_dirs: bool,
     remove_self: bool,
     sys_is_admin: bool,
-    files: &mut Vec<PreviewFile>,
+    files: &mut CollectedFiles,
     seen_paths: &mut HashSet<String>,
     removable_dirs: &mut Vec<PathBuf>,
     probe_budget: &mut usize,
 ) {
-    let mut dirs_in_walk = Vec::new();
     let walker = WalkDir::new(dir).follow_links(false).into_iter();
     for entry in walker.filter_entry(|e| {
         if e.path() == dir {
@@ -858,11 +876,14 @@ fn walk_dir_filtered(
                 sys_is_admin,
                 probe_budget,
             );
-        } else if entry.file_type().is_dir() && allow_dirs && (path != dir || remove_self) {
-            dirs_in_walk.push(path.to_path_buf());
+        } else if entry.file_type().is_dir()
+            && allow_dirs
+            && !files.preview_only
+            && (path != dir || remove_self)
+        {
+            removable_dirs.push(path.to_path_buf());
         }
     }
-    removable_dirs.extend(dirs_in_walk);
 }
 
 fn is_excluded(path: &Path, anchor_root: &Path, exclusions: &[String]) -> bool {
@@ -889,7 +910,7 @@ fn is_excluded(path: &Path, anchor_root: &Path, exclusions: &[String]) -> bool {
 fn record_file_with_meta(
     path: &Path,
     meta: Option<&std::fs::Metadata>,
-    files: &mut Vec<PreviewFile>,
+    files: &mut CollectedFiles,
     seen_paths: &mut HashSet<String>,
     sys_is_admin: bool,
     probe_budget: &mut usize,
@@ -903,7 +924,7 @@ fn record_file_with_meta(
 fn record_file_with_size(
     path: &Path,
     size_bytes: u64,
-    files: &mut Vec<PreviewFile>,
+    files: &mut CollectedFiles,
     seen_paths: &mut HashSet<String>,
     sys_is_admin: bool,
     probe_budget: &mut usize,
@@ -1015,6 +1036,37 @@ mod tests {
     use std::collections::HashMap;
     use std::fs::{self, File};
     use std::io::Write;
+
+    #[test]
+    fn cleanup_preview_caps_details_without_losing_totals() {
+        let mut files = CollectedFiles {
+            preview_only: true,
+            ..CollectedFiles::default()
+        };
+        for id in 0..250 {
+            files.push(PreviewFile {
+                path: id.to_string(),
+                size_bytes: if id == 249 { 10 } else { 1 },
+                status: if id == 249 {
+                    FileStatus::Locked
+                } else {
+                    FileStatus::Ready
+                },
+                reason: None,
+                locking_processes: Vec::new(),
+            });
+        }
+        files.trim_preview();
+
+        assert_eq!(files.items.len(), MAX_PREVIEW_FILES);
+        assert_eq!(files.items[0].path, "249");
+        assert_eq!(files.items[1].path, "0");
+        assert_eq!(files.items.last().unwrap().path, "98");
+        assert_eq!(files.ready.count, 249);
+        assert_eq!(files.ready.bytes, 249);
+        assert_eq!(files.locked.count, 1);
+        assert_eq!(files.locked.bytes, 10);
+    }
 
     #[test]
     fn test_scan_exclusion_and_dry_run_vs_execute_in_sandbox() {

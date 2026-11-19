@@ -35,8 +35,6 @@ import {
   DriverListPayload,
   HealthReportPayload,
   Lang,
-  OptimizationGroupStatus,
-  RegistrySnapshot,
   StartupItem,
   SysInfoPayload,
   SystemInfo,
@@ -61,9 +59,8 @@ export type DashboardTargetTab =
 interface Props {
   lang: Lang;
   sysPayload: SysInfoPayload | null;
-  cleanupEntries: CleanupRuleEntry[];
-  optGroups: OptimizationGroupStatus[];
-  snapshots: RegistrySnapshot[];
+  cleanupEntries: CleanupRuleEntry[] | null;
+  snapshotCount: number | null;
   scanning: boolean;
   onScanCleanup: () => Promise<void>;
   onNavigate: (tab: DashboardTargetTab) => void;
@@ -151,8 +148,7 @@ export const DashboardView: React.FC<Props> = ({
   lang,
   sysPayload,
   cleanupEntries,
-  optGroups,
-  snapshots,
+  snapshotCount,
   scanning,
   onScanCleanup,
   onNavigate,
@@ -232,8 +228,8 @@ export const DashboardView: React.FC<Props> = ({
   };
 
   const disk = sysPayload?.system.system_disk;
-  const scannedCount = cleanupEntries.filter((e) => e.scanned).length;
-  const reclaimableBytes = cleanupEntries.reduce((a, e) => a + e.rule.cleanable_bytes, 0);
+  const scannedCount = cleanupEntries?.filter((e) => e.scanned).length ?? 0;
+  const reclaimableBytes = cleanupEntries?.reduce((a, e) => a + e.rule.cleanable_bytes, 0) ?? 0;
   const usedPct = disk && disk.total_bytes > 0 ? (disk.used_bytes / disk.total_bytes) * 100 : 0;
   const reclaimPct =
     disk && disk.total_bytes > 0
@@ -242,7 +238,7 @@ export const DashboardView: React.FC<Props> = ({
 
   const enabledStartups = startupItems.filter((s) => s.enabled).length;
   const bloatwareCount = appxPackages.filter((p) => p.category === 'bloatware').length;
-  const totalOptItems = optGroups.reduce((a, g) => a + g.items.length, 0);
+  const totalOptItems = sysPayload?.catalog.optimization_items_total ?? '—';
   const featureByName = new Map(features.map((f) => [f.name, f]));
 
   return (
@@ -367,7 +363,7 @@ export const DashboardView: React.FC<Props> = ({
             </div>
             <div style={{ marginTop: 10, display: 'flex', flexDirection: 'column', gap: 4 }}>
               <Text size={600} weight="bold">
-                {cleanupEntries.length}{' '}
+                {cleanupEntries?.length ?? '—'}{' '}
                 <Text size={200} style={{ color: tokens.colorNeutralForeground3 }}>
                   {lang === 'zh' ? '条适用规则' : 'applicable rules'}
                 </Text>
@@ -576,7 +572,7 @@ export const DashboardView: React.FC<Props> = ({
                 </Text>
               </div>
               <Badge appearance="tint" color="informative">
-                {snapshots.length} {lang === 'zh' ? '份快照' : 'snapshots'}
+                {snapshotCount ?? '—'} {lang === 'zh' ? '份快照' : 'snapshots'}
               </Badge>
             </div>
             <div style={{ marginTop: 10, display: 'flex', flexDirection: 'column', gap: 4 }}>

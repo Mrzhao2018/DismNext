@@ -33,7 +33,8 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, MutexGuard, RwLock};
+use std::time::{Duration, Instant};
 use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
 
 include!(concat!(env!("OUT_DIR"), "/embedded_ui.rs"));
@@ -58,8 +59,42 @@ struct AppState {
     port: u16,
     catalog: RwLock<Catalog>,
     snap_mgr: SnapshotManager,
-    scan_cache: RwLock<HashMap<String, CleanupScanResult>>,
+    scan_cache: RwLock<CleanupScanCache>,
+    cleanup_operation: Mutex<()>,
     ui_dir: Option<PathBuf>,
+}
+
+const FULL_SCAN_TTL: Duration = Duration::from_secs(60);
+
+#[derive(Default)]
+struct CleanupScanCache {
+    rules: HashMap<String, CleanupScanResult>,
+    full_scan: Option<(Instant, Arc<[CleanupScanResult]>)>,
+}
+
+impl CleanupScanCache {
+    fn store_full_scan(
+        &mut self,
+        results: Vec<CleanupScanResult>,
+        started: Instant,
+    ) -> Arc<[CleanupScanResult]> {
+        let results: Arc<[_]> = results.into();
+        self.full_scan = Some((started, Arc::clone(&results)));
+        results
+    }
+
+    fn fresh_full_scan(&self, now: Instant) -> Option<Arc<[CleanupScanResult]>> {
+        let (started, results) = self.full_scan.as_ref()?;
+        (now.saturating_duration_since(*started) < FULL_SCAN_TTL).then(|| Arc::clone(results))
+    }
+}
+
+impl AppState {
+    fn begin_cleanup_mutation(&self) -> MutexGuard<'_, ()> {
+        let operation = self.cleanup_operation.lock().unwrap();
+        self.scan_cache.write().unwrap().full_scan = None;
+        operation
+    }
 }
 
 #[derive(Deserialize)]
@@ -195,7 +230,8 @@ fn main() -> Result<()> {
         port: args.port,
         catalog: RwLock::new(catalog),
         snap_mgr,
-        scan_cache: RwLock::new(HashMap::new()),
+        scan_cache: RwLock::new(CleanupScanCache::default()),
+        cleanup_operation: Mutex::new(()),
         ui_dir,
     });
 
@@ -459,43 +495,42 @@ fn dispatch_api(
         (&Method::Get, "/api/cleanup/rules") => {
             let cat = state.catalog.read().unwrap();
             let cache = state.scan_cache.read().unwrap();
-            let list = cleanup_rules_stub_list(&cat, &cache, &sys);
+            let list = cleanup_rules_stub_list(&cat, &cache.rules, &sys);
             Ok(serde_json::json!({ "items": list }))
         }
         (&Method::Post, "/api/cleanup/scan") => {
-            let results = {
-                let cat = state.catalog.read().unwrap();
-                scan_all(&cat.cleanup_rules, &sys)
-            };
-            {
-                let mut cache = state.scan_cache.write().unwrap();
-                cache.clear();
-                for r in &results {
-                    cache.insert(r.id.clone(), r.clone());
-                }
-            }
-            Ok(serde_json::json!({ "items": results }))
+            let _operation = state.cleanup_operation.lock().unwrap();
+            let started = Instant::now();
+            let results = scan_all(&state.catalog.read().unwrap().cleanup_rules, &sys);
+            let mut cache = state.scan_cache.write().unwrap();
+            cache.rules = results
+                .iter()
+                .map(|result| (result.id.clone(), result.clone()))
+                .collect();
+            let results = cache.store_full_scan(results, started);
+            Ok(serde_json::json!({ "items": results.as_ref() }))
         }
         (&Method::Get, "/api/cleanup/preview") => {
             let id = parse_query_param(query, "id")
                 .ok_or_else(|| anyhow::anyhow!("Missing ?id= parameter"))?;
-            let res = {
-                let cat = state.catalog.read().unwrap();
-                let rule = cat
-                    .cleanup_rules
-                    .iter()
-                    .find(|r| r.id == id)
-                    .ok_or_else(|| anyhow::anyhow!("Rule '{}' not found", id))?;
-                scan_rule_preview(rule, &sys)
-            };
-            {
-                let mut cache = state.scan_cache.write().unwrap();
-                cache.insert(res.id.clone(), res.clone());
-            }
+            let cat = state.catalog.read().unwrap();
+            let rule = cat
+                .cleanup_rules
+                .iter()
+                .find(|r| r.id == id)
+                .ok_or_else(|| anyhow::anyhow!("Rule '{}' not found", id))?;
+            let res = scan_rule_preview(rule, &sys);
+            state
+                .scan_cache
+                .write()
+                .unwrap()
+                .rules
+                .insert(res.id.clone(), res.clone());
             Ok(serde_json::to_value(res)?)
         }
         (&Method::Post, "/api/cleanup/execute") => {
             let payload: ExecuteReq = read_json_body(req)?;
+            let _operation = (!payload.dry_run).then(|| state.begin_cleanup_mutation());
             let cat = state.catalog.read().unwrap();
             let report = execute_cleanup(
                 &cat.cleanup_rules,
@@ -504,12 +539,13 @@ fn dispatch_api(
                 payload.dry_run,
             );
             if !payload.dry_run {
-                let mut cache = state.scan_cache.write().unwrap();
-                for id in &payload.rule_ids {
-                    if let Some(rule) = cat.cleanup_rules.iter().find(|r| r.id == *id) {
-                        cache.insert(id.clone(), scan_rule(rule, &sys));
-                    }
-                }
+                let updated = payload
+                    .rule_ids
+                    .iter()
+                    .filter_map(|id| cat.cleanup_rules.iter().find(|rule| rule.id == *id))
+                    .map(|rule| (rule.id.clone(), scan_rule(rule, &sys)))
+                    .collect::<Vec<_>>();
+                state.scan_cache.write().unwrap().rules.extend(updated);
             }
             let updated_sys = SystemInfo::collect();
             Ok(serde_json::json!({
@@ -525,6 +561,7 @@ fn dispatch_api(
         }
         (&Method::Post, "/api/cleanup/custom/save") => {
             let payload: CustomRuleInput = read_json_body(req)?;
+            let _operation = state.begin_cleanup_mutation();
             let saved = Catalog::save_custom_rule(payload)?;
             let scanned = scan_rule_preview(&saved, &sys);
             let mut cat = state.catalog.write().unwrap();
@@ -534,8 +571,8 @@ fn dispatch_api(
                 cat.cleanup_rules.push(saved.clone());
             }
             let mut cache = state.scan_cache.write().unwrap();
-            cache.insert(scanned.id.clone(), scanned.clone());
-            let items = cleanup_rules_stub_list(&cat, &cache, &sys);
+            cache.rules.insert(scanned.id.clone(), scanned.clone());
+            let items = cleanup_rules_stub_list(&cat, &cache.rules, &sys);
             Ok(serde_json::json!({
                 "saved": scanned,
                 "items": items,
@@ -543,12 +580,13 @@ fn dispatch_api(
         }
         (&Method::Post, "/api/cleanup/custom/delete") => {
             let payload: DeleteCustomRuleReq = read_json_body(req)?;
+            let _operation = state.begin_cleanup_mutation();
             Catalog::delete_custom_rule(&payload.rule_id)?;
             let mut cat = state.catalog.write().unwrap();
             cat.cleanup_rules.retain(|r| r.id != payload.rule_id);
             let mut cache = state.scan_cache.write().unwrap();
-            cache.remove(&payload.rule_id);
-            let items = cleanup_rules_stub_list(&cat, &cache, &sys);
+            cache.rules.remove(&payload.rule_id);
+            let items = cleanup_rules_stub_list(&cat, &cache.rules, &sys);
             Ok(serde_json::json!({ "items": items }))
         }
         (&Method::Get, "/api/optimizer/groups") => {
@@ -558,6 +596,7 @@ fn dispatch_api(
         }
         (&Method::Post, "/api/optimizer/apply") => {
             let payload: OptApplyReq = read_json_body(req)?;
+            let _operation = state.begin_cleanup_mutation();
             let cat = state.catalog.read().unwrap();
             let outcome = apply_optimization(
                 &cat.optimization_groups,
@@ -578,6 +617,7 @@ fn dispatch_api(
         }
         (&Method::Post, "/api/snapshots/restore") => {
             let payload: RestoreReq = read_json_body(req)?;
+            let _operation = state.begin_cleanup_mutation();
             let restored = state.snap_mgr.restore(&payload.snapshot_id)?;
             let cat = state.catalog.read().unwrap();
             let refreshed_groups = evaluate_all_groups(&cat.optimization_groups, &sys);
@@ -611,6 +651,7 @@ fn dispatch_api(
         }
         (&Method::Post, "/api/diskmap/recycle") => {
             let payload: RevealReq = read_json_body(req)?;
+            let _operation = state.begin_cleanup_mutation();
             let freed = recycle_path(Path::new(payload.path.trim()))?;
             let updated_sys = SystemInfo::collect();
             Ok(serde_json::json!({
@@ -634,6 +675,7 @@ fn dispatch_api(
         }
         (&Method::Post, "/api/appx/remove") => {
             let payload: AppxRemoveReq = read_json_body(req)?;
+            let _operation = state.begin_cleanup_mutation();
             remove_appx_package(&payload.package_full_name)?;
             let packages = list_appx_packages();
             Ok(serde_json::json!({
@@ -655,6 +697,7 @@ fn dispatch_api(
             if payload.published_names.is_empty() {
                 return Err(anyhow::anyhow!("No drivers specified for deletion"));
             }
+            let _operation = state.begin_cleanup_mutation();
             let mut deleted = Vec::new();
             let mut errors = Vec::new();
             for name in &payload.published_names {
@@ -679,6 +722,7 @@ fn dispatch_api(
         }
         (&Method::Post, "/api/features/toggle") => {
             let payload: FeatureToggleReq = read_json_body(req)?;
+            let _operation = state.begin_cleanup_mutation();
             let outcome = set_feature_enabled(&payload.name, payload.enabled)?;
             let features = list_optional_features();
             Ok(serde_json::json!({
@@ -692,6 +736,7 @@ fn dispatch_api(
         }
         (&Method::Post, "/api/systasks/run") => {
             let payload: SysTaskRunReq = read_json_body(req)?;
+            let _operation = state.begin_cleanup_mutation();
             let outcome = run_system_task(payload.task_id.trim())?;
             let updated_sys = SystemInfo::collect();
             Ok(serde_json::json!({
@@ -735,6 +780,7 @@ fn dispatch_api(
         }
         (&Method::Post, "/api/optimizer/batch") => {
             let payload: OptBatchReq = read_json_body(req)?;
+            let _operation = state.begin_cleanup_mutation();
             let cat = state.catalog.read().unwrap();
             let outcome = apply_optimization_batch(
                 &cat.optimization_groups,
@@ -764,6 +810,7 @@ fn dispatch_api(
         }
         (&Method::Post, "/api/rescue/run") => {
             let payload: RescueRunReq = read_json_body(req)?;
+            let _operation = state.begin_cleanup_mutation();
             let outcome = run_rescue_action(&payload.action_id)?;
             Ok(serde_json::to_value(outcome)?)
         }
@@ -794,6 +841,7 @@ fn dispatch_api(
         }
         (&Method::Post, "/api/uninstaller/uninstall") => {
             let payload: UninstallWin32Req = read_json_body(req)?;
+            let _operation = state.begin_cleanup_mutation();
             let outcome = launch_win32_uninstaller(
                 payload.app_id.trim(),
                 payload.use_quiet.unwrap_or(false),
@@ -801,17 +849,26 @@ fn dispatch_api(
             Ok(serde_json::to_value(outcome)?)
         }
         (&Method::Get, "/api/report/export") => {
-            let cached: Vec<CleanupScanResult> = {
-                let cache = state.scan_cache.read().unwrap();
-                cache.values().cloned().collect()
+            let (cat, scans) = {
+                let _operation = state.cleanup_operation.lock().unwrap();
+                let cat = state.catalog.read().unwrap().clone();
+                let cached = state
+                    .scan_cache
+                    .read()
+                    .unwrap()
+                    .fresh_full_scan(Instant::now());
+                let scans = cached.unwrap_or_else(|| {
+                    let started = Instant::now();
+                    let results = scan_all(&cat.cleanup_rules, &sys);
+                    state
+                        .scan_cache
+                        .write()
+                        .unwrap()
+                        .store_full_scan(results, started)
+                });
+                (cat, scans)
             };
-            let cat = state.catalog.read().unwrap();
-            let cached_opt = if cached.is_empty() {
-                None
-            } else {
-                Some(cached.as_slice())
-            };
-            let report = generate_health_report(&cat, cached_opt);
+            let report = generate_health_report(&cat, Some(&scans));
             Ok(serde_json::to_value(report)?)
         }
         _ => Err(anyhow::anyhow!("Unknown API endpoint: {}", path)),
@@ -1025,6 +1082,29 @@ fn add_cors_headers<R: std::io::Read>(resp: &mut Response<R>, port: u16, origin:
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn report_cache_requires_a_fresh_full_scan() {
+        let catalog = Catalog::load(None).unwrap();
+        let sys = SystemInfo::collect();
+        let mut cache = CleanupScanCache::default();
+        let entries = cleanup_rules_stub_list(&catalog, &cache.rules, &sys);
+        let preview: CleanupScanResult =
+            serde_json::from_value(entries[0]["rule"].clone()).unwrap();
+        let started = Instant::now();
+
+        cache.rules.insert(preview.id.clone(), preview.clone());
+        assert!(cache.fresh_full_scan(started).is_none());
+
+        cache.store_full_scan(vec![preview.clone()], started);
+        cache.rules.get_mut(&preview.id).unwrap().cleanable_bytes = 50;
+        let cached = cache.fresh_full_scan(started).unwrap();
+        assert_eq!(cached[0].cleanable_bytes, preview.cleanable_bytes);
+        assert!(cache.fresh_full_scan(started + FULL_SCAN_TTL).is_none());
+
+        cache.store_full_scan(Vec::new(), started);
+        assert!(cache.fresh_full_scan(started).unwrap().is_empty());
+    }
 
     #[test]
     fn test_host_and_origin_security_checks() {

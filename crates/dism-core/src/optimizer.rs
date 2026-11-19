@@ -398,6 +398,7 @@ pub fn apply_optimization(
         _ => return Err(anyhow!("Mismatched ApplyValue type for item '{}'", item_id)),
     };
 
+    let _mutation = snapshot_mgr.lock_mutation()?;
     let snapshot = snapshot_mgr.capture_before_actions(
         item_id,
         &item.name,
@@ -686,10 +687,10 @@ fn exec_reg_move(
             None => {
                 match src_root.open_subkey_with_flags(&src_sub, KEY_READ | sam) {
                     Ok(sk) => {
-                        let tree = read_tree_recursive(&sk);
+                        let tree = read_tree_recursive(&sk, sam)?;
                         drop(sk);
                         let (dk, _) = dst_root.create_subkey_with_flags(&dst_sub, KEY_ALL_ACCESS | sam)?;
-                        write_tree_recursive(&dk, &tree)?;
+                        write_tree_recursive(&dk, &tree, sam)?;
                         if let Some((parent_sub, leaf)) = split_parent_leaf(&src_sub) {
                             if let Ok(pk) = src_root.open_subkey_with_flags(&parent_sub, KEY_ALL_ACCESS | sam) {
                                 let _ = pk.delete_subkey_all(&leaf);

@@ -1,4 +1,4 @@
-import React, { Suspense, lazy, useEffect, useMemo, useState } from 'react';
+import React, { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Badge,
   Button,
@@ -26,11 +26,7 @@ import {
   WeatherSunny24Regular,
 } from '@fluentui/react-icons';
 import {
-  CleanupRuleEntry,
   Lang,
-  OptimizationGroupStatus,
-  RegistrySnapshot,
-  SysInfoPayload,
   api,
   formatBytes,
 } from './api';
@@ -135,6 +131,33 @@ const useStyles = makeStyles({
   },
 });
 
+const fetchCleanupRules = async () => (await api.getCleanupRules()).items;
+const fetchOptimizerGroups = async () => (await api.getOptimizerGroups()).groups;
+const fetchSnapshots = async () => (await api.getSnapshots()).snapshots;
+
+function useResource<T>(fetchData: () => Promise<T>, enabled = true) {
+  const [data, setData] = useState<T | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const pending = useRef<Promise<void> | null>(null);
+
+  const reload = useCallback(() => {
+    if (pending.current) return pending.current;
+    setError(null);
+    const request = fetchData()
+      .then(setData)
+      .catch((failure: unknown) => setError(String(failure)))
+      .finally(() => { pending.current = null; });
+    pending.current = request;
+    return request;
+  }, [fetchData]);
+
+  useEffect(() => {
+    if (enabled) void reload();
+  }, [enabled, reload]);
+
+  return { data, setData, error, reload };
+}
+
 const AppShell: React.FC<{
   dark: boolean;
   onToggleTheme: () => void;
@@ -142,37 +165,18 @@ const AppShell: React.FC<{
   const styles = useStyles();
   const [lang, setLang] = useState<Lang>('zh');
   const [tab, setTab] = useState<NavTab>('dashboard');
-  const [loading, setLoading] = useState(true);
-  const [sysPayload, setSysPayload] = useState<SysInfoPayload | null>(null);
-  const [cleanupEntries, setCleanupEntries] = useState<CleanupRuleEntry[]>([]);
+  const system = useResource(api.getSysInfo);
+  const cleanup = useResource(fetchCleanupRules);
+  const optimizer = useResource(fetchOptimizerGroups, tab === 'optimize');
+  const snapshotList = useResource(fetchSnapshots);
+  const { data: sysPayload, setData: setSysPayload } = system;
+  const { data: cleanupEntries, setData: setCleanupEntries } = cleanup;
+  const { data: optGroups, setData: setOptGroups } = optimizer;
+  const { data: snapshots, setData: setSnapshots, reload: refreshSnapshots } = snapshotList;
   const [scanning, setScanning] = useState(false);
-  const [optGroups, setOptGroups] = useState<OptimizationGroupStatus[]>([]);
-  const [snapshots, setSnapshots] = useState<RegistrySnapshot[]>([]);
+  const [scanError, setScanError] = useState<string | null>(null);
   const [elevating, setElevating] = useState(false);
   const [elevateErr, setElevateErr] = useState<string | null>(null);
-
-  const loadInitialData = async () => {
-    const [sys, rulesRes, optRes, snapRes] = await Promise.all([
-      api.getSysInfo(),
-      api.getCleanupRules(),
-      api.getOptimizerGroups(),
-      api.getSnapshots(),
-    ]);
-    setSysPayload(sys);
-    setCleanupEntries(rulesRes.items);
-    setOptGroups(optRes.groups);
-    setSnapshots(snapRes.snapshots);
-  };
-
-  useEffect(() => {
-    (async () => {
-      try {
-        await loadInitialData();
-      } finally {
-        setLoading(false);
-      }
-    })();
-  }, []);
 
   const handleElevate = async () => {
     setElevating(true);
@@ -186,8 +190,10 @@ const AppShell: React.FC<{
           try {
             const sys = await api.getSysInfo();
             if (sys.system.is_admin) {
-              await loadInitialData();
-              setElevating(false);
+              setSysPayload(sys);
+              void cleanup.reload();
+              void refreshSnapshots();
+              if (tab === 'optimize') void optimizer.reload();
               return;
             }
           } catch {
@@ -195,7 +201,7 @@ const AppShell: React.FC<{
           }
         }
       }
-      await loadInitialData();
+      setSysPayload(await api.getSysInfo());
     } catch (e) {
       setElevateErr(String(e));
     } finally {
@@ -205,21 +211,19 @@ const AppShell: React.FC<{
 
   const handleScan = async () => {
     setScanning(true);
+    setScanError(null);
     try {
       const res = await api.scanCleanup();
       setCleanupEntries(res.items.map((rule) => ({ scanned: true, rule })));
+    } catch (error) {
+      setScanError(String(error));
     } finally {
       setScanning(false);
     }
   };
 
-  const refreshSnapshots = async () => {
-    const res = await api.getSnapshots();
-    setSnapshots(res.snapshots);
-  };
-
   const reclaimableBytes = useMemo(
-    () => cleanupEntries.reduce((acc, e) => acc + e.rule.cleanable_bytes, 0),
+    () => cleanupEntries?.reduce((acc, e) => acc + e.rule.cleanable_bytes, 0) ?? 0,
     [cleanupEntries]
   );
 
@@ -229,6 +233,22 @@ const AppShell: React.FC<{
     disk && disk.total_bytes > 0
       ? Math.min(usedPct, (reclaimableBytes / disk.total_bytes) * 100)
       : 0;
+
+  const resourceFeedback = (label: string, error: string | null, retry: () => Promise<void>) => (
+    error ? (
+      <div role="alert" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+        <Text style={{ color: tokens.colorPaletteRedForeground1 }}>{label} · {error}</Text>
+        <Button size="small" onClick={() => void retry()}>{lang === 'zh' ? '重试' : 'Retry'}</Button>
+      </div>
+    ) : <Spinner size="small" label={label} />
+  );
+
+  const cleanupFeedback = (error: string | null) => resourceFeedback(
+    lang === 'zh' ? '加载清理规则' : 'Load cleanup rules', error, cleanup.reload,
+  );
+  const snapshotFeedback = (error: string | null) => resourceFeedback(
+    lang === 'zh' ? '加载快照' : 'Load snapshots', error, refreshSnapshots,
+  );
 
   return (
     <div className={styles.shell}>
@@ -325,7 +345,7 @@ const AppShell: React.FC<{
               icon={<History24Regular />}
               onClick={() => setTab('snapshots')}
             >
-              {lang === 'zh' ? `快照回滚 (${snapshots.length})` : `Snapshots (${snapshots.length})`}
+              {lang === 'zh' ? '快照回滚' : 'Snapshots'}{snapshots && ` (${snapshots.length})`}
             </Button>
           </div>
         </div>
@@ -402,8 +422,8 @@ const AppShell: React.FC<{
                 </div>
                 <Text size={200} style={{ color: tokens.colorNeutralForeground3 }}>
                   {lang === 'zh'
-                    ? `规则库基线 ${sysPayload.catalog.base_version} · 已启用 ${cleanupEntries.length} 条空间规则 · ${optGroups.reduce((a, g) => a + g.items.length, 0)} 项系统优化`
-                    : `Catalog ${sysPayload.catalog.base_version} · ${cleanupEntries.length} cleanup rules · ${optGroups.reduce((a, g) => a + g.items.length, 0)} tweaks`}
+                    ? `规则库基线 ${sysPayload.catalog.base_version} · 已启用 ${cleanupEntries?.length ?? '—'} 条空间规则 · ${sysPayload.catalog.optimization_items_total} 项系统优化`
+                    : `Catalog ${sysPayload.catalog.base_version} · ${cleanupEntries?.length ?? '—'} cleanup rules · ${sysPayload.catalog.optimization_items_total} tweaks`}
                 </Text>
               </div>
 
@@ -433,11 +453,19 @@ const AppShell: React.FC<{
               )}
             </>
           ) : (
-            <Spinner size="small" label="Loading system info..." />
+            resourceFeedback(lang === 'zh' ? '加载系统信息' : 'Load system info', system.error, system.reload)
           )}
         </header>
 
         <section className={styles.contentArea}>
+          {(tab === 'dashboard' || tab === 'cleanup') && scanError && resourceFeedback(
+            lang === 'zh' ? '扫描清理规则' : 'Scan cleanup rules', scanError, handleScan,
+          )}
+          {(tab === 'dashboard' || (tab === 'cleanup' && cleanupEntries !== null)) && cleanup.error && cleanupFeedback(cleanup.error)}
+          {(tab === 'dashboard' || (tab === 'snapshots' && snapshots !== null)) && snapshotList.error && snapshotFeedback(snapshotList.error)}
+          {tab === 'optimize' && optGroups !== null && optimizer.error && resourceFeedback(
+            lang === 'zh' ? '加载系统优化项' : 'Load optimization controls', optimizer.error, optimizer.reload,
+          )}
           <Suspense
             fallback={
               <div style={{ display: 'flex', justifyContent: 'center', paddingTop: 60 }}>
@@ -445,17 +473,12 @@ const AppShell: React.FC<{
               </div>
             }
           >
-            {loading ? (
-              <div style={{ display: 'flex', justifyContent: 'center', paddingTop: 60 }}>
-                <Spinner label={lang === 'zh' ? '正在加载规则引擎...' : 'Loading engine...'} />
-              </div>
-            ) : tab === 'dashboard' ? (
+            {tab === 'dashboard' ? (
               <DashboardView
                 lang={lang}
                 sysPayload={sysPayload}
                 cleanupEntries={cleanupEntries}
-                optGroups={optGroups}
-                snapshots={snapshots}
+                snapshotCount={snapshots?.length ?? null}
                 scanning={scanning}
                 onScanCleanup={handleScan}
                 onNavigate={setTab}
@@ -463,7 +486,7 @@ const AppShell: React.FC<{
                   setSysPayload((prev) => (prev ? { ...prev, system: sys } : prev))
                 }
               />
-            ) : tab === 'cleanup' ? (
+            ) : tab === 'cleanup' ? cleanupEntries === null ? cleanupFeedback(cleanup.error) : (
               <SpaceRecycleView
                 lang={lang}
                 entries={cleanupEntries}
@@ -472,8 +495,7 @@ const AppShell: React.FC<{
                 onEntriesUpdated={(items) => setCleanupEntries(items)}
                 onExecuted={async () => {
                   await handleScan();
-                  const sys = await api.getSysInfo();
-                  setSysPayload(sys);
+                  await system.reload();
                 }}
                 onSystemTaskDone={async (sys) => {
                   setSysPayload((prev) => (prev ? { ...prev, system: sys } : prev));
@@ -497,7 +519,9 @@ const AppShell: React.FC<{
               <AppxView lang={lang} />
             ) : tab === 'rescue' ? (
               <RescueView lang={lang} isAdmin={Boolean(sysPayload?.system.is_admin)} />
-            ) : tab === 'optimize' ? (
+            ) : tab === 'optimize' ? optGroups === null ? resourceFeedback(
+              lang === 'zh' ? '加载系统优化项' : 'Load optimization controls', optimizer.error, optimizer.reload,
+            ) : (
               <OptimizationView
                 lang={lang}
                 groups={optGroups}
@@ -505,10 +529,10 @@ const AppShell: React.FC<{
                   setOptGroups(next);
                   void refreshSnapshots();
                 }}
-                onSnapshotCreated={(snap) => setSnapshots((prev) => [snap, ...prev])}
+                onSnapshotCreated={(snap) => setSnapshots((prev) => prev && [snap, ...prev.filter((item) => item.id !== snap.id)])}
                 onJumpToSnapshots={() => setTab('snapshots')}
               />
-            ) : (
+            ) : snapshots === null ? snapshotFeedback(snapshotList.error) : (
               <SnapshotView
                 lang={lang}
                 snapshots={snapshots}

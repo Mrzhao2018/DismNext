@@ -4,6 +4,7 @@ use anyhow::{anyhow, Result};
 use chrono::DateTime;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
+use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsStr;
 use std::fs::File;
@@ -99,6 +100,26 @@ struct RawNode {
     dir_count: usize,
     ext: Option<String>,
     children: Vec<RawNode>,
+    omitted_children: OmittedChildren,
+}
+
+#[derive(Default)]
+struct OmittedChildren {
+    size_bytes: u64,
+    file_count: usize,
+    dir_count: usize,
+    count: usize,
+}
+
+impl OmittedChildren {
+    fn add(&mut self, node: &RawNode) {
+        if node.size_bytes != 0 || node.is_dir {
+            self.size_bytes += node.size_bytes;
+            self.file_count += node.file_count;
+            self.dir_count += node.dir_count + usize::from(node.is_dir);
+            self.count += 1;
+        }
+    }
 }
 
 pub fn get_presets(sys: &SystemInfo) -> Vec<DiskPreset> {
@@ -148,12 +169,12 @@ pub fn analyze_path(root: &Path, max_depth: usize) -> Result<DiskAnalysisReport>
     let started = Instant::now();
     let depth_limit = max_depth.clamp(1, 6);
 
-    let mut acc = scan_recursive(root);
+    let acc = scan_recursive(root, Some(depth_limit));
     let total_bytes = acc.node.size_bytes;
     let total_files = acc.node.file_count;
     let total_dirs = acc.node.dir_count;
 
-    let tree = prune_node(acc.node, 0, depth_limit);
+    let tree = into_disk_tree(acc.node);
 
     let mut ext_vec: Vec<(String, u64, usize)> = acc
         .exts
@@ -193,9 +214,6 @@ pub fn analyze_path(root: &Path, max_depth: usize) -> Result<DiskAnalysisReport>
         });
     }
 
-    acc.top_files.sort_by(|a, b| b.size_bytes.cmp(&a.size_bytes));
-    acc.top_files.truncate(MAX_LARGEST_FILES);
-
     Ok(DiskAnalysisReport {
         root_path: root.to_string_lossy().into_owned(),
         elapsed_ms: started.elapsed().as_millis() as u64,
@@ -208,13 +226,21 @@ pub fn analyze_path(root: &Path, max_depth: usize) -> Result<DiskAnalysisReport>
     })
 }
 
-fn scan_recursive(path: &Path) -> ScanAccumulator {
-    let name = path
-        .file_name()
-        .map(|s| s.to_string_lossy().into_owned())
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| path.to_string_lossy().into_owned());
-    let path_str = path.to_string_lossy().into_owned();
+fn scan_recursive(path: &Path, visible_depth: Option<usize>) -> ScanAccumulator {
+    let (name, path_str) = if visible_depth.is_some() {
+        let path_str = path.to_string_lossy().into_owned();
+        let name = path
+            .file_name()
+            .filter(|name| !name.is_empty())
+            .map_or_else(
+                || path_str.clone(),
+                |name| name.to_string_lossy().into_owned(),
+            );
+        (name, path_str)
+    } else {
+        (String::new(), String::new())
+    };
+    let child_depth = visible_depth.and_then(|depth| depth.checked_sub(1));
 
     let Ok(meta) = std::fs::symlink_metadata(path) else {
         return empty_acc(name, path_str, false);
@@ -245,6 +271,7 @@ fn scan_recursive(path: &Path) -> ScanAccumulator {
                 dir_count: 0,
                 ext: Some(ext),
                 children: Vec::new(),
+                omitted_children: OmittedChildren::default(),
             },
             exts,
             top_files,
@@ -259,6 +286,7 @@ fn scan_recursive(path: &Path) -> ScanAccumulator {
     let mut total_files = 0usize;
     let mut total_dirs = 0usize;
     let mut children: Vec<RawNode> = Vec::new();
+    let mut omitted_children = OmittedChildren::default();
     let mut exts: HashMap<String, (u64, usize)> = HashMap::new();
     let mut top_files: Vec<LargeFileEntry> = Vec::new();
     let mut sub_dirs: Vec<PathBuf> = Vec::new();
@@ -284,50 +312,66 @@ fn scan_recursive(path: &Path) -> ScanAccumulator {
             ent.0 = ent.0.saturating_add(sz);
             ent.1 += 1;
 
+            if child_depth.is_some() {
+                children.push(RawNode {
+                    name: c_name.clone(),
+                    path: c_path_str.clone(),
+                    is_dir: false,
+                    size_bytes: sz,
+                    file_count: 1,
+                    dir_count: 0,
+                    ext: Some(ext.clone()),
+                    children: Vec::new(),
+                    omitted_children: OmittedChildren::default(),
+                });
+                if children.len() == MAX_CHILDREN_PER_NODE * 2 {
+                    trim_children(&mut children, &mut omitted_children);
+                }
+            }
             top_files.push(LargeFileEntry {
-                path: c_path_str.clone(),
-                name: c_name.clone(),
-                ext: ext.clone(),
-                size_bytes: sz,
-            });
-            children.push(RawNode {
-                name: c_name,
                 path: c_path_str,
-                is_dir: false,
+                name: c_name,
+                ext,
                 size_bytes: sz,
-                file_count: 1,
-                dir_count: 0,
-                ext: Some(ext),
-                children: Vec::new(),
             });
+            if top_files.len() == MAX_LARGEST_FILES * 2 {
+                trim_largest_files(&mut top_files);
+            }
         } else if c_meta.is_dir() {
             sub_dirs.push(child_path);
         }
     }
 
-    let child_accs: Vec<ScanAccumulator> = if sub_dirs.len() >= 2 {
-        sub_dirs.par_iter().map(|p| scan_recursive(p)).collect()
-    } else {
-        sub_dirs.iter().map(|p| scan_recursive(p)).collect()
-    };
-
-    for c in child_accs {
-        total_bytes = total_bytes.saturating_add(c.node.size_bytes);
-        total_files += c.node.file_count;
-        total_dirs += c.node.dir_count + usize::from(c.node.is_dir);
-        children.push(c.node);
-        for (ext, (sz, cnt)) in c.exts {
-            let entry = exts.entry(ext).or_insert((0, 0));
-            entry.0 = entry.0.saturating_add(sz);
-            entry.1 += cnt;
+    // Merge each batch before starting more subtrees, so completed branches can be dropped early.
+    for batch in sub_dirs.chunks(32) {
+        let child_accs: Vec<_> = batch
+            .par_iter()
+            .map(|path| scan_recursive(path, child_depth))
+            .collect();
+        for c in child_accs {
+            total_bytes = total_bytes.saturating_add(c.node.size_bytes);
+            total_files += c.node.file_count;
+            total_dirs += c.node.dir_count + usize::from(c.node.is_dir);
+            if child_depth.is_some() {
+                children.push(c.node);
+                if children.len() == MAX_CHILDREN_PER_NODE * 2 {
+                    trim_children(&mut children, &mut omitted_children);
+                }
+            }
+            for (ext, (sz, cnt)) in c.exts {
+                let entry = exts.entry(ext).or_insert((0, 0));
+                entry.0 = entry.0.saturating_add(sz);
+                entry.1 += cnt;
+            }
+            top_files.extend(c.top_files);
+            if top_files.len() >= MAX_LARGEST_FILES * 2 {
+                trim_largest_files(&mut top_files);
+            }
         }
-        top_files.extend(c.top_files);
     }
 
-    if top_files.len() > MAX_LARGEST_FILES * 2 {
-        top_files.sort_by(|a, b| b.size_bytes.cmp(&a.size_bytes));
-        top_files.truncate(MAX_LARGEST_FILES);
-    }
+    trim_largest_files(&mut top_files);
+    trim_children(&mut children, &mut omitted_children);
 
     ScanAccumulator {
         node: RawNode {
@@ -339,9 +383,24 @@ fn scan_recursive(path: &Path) -> ScanAccumulator {
             dir_count: total_dirs,
             ext: None,
             children,
+            omitted_children,
         },
         exts,
         top_files,
+    }
+}
+
+fn trim_largest_files(files: &mut Vec<LargeFileEntry>) {
+    files.sort_by_key(|file| Reverse(file.size_bytes));
+    files.truncate(MAX_LARGEST_FILES);
+}
+
+fn trim_children(children: &mut Vec<RawNode>, omitted: &mut OmittedChildren) {
+    children.sort_by_key(|node| Reverse(node.size_bytes));
+    if children.len() > MAX_CHILDREN_PER_NODE {
+        for node in children.drain(MAX_CHILDREN_PER_NODE..) {
+            omitted.add(&node);
+        }
     }
 }
 
@@ -356,6 +415,7 @@ fn empty_acc(name: String, path: String, is_dir: bool) -> ScanAccumulator {
             dir_count: 0,
             ext: None,
             children: Vec::new(),
+            omitted_children: OmittedChildren::default(),
         },
         exts: HashMap::new(),
         top_files: Vec::new(),
@@ -467,48 +527,30 @@ fn describe_extension(ext: &str) -> LocalizedText {
     }
 }
 
-fn prune_node(mut raw: RawNode, depth: usize, max_depth: usize) -> DiskTreeNode {
+fn into_disk_tree(raw: RawNode) -> DiskTreeNode {
     let cache_hint = raw.is_dir && is_cache_folder_name(&raw.name, &raw.path);
-    let children = if !raw.is_dir || depth >= max_depth {
-        Vec::new()
-    } else {
-        raw.children.sort_by(|a, b| b.size_bytes.cmp(&a.size_bytes));
-        let mut kept = Vec::new();
-        let mut rest_bytes = 0u64;
-        let mut rest_files = 0usize;
-        let mut rest_dirs = 0usize;
-        let mut rest_count = 0usize;
-
-        for (i, ch) in raw.children.into_iter().enumerate() {
-            if ch.size_bytes == 0 && !ch.is_dir {
-                continue;
-            }
-            if i < MAX_CHILDREN_PER_NODE {
-                kept.push(prune_node(ch, depth + 1, max_depth));
-            } else {
-                rest_bytes += ch.size_bytes;
-                rest_files += ch.file_count;
-                rest_dirs += ch.dir_count + usize::from(ch.is_dir);
-                rest_count += 1;
-            }
-        }
-        if rest_count > 0 && rest_bytes > 0 {
-            kept.push(DiskTreeNode {
-                name: format!("[+{} smaller items]", rest_count),
-                path: raw.path.clone(),
-                is_dir: false,
-                is_aggregate: true,
-                is_cache_hint: false,
-                aggregate_count: rest_count,
-                size_bytes: rest_bytes,
-                file_count: rest_files,
-                dir_count: rest_dirs,
-                ext: Some("(other)".to_string()),
-                children: Vec::new(),
-            });
-        }
-        kept
-    };
+    let mut children: Vec<_> = raw
+        .children
+        .into_iter()
+        .filter(|node| node.size_bytes != 0 || node.is_dir)
+        .map(into_disk_tree)
+        .collect();
+    let omitted = raw.omitted_children;
+    if omitted.size_bytes > 0 {
+        children.push(DiskTreeNode {
+            name: format!("[+{} smaller items]", omitted.count),
+            path: raw.path.clone(),
+            is_dir: false,
+            is_aggregate: true,
+            is_cache_hint: false,
+            aggregate_count: omitted.count,
+            size_bytes: omitted.size_bytes,
+            file_count: omitted.file_count,
+            dir_count: omitted.dir_count,
+            ext: Some("(other)".to_string()),
+            children: Vec::new(),
+        });
+    }
 
     DiskTreeNode {
         name: raw.name,
@@ -1146,6 +1188,40 @@ mod tests {
         assert!(report.extensions.iter().any(|e| e.ext == "(no ext)"));
 
         let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn diskmap_limits_visible_nodes_without_losing_deep_totals() {
+        let base = std::env::temp_dir().join(format!("dismnext_wide_tree_{}", std::process::id()));
+        let deep = base.join("nested").join("deeper");
+        fs::create_dir_all(&deep).unwrap();
+        for size in 1..=140 {
+            fs::write(base.join(format!("{size}.txt")), vec![0; size]).unwrap();
+        }
+        fs::write(deep.join("largest.bin"), vec![0; 8192]).unwrap();
+
+        let report = analyze_path(&base, 1).unwrap();
+        fs::remove_dir_all(&base).unwrap();
+
+        assert_eq!(report.total_files, 141);
+        assert_eq!(report.total_dirs, 2);
+        assert_eq!(report.total_bytes, (1..=140).sum::<u64>() + 8192);
+        assert_eq!(report.tree.children.len(), MAX_CHILDREN_PER_NODE + 1);
+        let nested = &report.tree.children[0];
+        assert_eq!(nested.name, "nested");
+        assert_eq!(nested.size_bytes, 8192);
+        assert!(nested.children.is_empty());
+        let omitted = report.tree.children.last().unwrap();
+        assert!(omitted.is_aggregate);
+        assert_eq!(omitted.aggregate_count, 81);
+        assert_eq!(omitted.size_bytes, (1..=81).sum::<u64>());
+        assert_eq!(report.largest_files.len(), MAX_LARGEST_FILES);
+        assert_eq!(report.largest_files[0].name, "largest.bin");
+        assert_eq!(report.largest_files.last().unwrap().size_bytes, 42);
+        assert!(report
+            .extensions
+            .iter()
+            .any(|ext| ext.ext == ".bin" && ext.size_bytes == 8192));
     }
 
     #[test]
