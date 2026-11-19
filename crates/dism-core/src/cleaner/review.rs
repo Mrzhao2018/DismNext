@@ -4,25 +4,23 @@ use super::{
     SystemInfo, TargetKey,
 };
 use crate::drivers::compute_drivers_uncached;
-use crate::duplicate_recycle::{move_to_recycle_bin, FileIdentity};
+use crate::duplicate_recycle::move_to_recycle_bin;
+use crate::file_stamp::{open_for_verification, TargetStamp};
 use crate::systasks::compute_orphaned_installer_files_uncached;
 use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet};
-use std::fs::{File, OpenOptions};
+use std::fs::File;
 use std::io;
-use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
 use std::os::windows::io::AsRawHandle;
 use std::path::Path;
 use windows_sys::Win32::Foundation::{
     ERROR_DIR_NOT_EMPTY, ERROR_LOCK_VIOLATION, ERROR_SHARING_VIOLATION,
 };
 use windows_sys::Win32::Storage::FileSystem::{
-    FileBasicInfo, FileDispositionInfoEx, GetFileInformationByHandleEx, SetFileInformationByHandle,
-    DELETE, FILE_ATTRIBUTE_REPARSE_POINT, FILE_BASIC_INFO, FILE_DISPOSITION_FLAG_DELETE,
+    FileDispositionInfoEx, SetFileInformationByHandle, DELETE, FILE_DISPOSITION_FLAG_DELETE,
     FILE_DISPOSITION_FLAG_FORCE_IMAGE_SECTION_CHECK,
     FILE_DISPOSITION_FLAG_IGNORE_READONLY_ATTRIBUTE, FILE_DISPOSITION_FLAG_POSIX_SEMANTICS,
-    FILE_DISPOSITION_INFO_EX, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
-    FILE_READ_ATTRIBUTES, FILE_READ_DATA, FILE_SHARE_DELETE, FILE_SHARE_READ,
+    FILE_DISPOSITION_INFO_EX, FILE_READ_DATA, FILE_SHARE_DELETE, FILE_SHARE_READ,
 };
 
 /// Desktop cleanup plan. Execution consumes the plan and only considers its captured targets.
@@ -51,10 +49,10 @@ impl ReviewedCleanup {
             }
             let is_driver = matches!(target.action, CleanupAction::RemoveDriver(_));
             let access = if is_driver { 0 } else { DELETE };
-            match TargetStamp::capture(&target.target.path, false, access) {
+            match capture_stamp(&target.target.path, false, access) {
                 Ok(stamp) => {
                     if !is_driver {
-                        target.size = stamp.contents.as_ref().unwrap().size;
+                        target.size = stamp.file_size().unwrap();
                     }
                     files.push((target, stamp));
                 }
@@ -62,7 +60,7 @@ impl ReviewedCleanup {
             }
         }
         for (owner, directory) in directories {
-            match TargetStamp::capture(&directory.path, true, DELETE) {
+            match capture_stamp(&directory.path, true, DELETE) {
                 Ok(stamp) => reviewed_dirs.push((owner, directory, stamp)),
                 Err(error) => record_check_error(&mut outcomes[owner], &directory.path, error),
             }
@@ -193,63 +191,11 @@ impl ReviewedCleanup {
     }
 }
 
-#[derive(PartialEq, Eq)]
-pub(super) struct TargetStamp {
-    identity: FileIdentity,
-    created: u64,
-    contents: Option<FileRevision>,
-}
-
-#[derive(PartialEq, Eq)]
-struct FileRevision {
-    size: u64,
-    written: i64,
-    changed: i64,
-}
-
-impl TargetStamp {
-    fn capture(path: &Path, directory: bool, access: u32) -> io::Result<Self> {
-        Self::read(&open_target(path, directory, access, 0)?, directory)
-    }
-
-    pub(super) fn read(file: &File, directory: bool) -> io::Result<Self> {
-        let metadata = file.metadata()?;
-        if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
-            || (directory && !metadata.is_dir())
-            || (!directory && !metadata.is_file())
-        {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "Target type changed",
-            ));
-        }
-        let contents = if directory {
-            None
-        } else {
-            let mut info: FILE_BASIC_INFO = unsafe { std::mem::zeroed() };
-            let ok = unsafe {
-                GetFileInformationByHandleEx(
-                    file.as_raw_handle(),
-                    FileBasicInfo,
-                    (&mut info as *mut FILE_BASIC_INFO).cast(),
-                    std::mem::size_of_val(&info) as u32,
-                )
-            };
-            if ok == 0 {
-                return Err(io::Error::last_os_error());
-            }
-            Some(FileRevision {
-                size: metadata.len(),
-                written: info.LastWriteTime,
-                changed: info.ChangeTime,
-            })
-        };
-        Ok(Self {
-            identity: FileIdentity::read(file)?,
-            created: metadata.creation_time(),
-            contents,
-        })
-    }
+fn capture_stamp(path: &Path, directory: bool, access: u32) -> io::Result<TargetStamp> {
+    TargetStamp::read(
+        &open_for_verification(path, directory, access, 0)?,
+        directory,
+    )
 }
 
 fn verify_target(
@@ -260,7 +206,7 @@ fn verify_target(
     access: u32,
     sharing: u32,
 ) -> Option<File> {
-    let result = open_target(path, directory, access, sharing).and_then(|file| {
+    let result = open_for_verification(path, directory, access, sharing).and_then(|file| {
         let actual = TargetStamp::read(&file, directory)?;
         Ok((file, &actual == expected))
     });
@@ -291,20 +237,6 @@ fn record_check_error(outcome: &mut RuleCleanOutcome, path: &Path, error: io::Er
         }
         _ => outcome.record_error(path.display(), error),
     }
-}
-
-fn open_target(path: &Path, directory: bool, access: u32, sharing: u32) -> io::Result<File> {
-    let flags = FILE_FLAG_OPEN_REPARSE_POINT
-        | if directory {
-            FILE_FLAG_BACKUP_SEMANTICS
-        } else {
-            0
-        };
-    OpenOptions::new()
-        .access_mode(access | FILE_READ_ATTRIBUTES)
-        .share_mode(sharing)
-        .custom_flags(flags)
-        .open(path)
 }
 
 fn delete_open_target(file: &File, directory: bool) -> io::Result<()> {

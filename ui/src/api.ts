@@ -579,7 +579,16 @@ export interface AppLeftoverItem {
   match_basis: 'registered_install_location' | 'application_name' | 'publisher_and_application_name';
   size_bytes: number;
   file_count: number;
+  review?: { status: 'ready'; stamp: string } | { status: 'blocked'; reason: LeftoverSkipReason };
 }
+
+export type LeftoverSkipReason = 'changed' | 'missing' | 'protected' | 'unverifiable';
+
+export type LeftoverRecycleResult = { path: string } & (
+  | { status: 'recycled'; size_bytes: number }
+  | { status: 'skipped'; reason: LeftoverSkipReason }
+  | { status: 'failed'; error: string }
+);
 
 export interface Win32UninstallStatus {
   app_id: string;
@@ -810,6 +819,11 @@ export const api = {
     reqJson<{ leftovers: AppLeftoverItem[] }>('/api/uninstaller/leftovers', {
       method: 'POST',
       body: JSON.stringify({ display_name, publisher, install_location }),
+    }),
+  recycleAppLeftovers: (targets: { path: string; stamp: string }[]) =>
+    reqJson<{ items: LeftoverRecycleResult[] }>('/api/uninstaller/leftovers/recycle', {
+      method: 'POST',
+      body: JSON.stringify({ targets }),
     }),
   uninstallWin32App: (app_id: string, use_quiet: boolean) =>
     reqJson<Win32UninstallStatus>('/api/uninstaller/uninstall', {

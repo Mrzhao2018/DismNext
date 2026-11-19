@@ -7,6 +7,7 @@ pub mod drivers;
 pub mod duplicate_recycle;
 pub mod evaluator;
 pub mod features;
+mod file_stamp;
 pub mod lockcheck;
 pub mod mcp;
 pub mod offline_wim;

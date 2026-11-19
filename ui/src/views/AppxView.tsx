@@ -33,6 +33,8 @@ import {
   AppxCategory,
   AppxPackageInfo,
   Lang,
+  LeftoverRecycleResult,
+  LeftoverSkipReason,
   Win32AppInfo,
   Win32UninstallStatus,
   api,
@@ -43,6 +45,13 @@ import {
 interface Props {
   lang: Lang;
 }
+
+const leftoverSkipLabels: Record<LeftoverSkipReason, { zh: string; en: string }> = {
+  changed: { zh: '目录或内容已变更，请重新扫描。', en: 'The folder or its contents changed. Scan again.' },
+  missing: { zh: '原路径下的目录已不存在。', en: 'The folder is no longer at its original path.' },
+  protected: { zh: '路径受保护或包含重定向。', en: 'The path is protected or contains a redirect.' },
+  unverifiable: { zh: '无法完整核对目录，请检查权限或占用状态后重新扫描。', en: 'Could not verify the whole folder. Check permissions or file locks and scan again.' },
+};
 
 const useStyles = makeStyles({
   root: {
@@ -118,6 +127,8 @@ export const AppxView: React.FC<Props> = ({ lang }) => {
   const [leftoverDialogOpen, setLeftoverDialogOpen] = useState(false);
   const [leftovers, setLeftovers] = useState<AppLeftoverItem[]>([]);
   const [selectedLeftovers, setSelectedLeftovers] = useState<Set<string>>(new Set());
+  const [leftoverResults, setLeftoverResults] = useState<Map<string, LeftoverRecycleResult>>(new Map());
+  const leftoverScan = React.useRef<(() => Promise<{ leftovers: AppLeftoverItem[] }>) | null>(null);
   const [recyclingLeftovers, setRecyclingLeftovers] = useState(false);
 
   // Store / AppX state
@@ -241,12 +252,14 @@ export const AppxView: React.FC<Props> = ({ lang }) => {
     title: string,
     scan: () => Promise<{ leftovers: AppLeftoverItem[] }>,
   ) => {
+    leftoverScan.current = scan;
     setLeftoverTitle(title);
     setLeftoverDialogOpen(true);
     setLeftoverLoading(true);
     setLeftoverError(null);
     setLeftovers([]);
     setSelectedLeftovers(new Set());
+    setLeftoverResults(new Map());
     try {
       setLeftovers((await scan()).leftovers);
     } catch (e) {
@@ -294,31 +307,23 @@ export const AppxView: React.FC<Props> = ({ lang }) => {
   };
 
   const handleRecycleSelectedLeftovers = async () => {
-    const targets = Array.from(selectedLeftovers);
-    if (targets.length === 0) return;
+    const targets = leftovers.flatMap(({ path, review }) =>
+      selectedLeftovers.has(path) && review?.status === 'ready' ? [{ path, stamp: review.stamp }] : []);
+    if (recyclingLeftovers || targets.length === 0) return;
     setRecyclingLeftovers(true);
-    setErrorMsg(null);
-    let freedTotal = 0;
-    let recycledCount = 0;
+    setLeftoverError(null);
     try {
-      for (const p of targets) {
-        const res = await api.recyclePath(p);
-        freedTotal += res.freed_bytes;
-        recycledCount += 1;
-      }
-      setLeftovers((prev) => prev.filter((item) => !selectedLeftovers.has(item.path)));
-      setSelectedLeftovers(new Set());
-      setNotice(
-        lang === 'zh'
-          ? `已将 ${recycledCount} 个残留目录移入回收站（文件大小合计 ${formatBytes(freedTotal)}）。`
-          : `Moved ${recycledCount} leftover folder(s) to Recycle Bin (${formatBytes(freedTotal)}).`
-      );
-      if (recycledCount === targets.length) {
-        setLeftoverDialogOpen(false);
-      }
-      void loadWin32();
+      const { items } = await api.recycleAppLeftovers(targets);
+      const resolved = new Set(items.filter((item) => item.status !== 'failed').map((item) => item.path));
+      setLeftovers((prev) => prev.filter(({ path }) => !resolved.has(path)));
+      setSelectedLeftovers(new Set(items.filter((item) => item.status === 'failed').map((item) => item.path)));
+      setLeftoverResults((prev) => {
+        const next = new Map(prev);
+        for (const item of items) next.set(item.path, item);
+        return next;
+      });
     } catch (e) {
-      setErrorMsg(String(e));
+      setLeftoverError(String(e));
     } finally {
       setRecyclingLeftovers(false);
     }
@@ -771,16 +776,35 @@ export const AppxView: React.FC<Props> = ({ lang }) => {
                 : `Leftover Scan: ${leftoverTitle}`}
             </DialogTitle>
             <DialogContent>
+              {leftoverError && (
+                <MessageBar intent="error"><MessageBarBody>{leftoverError}</MessageBarBody></MessageBar>
+              )}
+              {leftoverResults.size > 0 && (
+                <ul style={{ maxHeight: 168, overflowY: 'auto', overflowWrap: 'anywhere', paddingInlineStart: 20 }}>
+                  {[...leftoverResults.values()].map((item) => (
+                    <li key={item.path}>
+                      <Text size={200} weight="semibold">
+                        {item.status === 'recycled'
+                          ? (lang === 'zh' ? '已移入回收站' : 'Recycled')
+                          : item.status === 'skipped' ? (lang === 'zh' ? '已跳过' : 'Skipped') : (lang === 'zh' ? '失败' : 'Failed')}
+                      </Text>
+                      <Text size={200}> · {item.path}</Text>
+                      <div>
+                        <Text size={200}>
+                          {item.status === 'recycled' ? formatBytes(item.size_bytes)
+                            : item.status === 'skipped' ? leftoverSkipLabels[item.reason][lang] : item.error}
+                        </Text>
+                      </div>
+                    </li>
+                  ))}
+                </ul>
+              )}
               {leftoverLoading ? (
                 <div style={{ padding: 24, display: 'flex', justifyContent: 'center' }}>
                   <Spinner label={lang === 'zh' ? '正在扫描 AppData / ProgramData / 安装目录...' : 'Scanning leftovers...'} />
                 </div>
-              ) : leftoverError ? (
-                <MessageBar intent="error">
-                  <MessageBarBody>{leftoverError}</MessageBarBody>
-                </MessageBar>
               ) : leftovers.length === 0 ? (
-                <Text style={{ color: tokens.colorNeutralForeground3 }}>
+                !leftoverError && leftoverResults.size === 0 && <Text style={{ color: tokens.colorNeutralForeground3 }}>
                   {lang === 'zh'
                     ? '未检测到明显关联残留目录。'
                     : 'No candidate leftover folders detected.'}
@@ -794,11 +818,15 @@ export const AppxView: React.FC<Props> = ({ lang }) => {
                   </Text>
                   {leftovers.map((item) => {
                     const checked = selectedLeftovers.has(item.path);
+                    const blocked = item.review?.status !== 'ready';
+                    const reason = item.review?.status === 'blocked' ? item.review.reason : 'unverifiable';
                     return (
                       <div key={item.path} className={styles.leftoverRow}>
                         <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0, flex: 1 }}>
                           <Checkbox
                             checked={checked}
+                            disabled={blocked || recyclingLeftovers}
+                            aria-label={item.path}
                             onChange={() =>
                               setSelectedLeftovers((prev) => {
                                 const next = new Set(prev);
@@ -813,10 +841,10 @@ export const AppxView: React.FC<Props> = ({ lang }) => {
                               <Badge size="small" appearance="tint" color={item.kind === 'install_dir' ? 'warning' : 'brand'}>
                                 {kindLabel(item.kind)}
                               </Badge>
-                              <Text size={200} weight="semibold">
+                              {!blocked && <Text size={200} weight="semibold">
                                 {formatBytes(item.size_bytes)} · {item.file_count}{' '}
                                 {lang === 'zh' ? '个文件' : 'files'}
-                              </Text>
+                              </Text>}
                             </div>
                             <Text size={100} style={{ color: tokens.colorNeutralForeground3 }}>
                               {matchLabel[item.match_basis]}
@@ -829,6 +857,7 @@ export const AppxView: React.FC<Props> = ({ lang }) => {
                             >
                               {item.path}
                             </Text>
+                            {blocked && <Text size={200}>{leftoverSkipLabels[reason][lang]}</Text>}
                           </div>
                         </div>
                         <Button
@@ -844,6 +873,15 @@ export const AppxView: React.FC<Props> = ({ lang }) => {
               )}
             </DialogContent>
             <DialogActions>
+              <Button
+                appearance="secondary"
+                disabled={leftoverLoading || recyclingLeftovers}
+                onClick={() => {
+                  if (leftoverScan.current) void reviewLeftovers(leftoverTitle, leftoverScan.current);
+                }}
+              >
+                {lang === 'zh' ? '重新扫描' : 'Scan Again'}
+              </Button>
               <Button
                 appearance="secondary"
                 disabled={recyclingLeftovers}

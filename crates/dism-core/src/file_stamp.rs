@@ -1,0 +1,88 @@
+use crate::duplicate_recycle::FileIdentity;
+use std::fs::{File, OpenOptions};
+use std::io;
+use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
+use std::os::windows::io::AsRawHandle;
+use std::path::Path;
+use windows_sys::Win32::Storage::FileSystem::{
+    FileBasicInfo, GetFileInformationByHandleEx, FILE_ATTRIBUTE_REPARSE_POINT, FILE_BASIC_INFO,
+    FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES,
+};
+
+pub(crate) fn open_for_verification(
+    path: &Path,
+    directory: bool,
+    access: u32,
+    sharing: u32,
+) -> io::Result<File> {
+    let flags = FILE_FLAG_OPEN_REPARSE_POINT
+        | if directory {
+            FILE_FLAG_BACKUP_SEMANTICS
+        } else {
+            0
+        };
+    OpenOptions::new()
+        .access_mode(access | FILE_READ_ATTRIBUTES)
+        .share_mode(sharing)
+        .custom_flags(flags)
+        .open(path)
+}
+
+#[derive(PartialEq, Eq, Hash)]
+pub(crate) struct TargetStamp {
+    identity: FileIdentity,
+    created: u64,
+    contents: Option<FileRevision>,
+}
+
+#[derive(PartialEq, Eq, Hash)]
+struct FileRevision {
+    size: u64,
+    written: i64,
+    changed: i64,
+}
+
+impl TargetStamp {
+    pub(crate) fn read(file: &File, directory: bool) -> io::Result<Self> {
+        let metadata = file.metadata()?;
+        if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+            || (directory && !metadata.is_dir())
+            || (!directory && !metadata.is_file())
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Target type changed",
+            ));
+        }
+        let contents = if directory {
+            None
+        } else {
+            let mut info: FILE_BASIC_INFO = unsafe { std::mem::zeroed() };
+            let ok = unsafe {
+                GetFileInformationByHandleEx(
+                    file.as_raw_handle(),
+                    FileBasicInfo,
+                    (&mut info as *mut FILE_BASIC_INFO).cast(),
+                    std::mem::size_of_val(&info) as u32,
+                )
+            };
+            if ok == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            Some(FileRevision {
+                size: metadata.len(),
+                written: info.LastWriteTime,
+                changed: info.ChangeTime,
+            })
+        };
+        Ok(Self {
+            identity: FileIdentity::read(file)?,
+            created: metadata.creation_time(),
+            contents,
+        })
+    }
+
+    pub(crate) fn file_size(&self) -> Option<u64> {
+        self.contents.as_ref().map(|revision| revision.size)
+    }
+}

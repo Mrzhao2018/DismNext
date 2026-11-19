@@ -28,7 +28,8 @@ use dism_core::startup::{
 use dism_core::sysinfo::relaunch_as_admin;
 use dism_core::systasks::{get_system_task_status, run_system_task};
 use dism_core::uninstaller::{
-    launch_win32_uninstaller, list_win32_apps, scan_app_leftovers, UninstallState, Win32Uninstall,
+    launch_win32_uninstaller, list_win32_apps, recycle_app_leftovers, scan_reviewable_app_leftovers,
+    LeftoverRecycleTarget, UninstallState, Win32Uninstall,
 };
 use dism_core::{Catalog, CustomRuleInput, SnapshotManager, SystemInfo};
 use serde::{Deserialize, Serialize};
@@ -307,6 +308,11 @@ struct LeftoversReq {
     display_name: String,
     publisher: String,
     install_location: String,
+}
+
+#[derive(Deserialize)]
+struct RecycleLeftoversReq {
+    targets: Vec<LeftoverRecycleTarget>,
 }
 
 #[derive(Deserialize)]
@@ -1014,12 +1020,18 @@ fn dispatch_api(
         }
         (&Method::Post, "/api/uninstaller/leftovers") => {
             let payload: LeftoversReq = read_json_body(req)?;
-            let leftovers = scan_app_leftovers(
+            let leftovers = scan_reviewable_app_leftovers(
                 &payload.display_name,
                 &payload.publisher,
                 &payload.install_location,
             );
             Ok(serde_json::json!({ "leftovers": leftovers }))
+        }
+        (&Method::Post, "/api/uninstaller/leftovers/recycle") => {
+            let payload: RecycleLeftoversReq = read_json_body(req)?;
+            let _operation = state.begin_cleanup_mutation();
+            let items = recycle_app_leftovers(&payload.targets);
+            Ok(serde_json::json!({ "items": items }))
         }
         (&Method::Post, "/api/uninstaller/uninstall") => {
             let payload: UninstallWin32Req = read_json_body(req)?;
@@ -1054,7 +1066,7 @@ fn dispatch_api(
                 .as_mut()
                 .ok_or_else(|| anyhow::anyhow!("No uninstallation is being tracked"))?
                 .completed_app(&payload.app_id)?;
-            let leftovers = scan_app_leftovers(
+            let leftovers = scan_reviewable_app_leftovers(
                 &app.display_name,
                 &app.publisher,
                 &app.install_location,

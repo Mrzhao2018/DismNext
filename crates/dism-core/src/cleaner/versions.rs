@@ -1,9 +1,9 @@
-use super::review::TargetStamp;
 use super::{
     expand_expression, resolve_wildcard_roots_until, walk_dir_filtered, CleanupPath,
     CollectedFiles, SystemInfo, TargetKey,
 };
 use crate::evaluator::read_file_version_uncached;
+use crate::file_stamp::TargetStamp;
 use std::collections::HashSet;
 use std::fs::{self, File, OpenOptions};
 use std::os::windows::fs::{MetadataExt, OpenOptionsExt};

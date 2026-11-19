@@ -17,6 +17,13 @@ const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
 const UNINSTALL_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Uninstall";
 
+mod leftover_recycle;
+use leftover_recycle::FolderSnapshot;
+pub use leftover_recycle::{
+    recycle_app_leftovers, LeftoverRecycleItem, LeftoverRecycleOutcome, LeftoverRecycleTarget,
+    LeftoverReview, LeftoverSkipReason,
+};
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Win32AppInfo {
     pub id: String,
@@ -40,6 +47,8 @@ pub struct AppLeftoverItem {
     pub match_basis: LeftoverMatch,
     pub size_bytes: u64,
     pub file_count: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review: Option<LeftoverReview>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -270,24 +279,62 @@ pub fn scan_app_leftovers(
     publisher: &str,
     install_location: &str,
 ) -> Vec<AppLeftoverItem> {
+    scan_leftovers(display_name, publisher, install_location, false)
+}
+
+pub fn scan_reviewable_app_leftovers(
+    display_name: &str,
+    publisher: &str,
+    install_location: &str,
+) -> Vec<AppLeftoverItem> {
+    scan_leftovers(display_name, publisher, install_location, true)
+}
+
+fn scan_leftovers(
+    display_name: &str,
+    publisher: &str,
+    install_location: &str,
+    reviewable: bool,
+) -> Vec<AppLeftoverItem> {
     let mut results = Vec::new();
     let mut seen_paths: HashSet<String> = HashSet::new();
+    let mut record = |path: &Path, kind: &str, match_basis| {
+        if !seen_paths.insert(normalize_lower_path(path)) {
+            return;
+        }
+        let (size_bytes, file_count, review) = if reviewable {
+            match FolderSnapshot::capture(path) {
+                Ok(snapshot) => (
+                    snapshot.size_bytes,
+                    snapshot.file_count,
+                    Some(LeftoverReview::Ready { stamp: snapshot.stamp }),
+                ),
+                Err(reason) => (0, 0, Some(LeftoverReview::Blocked { reason })),
+            }
+        } else {
+            let (size, count) = measure_dir_stats(path);
+            (size, count, None)
+        };
+        if match_basis == LeftoverMatch::RegisteredInstallLocation
+            || file_count > 0
+            || matches!(review, Some(LeftoverReview::Blocked { .. }))
+        {
+            results.push(AppLeftoverItem {
+                path: path.to_string_lossy().into_owned(),
+                kind: kind.to_string(),
+                match_basis,
+                size_bytes,
+                file_count,
+                review,
+            });
+        }
+    };
 
     let clean_install = install_location.trim().trim_matches('"');
     if !clean_install.is_empty() {
         let p = PathBuf::from(clean_install);
         if p.is_dir() && !is_protected_recycle_target(&p) && !is_broad_program_root(&p) {
-            let norm = normalize_lower_path(&p);
-            if seen_paths.insert(norm) {
-                let (size_bytes, file_count) = measure_dir_stats(&p);
-                results.push(AppLeftoverItem {
-                    path: p.to_string_lossy().into_owned(),
-                    kind: "install_dir".to_string(),
-                    match_basis: LeftoverMatch::RegisteredInstallLocation,
-                    size_bytes,
-                    file_count,
-                });
-            }
+            record(&p, "install_dir", LeftoverMatch::RegisteredInstallLocation);
         }
     }
 
@@ -326,19 +373,7 @@ pub fn scan_app_leftovers(
             }
 
             if folder_matches_tokens(&dir_lower, &app_tokens) {
-                let norm = normalize_lower_path(&p);
-                if seen_paths.insert(norm) {
-                    let (size_bytes, file_count) = measure_dir_stats(&p);
-                    if size_bytes > 0 || file_count > 0 {
-                        results.push(AppLeftoverItem {
-                            path: p.to_string_lossy().into_owned(),
-                            kind: kind.to_string(),
-                            match_basis: LeftoverMatch::ApplicationName,
-                            size_bytes,
-                            file_count,
-                        });
-                    }
-                }
+                record(&p, kind, LeftoverMatch::ApplicationName);
                 continue;
             }
 
@@ -362,19 +397,7 @@ pub fn scan_app_leftovers(
                         continue;
                     }
                     if folder_matches_tokens(&sname, &app_tokens) {
-                        let norm = normalize_lower_path(&sp);
-                        if seen_paths.insert(norm) {
-                            let (size_bytes, file_count) = measure_dir_stats(&sp);
-                            if size_bytes > 0 || file_count > 0 {
-                                results.push(AppLeftoverItem {
-                                    path: sp.to_string_lossy().into_owned(),
-                                    kind: kind.to_string(),
-                                    match_basis: LeftoverMatch::PublisherAndApplicationName,
-                                    size_bytes,
-                                    file_count,
-                                });
-                            }
-                        }
+                        record(&sp, kind, LeftoverMatch::PublisherAndApplicationName);
                     }
                 }
             }
