@@ -1,0 +1,35 @@
+[
+  {
+    "id": "custom-release-smoke",
+    "name": { "zh": "发布兼容性测试", "en": "Release compatibility test" },
+    "group": { "zh": "自定义规则", "en": "Custom Rules" },
+    "description": { "zh": "预览测试目录中的文本文件。", "en": "Preview text files in the test directory." },
+    "warning": null,
+    "level": 3,
+    "work": null,
+    "source": "custom",
+    "scans": [
+      {
+        "work": 10,
+        "scan_type": null,
+        "name_override": null,
+        "description_override": null,
+        "warning_override": null,
+        "applicable": { "type": "True" },
+        "named_applicables": {},
+        "actions": [
+          {
+            "type": "General",
+            "root_path": "release-smoke-files",
+            "flags": "File",
+            "id": null,
+            "queries": ["*.txt"],
+            "excluded": []
+          }
+        ],
+        "rescan": false,
+        "restart": null
+      }
+    ]
+  }
+]

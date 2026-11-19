@@ -14,7 +14,7 @@ use dism_core::{Catalog, SnapshotManager, SystemInfo};
 use std::path::PathBuf;
 
 #[derive(Parser)]
-#[command(name = "dism-cli", about = "DismNext headless system cleanup & optimization CLI")]
+#[command(name = "dism-cli", version, about = "DismNext headless system cleanup & optimization CLI")]
 struct Cli {
     #[arg(long)]
     catalog: Option<PathBuf>,

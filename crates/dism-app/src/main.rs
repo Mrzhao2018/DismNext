@@ -46,7 +46,7 @@ mod scan_jobs;
 use scan_jobs::{ScanBusy, ScanJobs};
 
 #[derive(Parser)]
-#[command(name = "dism-app", about = "DismNext Desktop Host Server & GUI Launcher")]
+#[command(name = "dism-app", version, about = "DismNext Desktop Host Server & GUI Launcher")]
 struct Args {
     #[arg(long, default_value_t = 9527)]
     port: u16,

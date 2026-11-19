@@ -1,0 +1,18 @@
+{
+  "id": "release-smoke-snapshot",
+  "created_at": "2026-11-18T22:38:08",
+  "item_id": "release-smoke-fixture",
+  "item_name": { "zh": "发布兼容性测试", "en": "Release compatibility test" },
+  "scope": "current",
+  "action_summary": "Legacy snapshot listing fixture",
+  "restored": false,
+  "records": [
+    {
+      "kind": "ValueState",
+      "key": "HKCU\\Software\\DismNextReleaseSmoke",
+      "value_name": "TestOnly",
+      "sam": 0,
+      "previous": { "vtype": "REG_DWORD", "bytes": [1, 0, 0, 0] }
+    }
+  ]
+}

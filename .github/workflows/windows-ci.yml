@@ -28,5 +28,15 @@ jobs:
         run: cargo +stable test --workspace --locked
       - name: Build release binaries
         run: cargo +stable build --release --workspace --locked
-      - name: Verify portable desktop UI
-        run: ./scripts/check_portable_ui.ps1 -Executable ./target/release/dism-app.exe
+      - name: Package Windows release files
+        run: ./scripts/package_windows.ps1 -OutputDirectory ./target/windows-release
+      - name: Verify Windows release package
+        run: ./scripts/check_windows_package.ps1 -PackageDirectory ./target/windows-release
+      - name: Upload verified Windows release files
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/upload-artifact@v7
+        with:
+          name: dismnext-windows-x64
+          path: target/windows-release/
+          if-no-files-found: error
+          retention-days: 14

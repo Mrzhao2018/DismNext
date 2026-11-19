@@ -108,4 +108,11 @@ cargo test --workspace --locked
 .\scripts\check_portable_ui.ps1 -Executable .\target\release\dism-app.exe
 ```
 
-[Windows CI](.github/workflows/windows-ci.yml) 在推送和 Pull Request 时执行前端构建、Rust 测试、发布构建和单文件 EXE 冒烟检查。启动检查会在临时目录中运行单独的桌面 EXE，并验证它能提供内嵌页面、JavaScript 和规则库。
+[Windows CI](.github/workflows/windows-ci.yml) 在推送和 Pull Request 时构建、打包并检查发布文件。检查会在临时目录运行桌面版和 CLI，验证内嵌界面、MCP 握手以及 v2.0.0 自定义规则和快照的读取。推送到 `main` 后，检查通过的文件会保存在该次 CI 的 `dismnext-windows-x64` 产物中。
+
+完成发布构建后，可在 Windows x64 上用 PowerShell 7 打包和检查。将示例路径中的版本号替换为当前构建版本。
+
+```powershell
+.\scripts\package_windows.ps1
+.\scripts\check_windows_package.ps1 -PackageDirectory .\target\windows-release\v2.1.0
+```
