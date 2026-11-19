@@ -60,6 +60,7 @@ interface Props {
   lang: Lang;
   sysPayload: SysInfoPayload | null;
   cleanupEntries: CleanupRuleEntry[] | null;
+  reclaimableBytes: number | null;
   snapshotCount: number | null;
   scanning: boolean;
   onScanCleanup: () => Promise<void>;
@@ -148,6 +149,7 @@ export const DashboardView: React.FC<Props> = ({
   lang,
   sysPayload,
   cleanupEntries,
+  reclaimableBytes,
   snapshotCount,
   scanning,
   onScanCleanup,
@@ -228,12 +230,13 @@ export const DashboardView: React.FC<Props> = ({
   };
 
   const disk = sysPayload?.system.system_disk;
-  const scannedCount = cleanupEntries?.filter((e) => e.scanned).length ?? 0;
-  const reclaimableBytes = cleanupEntries?.reduce((a, e) => a + e.rule.cleanable_bytes, 0) ?? 0;
+  const reclaimableLabel = reclaimableBytes === null
+    ? (lang === 'zh' ? '待扫描' : 'Pending scan')
+    : formatBytes(reclaimableBytes);
   const usedPct = disk && disk.total_bytes > 0 ? (disk.used_bytes / disk.total_bytes) * 100 : 0;
   const reclaimPct =
     disk && disk.total_bytes > 0
-      ? Math.min(usedPct, (reclaimableBytes / disk.total_bytes) * 100)
+      ? Math.min(usedPct, ((reclaimableBytes ?? 0) / disk.total_bytes) * 100)
       : 0;
 
   const enabledStartups = startupItems.filter((s) => s.enabled).length;
@@ -331,8 +334,8 @@ export const DashboardView: React.FC<Props> = ({
             <div style={{ display: 'flex', justifyContent: 'space-between' }}>
               <Text size={100} style={{ color: tokens.colorNeutralForeground3 }}>
                 {lang === 'zh'
-                  ? `蓝色：系统及用户数据 · 绿色：已扫描可安全回收空间 (${formatBytes(reclaimableBytes)})`
-                  : `Blue: Used Data · Green: Scanned Reclaimable (${formatBytes(reclaimableBytes)})`}
+                  ? `蓝色：系统及用户数据 · 绿色：已扫描可安全回收空间 (${reclaimableLabel})`
+                  : `Blue: Used Data · Green: Scanned Reclaimable (${reclaimableLabel})`}
               </Text>
               <Text size={100} style={{ color: tokens.colorNeutralForeground3 }}>
                 {sysPayload?.system.product_name} {sysPayload?.system.display_version}
@@ -353,12 +356,8 @@ export const DashboardView: React.FC<Props> = ({
                   {lang === 'zh' ? '空间回收' : 'Space Recycle'}
                 </Text>
               </div>
-              <Badge appearance="tint" color={reclaimableBytes > 0 ? 'success' : 'subtle'}>
-                {scannedCount > 0
-                  ? formatBytes(reclaimableBytes)
-                  : lang === 'zh'
-                  ? '待扫描'
-                  : 'Pending'}
+              <Badge appearance="tint" color={(reclaimableBytes ?? 0) > 0 ? 'success' : 'subtle'}>
+                {reclaimableLabel}
               </Badge>
             </div>
             <div style={{ marginTop: 10, display: 'flex', flexDirection: 'column', gap: 4 }}>

@@ -35,6 +35,7 @@ import {
   CleanupExecutionReport,
   CleanupRuleEntry,
   CleanupScanResult,
+  CleanupScanSummary,
   Lang,
   SystemInfo,
   api,
@@ -45,10 +46,11 @@ import {
 interface Props {
   lang: Lang;
   entries: CleanupRuleEntry[];
+  summary: CleanupScanSummary | null;
   scanning: boolean;
   onScan: () => Promise<void>;
   onEntriesUpdated?: (items: CleanupRuleEntry[]) => void;
-  onExecuted: (report: CleanupExecutionReport) => void;
+  onExecuted: (system: SystemInfo) => void;
   onSystemTaskDone?: (sys: SystemInfo) => Promise<void> | void;
 }
 
@@ -197,6 +199,7 @@ const useStyles = makeStyles({
 export const SpaceRecycleView: React.FC<Props> = ({
   lang,
   entries,
+  summary,
   scanning,
   onScan,
   onEntriesUpdated,
@@ -271,15 +274,20 @@ export const SpaceRecycleView: React.FC<Props> = ({
     [entries, selectedIds]
   );
 
-  const selectedBytes = useMemo(
-    () => selectedEntries.reduce((acc, e) => acc + e.rule.cleanable_bytes, 0),
-    [selectedEntries]
-  );
-
-  const totalScanBytes = useMemo(
-    () => entries.reduce((acc, e) => acc + e.rule.cleanable_bytes, 0),
-    [entries]
-  );
+  const selectedBytes = useMemo(() => {
+    if (selectedEntries.length === 0) return 0;
+    if (!summary) return null;
+    const selected = new Set(selectedEntries.map(({ rule }) => rule.id));
+    let bytes = selectedEntries.reduce((total, { rule }) => total + rule.cleanable_bytes, 0);
+    for (const overlap of summary.overlaps) {
+      const count = overlap.rule_ids.filter((id) => selected.has(id)).length;
+      if (count > 1) bytes -= (count - 1) * overlap.cleanable_bytes;
+    }
+    return bytes;
+  }, [selectedEntries, summary]);
+  const pendingScan = lang === 'zh' ? '待扫描' : 'Pending scan';
+  const totalScanLabel = summary ? formatBytes(summary.cleanable_bytes) : pendingScan;
+  const selectedLabel = selectedBytes === null ? pendingScan : formatBytes(selectedBytes);
 
   const hasRiskySelection = useMemo(
     () => selectedEntries.some((e) => e.rule.level === 0 || Boolean(e.rule.warning)),
@@ -331,10 +339,10 @@ export const SpaceRecycleView: React.FC<Props> = ({
     setErrorMsg(null);
     setTaskNotice(null);
     try {
-      const { report } = await api.executeCleanup(ids, dryRun);
+      const { report, system } = await api.executeCleanup(ids, dryRun);
       setLastReport(report);
       if (!dryRun) {
-        onExecuted(report);
+        onExecuted(system);
       }
     } catch (e) {
       setErrorMsg(String(e));
@@ -954,13 +962,13 @@ export const SpaceRecycleView: React.FC<Props> = ({
         <div style={{ display: 'flex', gap: '16px', alignItems: 'center' }}>
           <Text size={300}>
             {lang === 'zh'
-              ? `本次扫描总可释放：${formatBytes(totalScanBytes)}`
-              : `Total Reclaimable: ${formatBytes(totalScanBytes)}`}
+              ? `本次扫描总可释放：${totalScanLabel}`
+              : `Total Reclaimable: ${totalScanLabel}`}
           </Text>
           <Text size={300} weight="bold" style={{ color: tokens.colorBrandForeground1 }}>
             {lang === 'zh'
-              ? `已勾选 ${selectedEntries.length} 项：${formatBytes(selectedBytes)}`
-              : `Selected ${selectedEntries.length}: ${formatBytes(selectedBytes)}`}
+              ? `已勾选 ${selectedEntries.length} 项：${selectedLabel}`
+              : `Selected ${selectedEntries.length}: ${selectedLabel}`}
           </Text>
         </div>
         <div style={{ display: 'flex', gap: '8px' }}>

@@ -82,6 +82,16 @@ export interface CleanupRuleEntry {
   rule: CleanupScanResult;
 }
 
+export interface CleanupScanSummary {
+  cleanable_bytes: number;
+  overlaps: { rule_ids: string[]; cleanable_bytes: number }[];
+}
+
+export interface CleanupRulesPayload {
+  items: CleanupRuleEntry[];
+  summary: CleanupScanSummary | null;
+}
+
 export interface RuleCleanOutcome {
   id: string;
   name: LocalizedText;
@@ -507,8 +517,8 @@ export const api = {
     reqJson<{ already_admin: boolean; relaunching: boolean }>('/api/sys/elevate', {
       method: 'POST',
     }),
-  getCleanupRules: () => reqJson<{ items: CleanupRuleEntry[] }>('/api/cleanup/rules'),
-  scanCleanup: () => reqJson<{ items: CleanupScanResult[] }>('/api/cleanup/scan', { method: 'POST' }),
+  getCleanupRules: () => reqJson<CleanupRulesPayload>('/api/cleanup/rules'),
+  scanCleanup: () => reqJson<{ items: CleanupScanResult[]; summary: CleanupScanSummary }>('/api/cleanup/scan', { method: 'POST' }),
   previewCleanup: (id: string) =>
     reqJson<CleanupScanResult>(`/api/cleanup/preview?id=${encodeURIComponent(id)}`),
   executeCleanup: (rule_ids: string[], dry_run: boolean) =>

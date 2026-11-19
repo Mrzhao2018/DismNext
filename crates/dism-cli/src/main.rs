@@ -1,7 +1,7 @@
 use anyhow::{anyhow, Result};
 use clap::{Parser, Subcommand};
 use dism_core::appx::{list_appx_packages, remove_appx_package, AppxCategory};
-use dism_core::cleaner::{execute_cleanup, scan_all, scan_rule_preview, FileStatus};
+use dism_core::cleaner::{execute_cleanup, scan_all, scan_all_with_summary, scan_rule_preview, FileStatus};
 use dism_core::diskmap::analyze_path;
 use dism_core::drivers::{delete_driver, export_drivers, list_drivers};
 use dism_core::evaluator::eval_condition;
@@ -233,22 +233,17 @@ fn main() -> Result<()> {
             }
         }
         Commands::Scan { json } => {
-            let results = scan_all(&catalog.cleanup_rules, &sys);
             if json {
+                let results = scan_all(&catalog.cleanup_rules, &sys);
                 println!("{}", serde_json::to_string_pretty(&results)?);
             } else {
-                let mut total_ready = 0u64;
-                let mut total_locked = 0u64;
-                let mut total_protected = 0u64;
+                let scan = scan_all_with_summary(&catalog.cleanup_rules, &sys);
                 println!(
                     "{:<10} {:<4} {:>12} {:>8} {:>8}  {}",
                     "ID", "Lv", "Cleanable", "Locked", "Prot", "Name"
                 );
                 println!("{}", "-".repeat(86));
-                for r in &results {
-                    total_ready += r.cleanable_bytes;
-                    total_locked += r.skipped_locked_bytes;
-                    total_protected += r.skipped_protected_bytes;
+                for r in &scan.items {
                     let mark = if r.is_system_task { " [SYS]" } else { "" };
                     println!(
                         "{:<10} L{:<3} {:>12} {:>8} {:>8}  {}{}",
@@ -264,10 +259,10 @@ fn main() -> Result<()> {
                 println!("{}", "-".repeat(86));
                 println!(
                     "Applicable rules: {} | Total cleanable: {} | Skipped locked: {} | Skipped protected: {}",
-                    results.len(),
-                    fmt_bytes(total_ready),
-                    fmt_bytes(total_locked),
-                    fmt_bytes(total_protected)
+                    scan.items.len(),
+                    fmt_bytes(scan.summary.cleanable_bytes),
+                    fmt_bytes(scan.summary.skipped_locked_bytes),
+                    fmt_bytes(scan.summary.skipped_protected_bytes)
                 );
             }
         }

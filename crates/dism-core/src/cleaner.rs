@@ -6,11 +6,13 @@ use crate::sysinfo::SystemInfo;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::cmp::Reverse;
-use std::collections::HashSet;
+use std::collections::{hash_map::Entry, BTreeMap, HashMap, HashSet};
 use std::ffi::OsStr;
+use std::hash::{BuildHasher, RandomState};
 use std::os::windows::ffi::OsStrExt;
 use std::os::windows::fs::MetadataExt;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
+use std::sync::Mutex;
 use walkdir::WalkDir;
 use windows_sys::Win32::Foundation::{
     CloseHandle, GetLastError, ERROR_ACCESS_DENIED, ERROR_LOCK_VIOLATION, ERROR_SHARING_VIOLATION,
@@ -23,7 +25,7 @@ use windows_sys::Win32::Storage::FileSystem::{
 const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
 const MAX_PREVIEW_FILES: usize = 100;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum FileStatus {
     Ready,
     Locked,
@@ -84,10 +86,141 @@ pub struct CleanupExecutionReport {
     pub outcomes: Vec<RuleCleanOutcome>,
 }
 
-struct CollectedTargets {
-    files: CollectedFiles,
+#[derive(Debug, Default, Serialize)]
+pub struct CleanupScanSummary {
+    pub cleanable_bytes: u64,
+    pub skipped_locked_bytes: u64,
+    pub skipped_protected_bytes: u64,
+    pub overlaps: Vec<CleanupOverlap>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CleanupOverlap {
+    pub rule_ids: Vec<String>,
+    pub cleanable_bytes: u64,
+}
+
+#[derive(Debug, Default)]
+pub struct CleanupBatchScan {
+    pub items: Vec<CleanupScanResult>,
+    pub summary: CleanupScanSummary,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+enum TargetKey {
+    File(String),
+    Driver(String),
+}
+
+impl TargetKey {
+    fn file(path: &Path) -> Self {
+        let absolute = (!path.is_absolute()
+            || path.components().any(|part| part == Component::ParentDir))
+        .then(|| std::path::absolute(path).ok())
+        .flatten();
+        let path = absolute.as_deref().unwrap_or(path);
+        let normalized = path.components().collect::<PathBuf>();
+        let name = normalized
+            .to_string_lossy()
+            .replace('/', "\\")
+            .to_ascii_lowercase();
+        if let Some(rest) = name.strip_prefix(r"\\?\unc\") {
+            return Self::File(format!(r"\\{rest}"));
+        }
+        let name = match name.strip_prefix(r"\\?\") {
+            Some(rest) if rest.as_bytes().get(1) == Some(&b':') => rest.to_owned(),
+            _ => name,
+        };
+        Self::File(name)
+    }
+}
+
+struct IndexedTarget {
+    size: u64,
+    status: FileStatus,
+    reason: Option<String>,
+    first_rule: usize,
+    other_rules: Vec<usize>,
+}
+
+const INDEX_SHARDS: usize = 32;
+
+#[derive(Default)]
+struct ScanIndex {
+    hasher: RandomState,
+    targets: [Mutex<HashMap<TargetKey, IndexedTarget>>; INDEX_SHARDS],
+}
+
+impl ScanIndex {
+    fn observe(
+        &self,
+        key: &TargetKey,
+        rule: usize,
+        size: u64,
+        diagnose: impl FnOnce() -> (FileStatus, Option<String>),
+    ) -> Option<(u64, FileStatus, Option<String>)> {
+        let shard = self.hasher.hash_one(key) as usize % INDEX_SHARDS;
+        let mut targets = self.targets[shard].lock().unwrap();
+        // Diagnose a shared path once so parallel probes never lock each other out.
+        match targets.entry(key.clone()) {
+            Entry::Vacant(entry) => {
+                let (status, reason) = diagnose();
+                entry.insert(IndexedTarget {
+                    size,
+                    status,
+                    reason: reason.clone(),
+                    first_rule: rule,
+                    other_rules: Vec::new(),
+                });
+                Some((size, status, reason))
+            }
+            Entry::Occupied(mut entry) => {
+                let target = entry.get_mut();
+                if target.first_rule == rule || target.other_rules.contains(&rule) {
+                    return None;
+                }
+                target.other_rules.push(rule);
+                Some((target.size, target.status, target.reason.clone()))
+            }
+        }
+    }
+
+    fn summarize(self, rules: &[CleanupRule]) -> CleanupScanSummary {
+        let mut summary = CleanupScanSummary::default();
+        let mut overlaps = BTreeMap::<Vec<usize>, u64>::new();
+        for shard in self.targets {
+            for mut target in shard.into_inner().unwrap().into_values() {
+                match target.status {
+                    FileStatus::Ready => {
+                        summary.cleanable_bytes += target.size;
+                        if !target.other_rules.is_empty() && target.size != 0 {
+                            target.other_rules.push(target.first_rule);
+                            target.other_rules.sort_unstable();
+                            *overlaps.entry(target.other_rules).or_default() += target.size;
+                        }
+                    }
+                    FileStatus::Locked => summary.skipped_locked_bytes += target.size,
+                    FileStatus::Protected => summary.skipped_protected_bytes += target.size,
+                }
+            }
+        }
+        summary.overlaps = overlaps
+            .into_iter()
+            .map(|(indices, cleanable_bytes)| CleanupOverlap {
+                rule_ids: indices
+                    .into_iter()
+                    .map(|index| rules[index].id.clone())
+                    .collect(),
+                cleanable_bytes,
+            })
+            .collect();
+        summary
+    }
+}
+
+struct CollectedTargets<'a> {
+    files: CollectedFiles<'a>,
     removable_dirs: Vec<PathBuf>,
-    driver_targets: Vec<(String, u64)>,
     is_system_task: bool,
     system_task_proc: Option<String>,
     system_task_hint: Option<LocalizedText>,
@@ -100,27 +233,52 @@ struct FileTotals {
 }
 
 #[derive(Default)]
-struct CollectedFiles {
+struct CollectedFiles<'a> {
     preview_only: bool,
+    index: Option<(&'a ScanIndex, usize)>,
+    targets: Vec<(TargetKey, PreviewFile)>,
     items: Vec<PreviewFile>,
     ready: FileTotals,
     locked: FileTotals,
     protected: FileTotals,
 }
 
-impl CollectedFiles {
-    fn push(&mut self, file: PreviewFile) {
-        if self.preview_only {
-            let totals = match file.status {
-                FileStatus::Ready => &mut self.ready,
-                FileStatus::Locked => &mut self.locked,
-                FileStatus::Protected => &mut self.protected,
-            };
-            totals.bytes += file.size_bytes;
-            totals.count += 1;
+impl CollectedFiles<'_> {
+    fn observe(
+        &self,
+        key: &TargetKey,
+        seen_paths: &mut HashSet<TargetKey>,
+        size: u64,
+        diagnose: impl FnOnce() -> (FileStatus, Option<String>),
+    ) -> Option<(u64, FileStatus, Option<String>)> {
+        if let Some((index, rule)) = self.index {
+            return index.observe(key, rule, size, diagnose);
         }
+        if !seen_paths.insert(key.clone()) {
+            return None;
+        }
+        let (status, reason) = diagnose();
+        Some((size, status, reason))
+    }
+
+    fn record(&mut self, key: TargetKey, file: PreviewFile) {
+        if self.preview_only {
+            self.push_preview(file);
+        } else {
+            self.targets.push((key, file));
+        }
+    }
+
+    fn push_preview(&mut self, file: PreviewFile) {
+        let totals = match file.status {
+            FileStatus::Ready => &mut self.ready,
+            FileStatus::Locked => &mut self.locked,
+            FileStatus::Protected => &mut self.protected,
+        };
+        totals.bytes += file.size_bytes;
+        totals.count += 1;
         self.items.push(file);
-        if self.preview_only && self.items.len() == MAX_PREVIEW_FILES * 2 {
+        if self.items.len() == MAX_PREVIEW_FILES * 2 {
             self.trim_preview();
         }
     }
@@ -171,15 +329,29 @@ pub fn scan_all(rules: &[CleanupRule], sys: &SystemInfo) -> Vec<CleanupScanResul
         .collect()
 }
 
+pub fn scan_all_with_summary(rules: &[CleanupRule], sys: &SystemInfo) -> CleanupBatchScan {
+    let index = ScanIndex::default();
+    let items = rules
+        .par_iter()
+        .enumerate()
+        .map(|(rule_index, rule)| scan_rule_with_budget(rule, sys, 64, Some((&index, rule_index))))
+        .filter(|result| result.applicable)
+        .collect();
+    CleanupBatchScan {
+        items,
+        summary: index.summarize(rules),
+    }
+}
+
 /// Scans a single rule using fast budgeted handle probing (ideal for bulk `scan_all`).
 pub fn scan_rule(rule: &CleanupRule, sys: &SystemInfo) -> CleanupScanResult {
-    scan_rule_with_budget(rule, sys, 64)
+    scan_rule_with_budget(rule, sys, 64, None)
 }
 
 /// Scans a single rule with full handle diagnostics and a single batched Restart Manager lock check
 /// across up to the top 6 locked files in `preview_files`.
 pub fn scan_rule_preview(rule: &CleanupRule, sys: &SystemInfo) -> CleanupScanResult {
-    let mut res = scan_rule_with_budget(rule, sys, usize::MAX);
+    let mut res = scan_rule_with_budget(rule, sys, usize::MAX, None);
     let locked_indices: Vec<usize> = res
         .preview_files
         .iter()
@@ -215,6 +387,7 @@ fn scan_rule_with_budget(
     rule: &CleanupRule,
     sys: &SystemInfo,
     probe_budget: usize,
+    index: Option<(&ScanIndex, usize)>,
 ) -> CleanupScanResult {
     let Some(active_scan) = select_active_scan(rule, sys) else {
         return empty_result(rule, false);
@@ -233,7 +406,7 @@ fn scan_rule_with_budget(
         .clone()
         .or_else(|| rule.warning.clone());
 
-    let mut collected = collect_scan_targets(active_scan, sys, probe_budget, true);
+    let mut collected = collect_scan_targets(active_scan, sys, probe_budget, true, index);
     collected.files.trim_preview();
 
     CleanupScanResult {
@@ -266,37 +439,113 @@ pub fn execute_cleanup(
     dry_run: bool,
 ) -> CleanupExecutionReport {
     let wanted: HashSet<&str> = rule_ids.iter().map(|s| s.as_str()).collect();
-    let selected: Vec<&CleanupRule> = rules
-        .iter()
-        .filter(|r| wanted.contains(r.id.as_str()))
-        .collect();
+    let (mut outcomes, targets, mut dirs) = plan_cleanup(rules, &wanted, sys, dry_run);
+    for target in targets {
+        let outcome = &mut outcomes[target.owner];
+        match target.apply(dry_run) {
+            Ok((FileStatus::Ready, bytes)) => {
+                outcome.deleted_files += 1;
+                outcome.deleted_bytes += bytes;
+            }
+            Ok((FileStatus::Locked, _)) => outcome.skipped_locked_files += 1,
+            Ok((FileStatus::Protected, _)) => outcome.skipped_protected_files += 1,
+            Err(error) => {
+                outcome.failed_files += 1;
+                if outcome.errors.len() < 10 {
+                    outcome.errors.push(format!("{}: {error}", target.path));
+                }
+            }
+        }
+    }
 
-    let outcomes: Vec<RuleCleanOutcome> = selected
-        .par_iter()
-        .map(|rule| execute_single_rule(rule, sys, dry_run))
-        .collect();
-
-    let total_deleted_bytes = outcomes.iter().map(|o| o.deleted_bytes).sum();
-    let total_deleted_files = outcomes.iter().map(|o| o.deleted_files).sum();
-    let total_skipped_files = outcomes
-        .iter()
-        .map(|o| o.skipped_locked_files + o.skipped_protected_files)
-        .sum();
+    if !dry_run {
+        dirs.sort_by_key(|dir| Reverse(dir.components().count()));
+        for dir in dirs {
+            if std::fs::symlink_metadata(&dir).is_ok_and(|meta| {
+                meta.is_dir() && meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT == 0
+            }) {
+                let _ = std::fs::remove_dir(dir);
+            }
+        }
+    }
 
     CleanupExecutionReport {
         dry_run,
-        total_deleted_bytes,
-        total_deleted_files,
-        total_skipped_files,
+        total_deleted_bytes: outcomes.iter().map(|o| o.deleted_bytes).sum(),
+        total_deleted_files: outcomes.iter().map(|o| o.deleted_files).sum(),
+        total_skipped_files: outcomes
+            .iter()
+            .map(|o| o.skipped_locked_files + o.skipped_protected_files)
+            .sum(),
         outcomes,
     }
 }
 
-fn execute_single_rule(rule: &CleanupRule, sys: &SystemInfo, dry_run: bool) -> RuleCleanOutcome {
-    let Some(active_scan) = select_active_scan(rule, sys) else {
-        return RuleCleanOutcome {
+struct PlannedTarget {
+    owner: usize,
+    path: String,
+    size: u64,
+    status: FileStatus,
+    action: CleanupAction,
+}
+
+enum CleanupAction {
+    Delete,
+    Recycle,
+    RemoveDriver(String),
+}
+
+impl PlannedTarget {
+    fn apply(&self, dry_run: bool) -> anyhow::Result<(FileStatus, u64)> {
+        if dry_run || self.status != FileStatus::Ready {
+            return Ok((self.status, self.size));
+        }
+        if let CleanupAction::RemoveDriver(name) = &self.action {
+            crate::drivers::delete_driver(name)?;
+            return Ok((FileStatus::Ready, self.size));
+        }
+
+        let path = Path::new(&self.path);
+        let meta = std::fs::symlink_metadata(path)?;
+        if !meta.is_file() || meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            return Ok((FileStatus::Protected, 0));
+        }
+        let (status, _) = diagnose_file(path, &self.path);
+        if status != FileStatus::Ready {
+            return Ok((status, 0));
+        }
+        if matches!(self.action, CleanupAction::Recycle) {
+            crate::diskmap::recycle_path(path)?;
+        } else {
+            remove_file_safe(path, meta.permissions())?;
+        }
+        Ok((FileStatus::Ready, meta.len()))
+    }
+}
+
+fn plan_cleanup(
+    rules: &[CleanupRule],
+    wanted: &HashSet<&str>,
+    sys: &SystemInfo,
+    dry_run: bool,
+) -> (Vec<RuleCleanOutcome>, Vec<PlannedTarget>, Vec<PathBuf>) {
+    let mut outcomes = Vec::new();
+    let mut targets: Vec<PlannedTarget> = Vec::new();
+    let mut by_key = HashMap::<TargetKey, usize>::new();
+    let mut dirs = Vec::new();
+    let mut seen_dirs = HashSet::new();
+
+    for rule in rules
+        .iter()
+        .filter(|rule| wanted.contains(rule.id.as_str()))
+    {
+        let owner = outcomes.len();
+        let active_scan = select_active_scan(rule, sys);
+        outcomes.push(RuleCleanOutcome {
             id: rule.id.clone(),
-            name: rule.name.clone(),
+            name: active_scan
+                .and_then(|scan| scan.name_override.clone())
+                .unwrap_or_else(|| rule.name.clone()),
             dry_run,
             deleted_bytes: 0,
             deleted_files: 0,
@@ -304,109 +553,52 @@ fn execute_single_rule(rule: &CleanupRule, sys: &SystemInfo, dry_run: bool) -> R
             skipped_protected_files: 0,
             failed_files: 0,
             errors: Vec::new(),
+        });
+        let Some(active_scan) = active_scan else {
+            continue;
         };
-    };
+        let collected = collect_scan_targets(active_scan, sys, usize::MAX, false, None);
+        let recycle = collected.system_task_proc.as_deref() == Some("BuiltinInstallerCleanup");
 
-    let collected = collect_scan_targets(active_scan, sys, usize::MAX, false);
-    let mut deleted_bytes = 0u64;
-    let mut deleted_files = 0usize;
-    let mut skipped_locked_files = 0usize;
-    let mut skipped_protected_files = 0usize;
-    let mut failed_files = 0usize;
-    let mut errors = Vec::new();
-
-    if !collected.driver_targets.is_empty() {
-        for (published_name, size_bytes) in &collected.driver_targets {
-            if dry_run {
-                deleted_bytes += *size_bytes;
-                deleted_files += 1;
-            } else {
-                match crate::drivers::delete_driver(published_name) {
-                    Ok(_) => {
-                        deleted_bytes += *size_bytes;
-                        deleted_files += 1;
-                    }
-                    Err(e) => {
-                        failed_files += 1;
-                        if errors.len() < 10 {
-                            errors.push(format!("{}: {}", published_name, e));
-                        }
-                    }
+        for (key, file) in collected.files.targets {
+            if let Some(&index) = by_key.get(&key) {
+                let target = &mut targets[index];
+                target.status = target.status.max(file.status);
+                if recycle && matches!(target.action, CleanupAction::Delete) {
+                    target.action = CleanupAction::Recycle;
                 }
+                continue;
             }
+            let action = match &key {
+                TargetKey::Driver(name) => CleanupAction::RemoveDriver(name.clone()),
+                TargetKey::File(_) if recycle => CleanupAction::Recycle,
+                TargetKey::File(_) => CleanupAction::Delete,
+            };
+            by_key.insert(key, targets.len());
+            targets.push(PlannedTarget {
+                owner,
+                path: file.path,
+                size: file.size_bytes,
+                status: file.status,
+                action,
+            });
         }
-    } else {
-        for f in &collected.files.items {
-            match f.status {
-                FileStatus::Locked => {
-                    skipped_locked_files += 1;
-                }
-                FileStatus::Protected => {
-                    skipped_protected_files += 1;
-                }
-                FileStatus::Ready => {
-                    if dry_run {
-                        deleted_bytes += f.size_bytes;
-                        deleted_files += 1;
-                    } else {
-                        let p = Path::new(&f.path);
-                        let delete_res = if collected.system_task_proc.as_deref()
-                            == Some("BuiltinInstallerCleanup")
-                        {
-                            crate::diskmap::recycle_path(p).map(|_| ())
-                        } else {
-                            remove_file_safe(p).map_err(|e| anyhow::anyhow!(e))
-                        };
-                        match delete_res {
-                            Ok(()) => {
-                                deleted_bytes += f.size_bytes;
-                                deleted_files += 1;
-                            }
-                            Err(e) => {
-                                failed_files += 1;
-                                if errors.len() < 10 {
-                                    errors.push(format!("{}: {}", f.path, e));
-                                }
-                            }
-                        }
-                    }
-                }
-            }
+        if !dry_run {
+            dirs.extend(
+                collected
+                    .removable_dirs
+                    .into_iter()
+                    .filter(|dir| seen_dirs.insert(TargetKey::file(dir))),
+            );
         }
     }
-
-    // Remove emptied subdirectories deepest-first (never deleting preserved root folders)
-    if !dry_run {
-        let mut dirs = collected.removable_dirs;
-        dirs.sort_by(|a, b| b.components().count().cmp(&a.components().count()));
-        for d in dirs {
-            let _ = std::fs::remove_dir(&d);
-        }
-    }
-
-    RuleCleanOutcome {
-        id: rule.id.clone(),
-        name: active_scan
-            .name_override
-            .clone()
-            .unwrap_or_else(|| rule.name.clone()),
-        dry_run,
-        deleted_bytes,
-        deleted_files,
-        skipped_locked_files,
-        skipped_protected_files,
-        failed_files,
-        errors,
-    }
+    (outcomes, targets, dirs)
 }
 
-fn remove_file_safe(path: &Path) -> std::io::Result<()> {
-    if let Ok(meta) = std::fs::symlink_metadata(path) {
-        let mut perms = meta.permissions();
-        if perms.readonly() {
-            perms.set_readonly(false);
-            let _ = std::fs::set_permissions(path, perms);
-        }
+fn remove_file_safe(path: &Path, mut perms: std::fs::Permissions) -> std::io::Result<()> {
+    if perms.readonly() {
+        perms.set_readonly(false);
+        let _ = std::fs::set_permissions(path, perms);
     }
     std::fs::remove_file(path)
 }
@@ -440,19 +632,20 @@ fn select_active_scan<'a>(rule: &'a CleanupRule, sys: &SystemInfo) -> Option<&'a
         .find(|scan| eval_condition(&scan.applicable, sys))
 }
 
-fn collect_scan_targets(
+fn collect_scan_targets<'a>(
     scan: &CleanupScan,
     sys: &SystemInfo,
     mut probe_budget: usize,
     preview_only: bool,
-) -> CollectedTargets {
+    index: Option<(&'a ScanIndex, usize)>,
+) -> CollectedTargets<'a> {
     let mut files = CollectedFiles {
         preview_only,
+        index,
         ..CollectedFiles::default()
     };
-    let mut seen_paths = HashSet::<String>::new();
+    let mut seen_paths = HashSet::<TargetKey>::new();
     let mut removable_dirs = Vec::new();
-    let mut driver_targets = Vec::new();
     let mut is_system_task = false;
     let mut system_task_proc = scan_custom_proc_name(scan);
     let mut system_task_hint: Option<LocalizedText> = None;
@@ -492,7 +685,6 @@ fn collect_scan_targets(
                     &mut files,
                     &mut seen_paths,
                     &mut removable_dirs,
-                    &mut driver_targets,
                     &mut is_system_task,
                     &mut system_task_proc,
                     &mut system_task_hint,
@@ -506,7 +698,6 @@ fn collect_scan_targets(
     CollectedTargets {
         files,
         removable_dirs,
-        driver_targets,
         is_system_task,
         system_task_proc,
         system_task_hint,
@@ -520,8 +711,8 @@ fn collect_general_action(
     queries: &[String],
     excluded: &[String],
     sys: &SystemInfo,
-    files: &mut CollectedFiles,
-    seen_paths: &mut HashSet<String>,
+    files: &mut CollectedFiles<'_>,
+    seen_paths: &mut HashSet<TargetKey>,
     removable_dirs: &mut Vec<PathBuf>,
     probe_budget: &mut usize,
 ) {
@@ -605,7 +796,9 @@ fn collect_general_action(
                             sys.is_admin,
                             probe_budget,
                         );
-                    } else if t_meta.is_dir() && (t_meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT) == 0 {
+                    } else if t_meta.is_dir()
+                        && (t_meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT) == 0
+                    {
                         walk_dir_filtered(
                             &target,
                             &root_dir,
@@ -629,10 +822,9 @@ fn collect_general_action(
 fn handle_custom_proc(
     proc_name: &str,
     sys: &SystemInfo,
-    files: &mut CollectedFiles,
-    seen_paths: &mut HashSet<String>,
+    files: &mut CollectedFiles<'_>,
+    seen_paths: &mut HashSet<TargetKey>,
     removable_dirs: &mut Vec<PathBuf>,
-    driver_targets: &mut Vec<(String, u64)>,
     is_system_task: &mut bool,
     system_task_proc: &mut Option<String>,
     system_task_hint: &mut Option<LocalizedText>,
@@ -658,7 +850,17 @@ fn handle_custom_proc(
                 r"%SystemRoot%\DeliveryOptimization",
                 r"%SystemRoot%\ServiceProfiles\NetworkService\AppData\Local\Microsoft\Windows\DeliveryOptimization",
             ] {
-                collect_general_action(p, "Directory|File", &[], &[], sys, files, seen_paths, removable_dirs, probe_budget);
+                collect_general_action(
+                    p,
+                    "Directory|File",
+                    &[],
+                    &[],
+                    sys,
+                    files,
+                    seen_paths,
+                    removable_dirs,
+                    probe_budget,
+                );
             }
         }
         "BuiltinPackageCacheCleanup" => {
@@ -691,7 +893,17 @@ fn handle_custom_proc(
             let orphans = crate::systasks::find_orphaned_installer_files();
             let orphan_count = orphans.len();
             for (path, sz) in orphans {
-                record_file_with_size(&path, sz, files, seen_paths, sys.is_admin, probe_budget);
+                let reparse = std::fs::symlink_metadata(&path)
+                    .is_ok_and(|meta| meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0);
+                record_file_with_size(
+                    &path,
+                    sz,
+                    reparse,
+                    files,
+                    seen_paths,
+                    sys.is_admin,
+                    probe_budget,
+                );
             }
             *is_system_task = false;
             *system_task_proc = Some(proc_name.to_string());
@@ -711,7 +923,17 @@ fn handle_custom_proc(
                 r"%SystemRoot%\WinSxS\Temp\PendingDeletes",
                 r"%SystemRoot%\WinSxS\Temp\PendingRenames",
             ] {
-                collect_general_action(p, "File", &[], &[], sys, files, seen_paths, removable_dirs, probe_budget);
+                collect_general_action(
+                    p,
+                    "File",
+                    &[],
+                    &[],
+                    sys,
+                    files,
+                    seen_paths,
+                    removable_dirs,
+                    probe_budget,
+                );
             }
             *is_system_task = true;
             *system_task_proc = Some(proc_name.to_string());
@@ -750,25 +972,27 @@ fn handle_custom_proc(
                 .filter(|d| d.is_outdated_duplicate)
                 .collect();
             for d in &outdated {
-                let key = d.published_name.to_ascii_lowercase();
-                if seen_paths.insert(key) {
+                let key = TargetKey::Driver(d.published_name.to_ascii_lowercase());
+                if let Some((size_bytes, status, _)) =
+                    files.observe(&key, seen_paths, d.size_bytes, || (FileStatus::Ready, None))
+                {
                     let newer = d.newer_version.as_deref().unwrap_or("newer");
-                    files.push(PreviewFile {
-                        path: format!(
-                            "{} [{} · {} v{} -> {}]",
-                            d.repo_path, d.published_name, d.original_name, d.version, newer
-                        ),
-                        size_bytes: d.size_bytes,
-                        status: FileStatus::Ready,
-                        reason: Some(format!(
-                            "已被更新版本 {} 取代，将通过 pnputil 安全移除 ({})",
-                            newer, d.published_name
-                        )),
-                        locking_processes: Vec::new(),
-                    });
-                    if !files.preview_only {
-                        driver_targets.push((d.published_name.clone(), d.size_bytes));
-                    }
+                    files.record(
+                        key,
+                        PreviewFile {
+                            path: format!(
+                                "{} [{} · {} v{} -> {}]",
+                                d.repo_path, d.published_name, d.original_name, d.version, newer
+                            ),
+                            size_bytes,
+                            status,
+                            reason: Some(format!(
+                                "已被更新版本 {} 取代，将通过 pnputil 安全移除 ({})",
+                                newer, d.published_name
+                            )),
+                            locking_processes: Vec::new(),
+                        },
+                    );
                 }
             }
             *is_system_task = false;
@@ -790,7 +1014,17 @@ fn handle_custom_proc(
                 r"%ProgramFiles%\WindowsApps\Deleted",
                 r"%LOCALAPPDATA%\Packages\*\TempState",
             ] {
-                collect_general_action(p, "Directory|File", &[], &[], sys, files, seen_paths, removable_dirs, probe_budget);
+                collect_general_action(
+                    p,
+                    "Directory|File",
+                    &[],
+                    &[],
+                    sys,
+                    files,
+                    seen_paths,
+                    removable_dirs,
+                    probe_budget,
+                );
             }
             *is_system_task = true;
             *system_task_proc = Some(proc_name.to_string());
@@ -827,7 +1061,9 @@ fn flags_allows_dirs(flags: &str) -> bool {
     if flags.trim().is_empty() {
         return true;
     }
-    flags.split('|').any(|f| f.trim().eq_ignore_ascii_case("Directory"))
+    flags
+        .split('|')
+        .any(|f| f.trim().eq_ignore_ascii_case("Directory"))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -838,8 +1074,8 @@ fn walk_dir_filtered(
     allow_dirs: bool,
     remove_self: bool,
     sys_is_admin: bool,
-    files: &mut CollectedFiles,
-    seen_paths: &mut HashSet<String>,
+    files: &mut CollectedFiles<'_>,
+    seen_paths: &mut HashSet<TargetKey>,
     removable_dirs: &mut Vec<PathBuf>,
     probe_budget: &mut usize,
 ) {
@@ -910,45 +1146,72 @@ fn is_excluded(path: &Path, anchor_root: &Path, exclusions: &[String]) -> bool {
 fn record_file_with_meta(
     path: &Path,
     meta: Option<&std::fs::Metadata>,
-    files: &mut CollectedFiles,
-    seen_paths: &mut HashSet<String>,
+    files: &mut CollectedFiles<'_>,
+    seen_paths: &mut HashSet<TargetKey>,
     sys_is_admin: bool,
     probe_budget: &mut usize,
 ) {
-    let size_bytes = meta
-        .map(|m| m.len())
-        .unwrap_or_else(|| std::fs::symlink_metadata(path).map(|m| m.len()).unwrap_or(0));
-    record_file_with_size(path, size_bytes, files, seen_paths, sys_is_admin, probe_budget);
+    let owned;
+    let meta = match meta {
+        Some(meta) => meta,
+        None => {
+            let Ok(meta) = std::fs::symlink_metadata(path) else {
+                return;
+            };
+            owned = meta;
+            &owned
+        }
+    };
+    let reparse = meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0;
+    record_file_with_size(
+        path,
+        meta.len(),
+        reparse,
+        files,
+        seen_paths,
+        sys_is_admin,
+        probe_budget,
+    );
 }
 
 fn record_file_with_size(
     path: &Path,
     size_bytes: u64,
-    files: &mut CollectedFiles,
-    seen_paths: &mut HashSet<String>,
+    reparse: bool,
+    files: &mut CollectedFiles<'_>,
+    seen_paths: &mut HashSet<TargetKey>,
     sys_is_admin: bool,
     probe_budget: &mut usize,
 ) {
     let path_str = path.to_string_lossy().into_owned();
-    let key = path_str.to_ascii_lowercase();
-    if !seen_paths.insert(key) {
-        return;
-    }
-    let (status, reason) = if *probe_budget > 0 || size_bytes >= 4 * 1024 * 1024 {
-        if *probe_budget > 0 {
-            *probe_budget -= 1;
+    let key = TargetKey::file(path);
+    let Some((size_bytes, status, reason)) = files.observe(&key, seen_paths, size_bytes, || {
+        if reparse {
+            (
+                FileStatus::Protected,
+                Some("Windows reparse point".to_string()),
+            )
+        } else if *probe_budget > 0 || size_bytes >= 4 * 1024 * 1024 {
+            if *probe_budget > 0 {
+                *probe_budget -= 1;
+            }
+            diagnose_file(path, &path_str)
+        } else {
+            diagnose_file_fast(&path_str, sys_is_admin)
         }
-        diagnose_file(path, &path_str)
-    } else {
-        diagnose_file_fast(&path_str, sys_is_admin)
+    }) else {
+        return;
     };
-    files.push(PreviewFile {
-        path: path_str,
-        size_bytes,
-        status,
-        reason,
-        locking_processes: Vec::new(),
-    });
+    files.record(
+        key,
+        PreviewFile {
+            path: path_str,
+            size_bytes,
+            status,
+            reason,
+            locking_processes: Vec::new(),
+        },
+    );
 }
 
 fn diagnose_file_fast(path_str: &str, is_admin: bool) -> (FileStatus, Option<String>) {
@@ -1044,7 +1307,7 @@ mod tests {
             ..CollectedFiles::default()
         };
         for id in 0..250 {
-            files.push(PreviewFile {
+            files.push_preview(PreviewFile {
                 path: id.to_string(),
                 size_bytes: if id == 249 { 10 } else { 1 },
                 status: if id == 249 {
@@ -1068,22 +1331,9 @@ mod tests {
         assert_eq!(files.locked.bytes, 10);
     }
 
-    #[test]
-    fn test_scan_exclusion_and_dry_run_vs_execute_in_sandbox() {
-        let base = std::env::temp_dir().join(format!("dismnext_clean_test_{}", std::process::id()));
-        let _ = fs::remove_dir_all(&base);
-        let sub = base.join("cache_dir");
-        fs::create_dir_all(&sub).unwrap();
-
-        let keep_file = base.join("keep.ini");
-        let junk_a = base.join("junk1.tmp");
-        let junk_b = sub.join("junk2.tmp");
-        File::create(&keep_file).unwrap().write_all(b"keep").unwrap();
-        File::create(&junk_a).unwrap().write_all(b"1234567890").unwrap();
-        File::create(&junk_b).unwrap().write_all(b"abcdef").unwrap();
-
-        let rule = CleanupRule {
-            id: "test-001".to_string(),
+    fn test_rule(id: &str, root: &Path, excluded: &[&str]) -> CleanupRule {
+        CleanupRule {
+            id: id.to_string(),
             name: LocalizedText {
                 zh: "测试规则".into(),
                 en: "Test Rule".into(),
@@ -1109,16 +1359,147 @@ mod tests {
                 applicable: Condition::True,
                 named_applicables: HashMap::new(),
                 actions: vec![Action::General {
-                    root_path: base.to_string_lossy().into_owned(),
+                    root_path: root.to_string_lossy().into_owned(),
                     flags: "Directory|File".to_string(),
                     id: None,
                     queries: Vec::new(),
-                    excluded: vec!["keep.ini".to_string()],
+                    excluded: excluded.iter().map(|name| name.to_string()).collect(),
                 }],
                 rescan: false,
                 restart: None,
             }],
-        };
+        }
+    }
+
+    #[test]
+    fn overlapping_rules_share_one_target_even_outside_the_preview() {
+        let base = std::env::temp_dir().join(format!("dismnext_overlap_{}", std::process::id()));
+        let nested = base.join("nested");
+        fs::create_dir_all(&nested).unwrap();
+        let shared = nested.join("shared.tmp");
+        let only_b = nested.join("only-b.tmp");
+        fs::write(&shared, [0]).unwrap();
+        fs::write(&only_b, [0; 3]).unwrap();
+        for index in 0..110 {
+            fs::write(base.join(format!("cache-{index}.tmp")), [0; 2]).unwrap();
+        }
+
+        let rule_a = test_rule("a", &base, &["only-b.tmp"]);
+        let rule_b = test_rule("b", &nested, &[]);
+        let mut rule_c = test_rule("c", &shared, &[]);
+        let repeated = rule_c.scans[0].actions[0].clone();
+        rule_c.scans[0].actions.push(repeated);
+        let rules = [rule_a, rule_b, rule_c];
+        let sys = SystemInfo::collect();
+
+        let batch = scan_all_with_summary(&rules, &sys);
+        assert_eq!(
+            batch
+                .items
+                .iter()
+                .map(|rule| rule.cleanable_bytes)
+                .collect::<Vec<_>>(),
+            [221, 4, 1]
+        );
+        assert!(batch.items[0]
+            .preview_files
+            .iter()
+            .all(|file| !file.path.ends_with("shared.tmp")));
+        assert_eq!(batch.summary.cleanable_bytes, 224);
+        assert_eq!(batch.summary.overlaps.len(), 1);
+        assert_eq!(batch.summary.overlaps[0].rule_ids, ["a", "b", "c"]);
+        assert_eq!(batch.summary.overlaps[0].cleanable_bytes, 1);
+
+        let selected = ["b".into(), "c".into()];
+        let dry = execute_cleanup(&rules, &selected, &sys, true);
+        assert_eq!(dry.total_deleted_bytes, 4);
+        assert_eq!(dry.total_deleted_files, 2);
+        assert!(shared.exists() && only_b.exists());
+
+        let real = execute_cleanup(&rules, &selected, &sys, false);
+        assert_eq!(real.total_deleted_bytes, dry.total_deleted_bytes);
+        assert_eq!(real.total_deleted_files, dry.total_deleted_files);
+        assert_eq!(real.outcomes[1].deleted_files, 0);
+        assert!(real
+            .outcomes
+            .iter()
+            .all(|outcome| outcome.failed_files == 0));
+        assert!(!shared.exists() && !only_b.exists());
+        assert!(nested.exists());
+        fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn planned_file_is_rechecked_before_deletion() {
+        use std::os::windows::fs::OpenOptionsExt;
+
+        let path =
+            std::env::temp_dir().join(format!("dismnext_recheck_{}.tmp", std::process::id()));
+        fs::write(&path, b"keep").unwrap();
+        let rules = [test_rule("test", &path, &[])];
+        let (_, targets, _) = plan_cleanup(
+            &rules,
+            &HashSet::from(["test"]),
+            &SystemInfo::collect(),
+            false,
+        );
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].status, FileStatus::Ready);
+
+        let handle = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(&path)
+            .unwrap();
+        let result = targets[0].apply(false).unwrap();
+        drop(handle);
+        assert_eq!(result.0, FileStatus::Locked);
+        assert!(path.exists());
+        fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn target_keys_normalize_windows_path_spellings() {
+        let key = TargetKey::file(Path::new(r"C:\Temp\Cache\sample.tmp"));
+        assert_eq!(
+            key,
+            TargetKey::file(Path::new(r"c:/TEMP/cache/./SAMPLE.TMP"))
+        );
+        assert_eq!(
+            key,
+            TargetKey::file(Path::new(r"C:\Temp\Cache\nested\..\sample.tmp"))
+        );
+        assert_eq!(
+            key,
+            TargetKey::file(Path::new(r"\\?\C:\Temp\Cache\sample.tmp"))
+        );
+        assert_ne!(
+            key,
+            TargetKey::file(Path::new(r"C:\Temp\Cache\another.tmp"))
+        );
+    }
+
+    #[test]
+    fn test_scan_exclusion_and_dry_run_vs_execute_in_sandbox() {
+        let base = std::env::temp_dir().join(format!("dismnext_clean_test_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        let sub = base.join("cache_dir");
+        fs::create_dir_all(&sub).unwrap();
+
+        let keep_file = base.join("keep.ini");
+        let junk_a = base.join("junk1.tmp");
+        let junk_b = sub.join("junk2.tmp");
+        File::create(&keep_file)
+            .unwrap()
+            .write_all(b"keep")
+            .unwrap();
+        File::create(&junk_a)
+            .unwrap()
+            .write_all(b"1234567890")
+            .unwrap();
+        File::create(&junk_b).unwrap().write_all(b"abcdef").unwrap();
+
+        let rule = test_rule("test-001", &base, &["keep.ini"]);
 
         let sys = SystemInfo::collect();
         let scan_res = scan_rule(&rule, &sys);

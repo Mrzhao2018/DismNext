@@ -1,5 +1,5 @@
 use crate::catalog::Catalog;
-use crate::cleaner::{execute_cleanup, scan_all, scan_rule_preview};
+use crate::cleaner::{execute_cleanup, scan_all_with_summary, scan_rule_preview};
 use crate::diskmap::{analyze_path, find_duplicate_files, find_orphaned_app_dirs};
 use crate::drivers::{default_backup_dir, export_drivers, list_drivers};
 use crate::features::{list_optional_features, FeatureCategory};
@@ -551,17 +551,13 @@ fn dispatch_tool_call(name: &str, args: &Value, catalog: &Catalog) -> Result<Val
                 let res = scan_rule_preview(rule, &sys);
                 Ok(serde_json::to_value(res)?)
             } else {
-                let results = scan_all(&catalog.cleanup_rules, &sys);
-                let total_cleanable_bytes: u64 = results.iter().map(|r| r.cleanable_bytes).sum();
-                let total_locked_bytes: u64 = results.iter().map(|r| r.skipped_locked_bytes).sum();
-                let total_protected_bytes: u64 =
-                    results.iter().map(|r| r.skipped_protected_bytes).sum();
+                let scan = scan_all_with_summary(&catalog.cleanup_rules, &sys);
                 Ok(json!({
-                    "applicable_rule_count": results.len(),
-                    "total_cleanable_bytes": total_cleanable_bytes,
-                    "total_skipped_locked_bytes": total_locked_bytes,
-                    "total_skipped_protected_bytes": total_protected_bytes,
-                    "rules": results
+                    "applicable_rule_count": scan.items.len(),
+                    "total_cleanable_bytes": scan.summary.cleanable_bytes,
+                    "total_skipped_locked_bytes": scan.summary.skipped_locked_bytes,
+                    "total_skipped_protected_bytes": scan.summary.skipped_protected_bytes,
+                    "rules": scan.items
                 }))
             }
         }

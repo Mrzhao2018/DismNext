@@ -1,5 +1,5 @@
 use crate::catalog::Catalog;
-use crate::cleaner::{scan_all, CleanupScanResult};
+use crate::cleaner::{scan_all_with_summary, CleanupBatchScan, CleanupScanResult};
 use crate::drivers::list_drivers;
 use crate::startup::{list_scheduled_tasks, list_startup_items, list_third_party_services};
 use crate::sysinfo::SystemInfo;
@@ -41,17 +41,17 @@ pub struct HealthReportPayload {
 }
 
 /// Computes a comprehensive Windows health audit and renders Markdown + HTML reports.
-/// Pass `cached_scans` when the server already holds fresh `scan_all` results to avoid rescanning.
+/// Pass `cached_scans` when the server already holds a fresh complete batch scan.
 pub fn generate_health_report(
     catalog: &Catalog,
-    cached_scans: Option<&[CleanupScanResult]>,
+    cached_scans: Option<&CleanupBatchScan>,
 ) -> HealthReportPayload {
     let sys = SystemInfo::collect();
     let owned_scans;
-    let scans: &[CleanupScanResult] = match cached_scans {
+    let scans = match cached_scans {
         Some(s) => s,
         None => {
-            owned_scans = scan_all(&catalog.cleanup_rules, &sys);
+            owned_scans = scan_all_with_summary(&catalog.cleanup_rules, &sys);
             &owned_scans
         }
     };
@@ -73,9 +73,9 @@ pub fn generate_health_report(
     let enabled_tasks = tasks.iter().filter(|t| t.enabled).count();
     let win32_apps = list_win32_apps();
 
-    let reclaimable_bytes: u64 = scans.iter().map(|r| r.cleanable_bytes).sum();
+    let reclaimable_bytes = scans.summary.cleanable_bytes;
 
-    let mut ranked: Vec<&CleanupScanResult> = scans
+    let mut ranked: Vec<&CleanupScanResult> = scans.items
         .iter()
         .filter(|r| r.cleanable_bytes > 0)
         .collect();
@@ -448,9 +448,12 @@ mod tests {
     #[test]
     fn test_generate_health_report_markdown_and_html() {
         let catalog = Catalog::load(None).expect("catalog should load");
-        let report = generate_health_report(&catalog, Some(&[]));
+        let mut scan = CleanupBatchScan::default();
+        scan.summary.cleanable_bytes = 42;
+        let report = generate_health_report(&catalog, Some(&scan));
         assert!(report.health_score <= 100);
         assert!(report.disk_total_bytes > 0);
+        assert_eq!(report.reclaimable_bytes, 42);
         assert!(report.markdown.contains("DismNext 系统健康诊断与空间体检报告"));
         assert!(report.html.contains("<!DOCTYPE html>"));
         assert!(report.html.contains("DismNext 系统健康体检报告"));

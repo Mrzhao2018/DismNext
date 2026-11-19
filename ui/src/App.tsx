@@ -1,4 +1,4 @@
-import React, { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { Suspense, lazy, useCallback, useEffect, useRef, useState } from 'react';
 import {
   Badge,
   Button,
@@ -131,7 +131,6 @@ const useStyles = makeStyles({
   },
 });
 
-const fetchCleanupRules = async () => (await api.getCleanupRules()).items;
 const fetchOptimizerGroups = async () => (await api.getOptimizerGroups()).groups;
 const fetchSnapshots = async () => (await api.getSnapshots()).snapshots;
 
@@ -166,11 +165,13 @@ const AppShell: React.FC<{
   const [lang, setLang] = useState<Lang>('zh');
   const [tab, setTab] = useState<NavTab>('dashboard');
   const system = useResource(api.getSysInfo);
-  const cleanup = useResource(fetchCleanupRules);
+  const cleanup = useResource(api.getCleanupRules);
   const optimizer = useResource(fetchOptimizerGroups, tab === 'optimize');
   const snapshotList = useResource(fetchSnapshots);
   const { data: sysPayload, setData: setSysPayload } = system;
-  const { data: cleanupEntries, setData: setCleanupEntries } = cleanup;
+  const { data: cleanupData, setData: setCleanupData } = cleanup;
+  const cleanupEntries = cleanupData?.items ?? null;
+  const cleanupSummary = cleanupData?.summary ?? null;
   const { data: optGroups, setData: setOptGroups } = optimizer;
   const { data: snapshots, setData: setSnapshots, reload: refreshSnapshots } = snapshotList;
   const [scanning, setScanning] = useState(false);
@@ -212,9 +213,10 @@ const AppShell: React.FC<{
   const handleScan = async () => {
     setScanning(true);
     setScanError(null);
+    setCleanupData((previous) => previous && { ...previous, summary: null });
     try {
       const res = await api.scanCleanup();
-      setCleanupEntries(res.items.map((rule) => ({ scanned: true, rule })));
+      setCleanupData({ items: res.items.map((rule) => ({ scanned: true, rule })), summary: res.summary });
     } catch (error) {
       setScanError(String(error));
     } finally {
@@ -222,10 +224,7 @@ const AppShell: React.FC<{
     }
   };
 
-  const reclaimableBytes = useMemo(
-    () => cleanupEntries?.reduce((acc, e) => acc + e.rule.cleanable_bytes, 0) ?? 0,
-    [cleanupEntries]
-  );
+  const reclaimableBytes = cleanupSummary?.cleanable_bytes ?? 0;
 
   const disk = sysPayload?.system.system_disk;
   const usedPct = disk && disk.total_bytes > 0 ? (disk.used_bytes / disk.total_bytes) * 100 : 0;
@@ -478,6 +477,7 @@ const AppShell: React.FC<{
                 lang={lang}
                 sysPayload={sysPayload}
                 cleanupEntries={cleanupEntries}
+                reclaimableBytes={cleanupSummary?.cleanable_bytes ?? null}
                 snapshotCount={snapshots?.length ?? null}
                 scanning={scanning}
                 onScanCleanup={handleScan}
@@ -490,12 +490,13 @@ const AppShell: React.FC<{
               <SpaceRecycleView
                 lang={lang}
                 entries={cleanupEntries}
+                summary={cleanupSummary}
                 scanning={scanning}
                 onScan={handleScan}
-                onEntriesUpdated={(items) => setCleanupEntries(items)}
-                onExecuted={async () => {
+                onEntriesUpdated={(items) => setCleanupData({ items, summary: null })}
+                onExecuted={async (sys) => {
+                  setSysPayload((prev) => (prev ? { ...prev, system: sys } : prev));
                   await handleScan();
-                  await system.reload();
                 }}
                 onSystemTaskDone={async (sys) => {
                   setSysPayload((prev) => (prev ? { ...prev, system: sys } : prev));

@@ -2,8 +2,8 @@ use anyhow::Result;
 use clap::Parser;
 use dism_core::appx::{list_appx_packages, remove_appx_package};
 use dism_core::cleaner::{
-    execute_cleanup, is_deferred_system_task_proc, scan_all, scan_custom_proc_name, scan_rule,
-    scan_rule_preview, CleanupScanResult,
+    execute_cleanup, is_deferred_system_task_proc, scan_all_with_summary, scan_custom_proc_name,
+    scan_rule_preview, CleanupBatchScan, CleanupScanResult,
 };
 use dism_core::diskmap::{
     analyze_path, find_duplicate_files, find_orphaned_app_dirs, get_presets, recycle_path,
@@ -69,21 +69,21 @@ const FULL_SCAN_TTL: Duration = Duration::from_secs(60);
 #[derive(Default)]
 struct CleanupScanCache {
     rules: HashMap<String, CleanupScanResult>,
-    full_scan: Option<(Instant, Arc<[CleanupScanResult]>)>,
+    full_scan: Option<(Instant, Arc<CleanupBatchScan>)>,
 }
 
 impl CleanupScanCache {
     fn store_full_scan(
         &mut self,
-        results: Vec<CleanupScanResult>,
+        results: CleanupBatchScan,
         started: Instant,
-    ) -> Arc<[CleanupScanResult]> {
-        let results: Arc<[_]> = results.into();
+    ) -> Arc<CleanupBatchScan> {
+        let results = Arc::new(results);
         self.full_scan = Some((started, Arc::clone(&results)));
         results
     }
 
-    fn fresh_full_scan(&self, now: Instant) -> Option<Arc<[CleanupScanResult]>> {
+    fn fresh_full_scan(&self, now: Instant) -> Option<Arc<CleanupBatchScan>> {
         let (started, results) = self.full_scan.as_ref()?;
         (now.saturating_duration_since(*started) < FULL_SCAN_TTL).then(|| Arc::clone(results))
     }
@@ -92,7 +92,7 @@ impl CleanupScanCache {
 impl AppState {
     fn begin_cleanup_mutation(&self) -> MutexGuard<'_, ()> {
         let operation = self.cleanup_operation.lock().unwrap();
-        self.scan_cache.write().unwrap().full_scan = None;
+        *self.scan_cache.write().unwrap() = CleanupScanCache::default();
         operation
     }
 }
@@ -495,20 +495,23 @@ fn dispatch_api(
         (&Method::Get, "/api/cleanup/rules") => {
             let cat = state.catalog.read().unwrap();
             let cache = state.scan_cache.read().unwrap();
+            if let Some(scan) = cache.fresh_full_scan(Instant::now()) {
+                let list: Vec<_> = scan.items.iter().map(|rule| {
+                    serde_json::json!({ "scanned": true, "rule": rule })
+                }).collect();
+                return Ok(serde_json::json!({ "items": list, "summary": scan.summary }));
+            }
             let list = cleanup_rules_stub_list(&cat, &cache.rules, &sys);
-            Ok(serde_json::json!({ "items": list }))
+            Ok(serde_json::json!({ "items": list, "summary": null }))
         }
         (&Method::Post, "/api/cleanup/scan") => {
             let _operation = state.cleanup_operation.lock().unwrap();
             let started = Instant::now();
-            let results = scan_all(&state.catalog.read().unwrap().cleanup_rules, &sys);
+            let results = scan_all_with_summary(&state.catalog.read().unwrap().cleanup_rules, &sys);
             let mut cache = state.scan_cache.write().unwrap();
-            cache.rules = results
-                .iter()
-                .map(|result| (result.id.clone(), result.clone()))
-                .collect();
+            cache.rules.clear();
             let results = cache.store_full_scan(results, started);
-            Ok(serde_json::json!({ "items": results.as_ref() }))
+            Ok(serde_json::json!({ "items": results.items, "summary": results.summary }))
         }
         (&Method::Get, "/api/cleanup/preview") => {
             let id = parse_query_param(query, "id")
@@ -530,7 +533,11 @@ fn dispatch_api(
         }
         (&Method::Post, "/api/cleanup/execute") => {
             let payload: ExecuteReq = read_json_body(req)?;
-            let _operation = (!payload.dry_run).then(|| state.begin_cleanup_mutation());
+            let _operation = if payload.dry_run {
+                state.cleanup_operation.lock().unwrap()
+            } else {
+                state.begin_cleanup_mutation()
+            };
             let cat = state.catalog.read().unwrap();
             let report = execute_cleanup(
                 &cat.cleanup_rules,
@@ -538,15 +545,6 @@ fn dispatch_api(
                 &sys,
                 payload.dry_run,
             );
-            if !payload.dry_run {
-                let updated = payload
-                    .rule_ids
-                    .iter()
-                    .filter_map(|id| cat.cleanup_rules.iter().find(|rule| rule.id == *id))
-                    .map(|rule| (rule.id.clone(), scan_rule(rule, &sys)))
-                    .collect::<Vec<_>>();
-                state.scan_cache.write().unwrap().rules.extend(updated);
-            }
             let updated_sys = SystemInfo::collect();
             Ok(serde_json::json!({
                 "report": report,
@@ -859,7 +857,7 @@ fn dispatch_api(
                     .fresh_full_scan(Instant::now());
                 let scans = cached.unwrap_or_else(|| {
                     let started = Instant::now();
-                    let results = scan_all(&cat.cleanup_rules, &sys);
+                    let results = scan_all_with_summary(&cat.cleanup_rules, &sys);
                     state
                         .scan_cache
                         .write()
@@ -1096,14 +1094,14 @@ mod tests {
         cache.rules.insert(preview.id.clone(), preview.clone());
         assert!(cache.fresh_full_scan(started).is_none());
 
-        cache.store_full_scan(vec![preview.clone()], started);
+        cache.store_full_scan(CleanupBatchScan { items: vec![preview.clone()], ..CleanupBatchScan::default() }, started);
         cache.rules.get_mut(&preview.id).unwrap().cleanable_bytes = 50;
         let cached = cache.fresh_full_scan(started).unwrap();
-        assert_eq!(cached[0].cleanable_bytes, preview.cleanable_bytes);
+        assert_eq!(cached.items[0].cleanable_bytes, preview.cleanable_bytes);
         assert!(cache.fresh_full_scan(started + FULL_SCAN_TTL).is_none());
 
-        cache.store_full_scan(Vec::new(), started);
-        assert!(cache.fresh_full_scan(started).unwrap().is_empty());
+        cache.store_full_scan(CleanupBatchScan::default(), started);
+        assert!(cache.fresh_full_scan(started).unwrap().items.is_empty());
     }
 
     #[test]
