@@ -2,6 +2,12 @@ import React, { useEffect, useMemo, useState } from 'react';
 import {
   Badge,
   Button,
+  Dialog,
+  DialogActions,
+  DialogBody,
+  DialogContent,
+  DialogSurface,
+  DialogTitle,
   Input,
   MessageBar,
   MessageBarBody,
@@ -15,6 +21,7 @@ import {
 } from '@fluentui/react-components';
 import {
   ArrowClockwise20Regular,
+  Copy16Regular,
   FolderOpen16Regular,
   Rocket24Regular,
   Search20Regular,
@@ -23,7 +30,9 @@ import {
 import {
   Lang,
   ScheduledTaskItem,
+  StartupInspection,
   StartupItem,
+  StartupSignature,
   ThirdPartyServiceItem,
   api,
 } from '../api';
@@ -34,6 +43,23 @@ interface Props {
 }
 
 type StartupMode = 'run' | 'services' | 'tasks';
+
+const signatureLabels: Record<StartupSignature, Record<Lang, string>> = {
+  valid: { zh: '签名有效', en: 'Valid signature' },
+  unsigned: { zh: '未签名', en: 'Unsigned' },
+  untrusted: { zh: '签名不受信任', en: 'Untrusted signature' },
+  hash_mismatch: { zh: '签名与文件内容不匹配', en: 'Signature does not match file contents' },
+  unsupported: { zh: '此文件类型不支持签名验证', en: 'Signature verification unsupported for this file type' },
+  missing_target: { zh: '找不到目标文件', en: 'Target file missing' },
+  unresolved_target: { zh: '无法确定本地目标文件', en: 'Local target could not be determined' },
+  unavailable: { zh: '暂时无法验证签名', en: 'Signature could not be verified' },
+};
+
+interface InspectionRequest {
+  name: string;
+  details?: StartupInspection;
+  error?: string;
+}
 
 const useStyles = makeStyles({
   root: {
@@ -76,6 +102,22 @@ const useStyles = makeStyles({
     backgroundColor: tokens.colorNeutralBackground1,
     border: `1px solid ${tokens.colorNeutralStroke2}`,
   },
+  inspection: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '12px',
+  },
+  inspectionSection: {
+    display: 'flex',
+    flexDirection: 'column',
+    alignItems: 'flex-start',
+    gap: '4px',
+  },
+  sourcePath: {
+    color: tokens.colorNeutralForeground2,
+    fontFamily: 'Consolas, monospace',
+    overflowWrap: 'anywhere',
+  },
 });
 
 export const StartupView: React.FC<Props> = ({ lang, isAdmin }) => {
@@ -102,6 +144,43 @@ export const StartupView: React.FC<Props> = ({ lang, isAdmin }) => {
   const deferredSearch = React.useDeferredValue(search);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [inspection, setInspection] = useState<InspectionRequest | null>(null);
+  const [inspectionActionError, setInspectionActionError] = useState<string | null>(null);
+  const [sourceCopied, setSourceCopied] = useState(false);
+  const inspected = inspection?.details;
+  const origin = inspected?.origin;
+
+  const openInspection = async (item: StartupItem) => {
+    const request = { name: item.name };
+    setInspection(request);
+    setInspectionActionError(null);
+    setSourceCopied(false);
+    try {
+      const details = await api.inspectStartupItem(item.id);
+      setInspection((previous) => previous === request ? { ...request, details } : previous);
+    } catch (error) {
+      setInspection((previous) => previous === request ? { ...request, error: String(error) } : previous);
+    }
+  };
+
+  const copyRegistryPath = async (path: string) => {
+    setInspectionActionError(null);
+    try {
+      await navigator.clipboard.writeText(path);
+      setSourceCopied(true);
+    } catch (error) {
+      setInspectionActionError(String(error));
+    }
+  };
+
+  const revealStartupFile = async (path: string) => {
+    setInspectionActionError(null);
+    try {
+      await api.revealInExplorer(path);
+    } catch (error) {
+      setInspectionActionError(String(error));
+    }
+  };
 
   const loadRun = async () => {
     setLoadingRun(true);
@@ -370,7 +449,7 @@ export const StartupView: React.FC<Props> = ({ lang, isAdmin }) => {
                       {!it.target_exists && (
                         <Badge size="small" appearance="tint" color="danger">
                           <Warning16Regular style={{ verticalAlign: 'middle', marginRight: 3 }} />
-                          {lang === 'zh' ? '目标文件缺失' : 'Target Missing'}
+                          {lang === 'zh' ? '未定位目标' : 'Target not located'}
                         </Badge>
                       )}
                       {lockedByPriv && (
@@ -393,6 +472,9 @@ export const StartupView: React.FC<Props> = ({ lang, isAdmin }) => {
                   </div>
 
                   <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexShrink: 0 }}>
+                    <Button size="small" appearance="subtle" onClick={() => void openInspection(it)}>
+                      {lang === 'zh' ? '来源与签名' : 'Source and Signature'}
+                    </Button>
                     {it.target_path && it.target_exists && (
                       <Button
                         size="small"
@@ -569,6 +651,92 @@ export const StartupView: React.FC<Props> = ({ lang, isAdmin }) => {
             ))
           ))}
       </div>
+      <Dialog
+        open={inspection !== null}
+        onOpenChange={(_, data) => { if (!data.open) setInspection(null); }}
+      >
+        <DialogSurface style={{ maxWidth: 600 }}>
+          <DialogBody>
+            <DialogTitle>{inspection?.name}</DialogTitle>
+            <DialogContent className={styles.inspection}>
+              {inspection?.error ? (
+                <MessageBar intent="error"><MessageBarBody>{inspection.error}</MessageBarBody></MessageBar>
+              ) : inspected ? (
+                <>
+                  <section className={styles.inspectionSection}>
+                    <Text weight="semibold">{lang === 'zh' ? '启动来源' : 'Startup source'}</Text>
+                    {origin?.kind === 'registry' ? (
+                      <>
+                        <Text className={styles.sourcePath}>{origin.key_path}</Text>
+                        <Text size={200}>
+                          {lang === 'zh' ? '注册表值名' : 'Registry value'} · {origin.value_name}
+                        </Text>
+                        <Button
+                          size="small"
+                          icon={<Copy16Regular />}
+                          onClick={() => void copyRegistryPath(origin.key_path)}
+                        >
+                          {sourceCopied
+                            ? (lang === 'zh' ? '已复制' : 'Copied')
+                            : (lang === 'zh' ? '复制注册表路径' : 'Copy registry path')}
+                        </Button>
+                      </>
+                    ) : origin?.kind === 'startup_folder' && (
+                      <>
+                        <Text className={styles.sourcePath}>{origin.path}</Text>
+                        <Button
+                          size="small"
+                          icon={<FolderOpen16Regular />}
+                          onClick={() => void revealStartupFile(origin.path)}
+                        >
+                          {lang === 'zh' ? '定位启动文件' : 'Reveal Startup File'}
+                        </Button>
+                      </>
+                    )}
+                  </section>
+                  <section className={styles.inspectionSection}>
+                    <Text weight="semibold">{lang === 'zh' ? '启动目标签名' : 'Launch file signature'}</Text>
+                    {inspected.target.path && (
+                      <Text className={styles.sourcePath}>{inspected.target.path}</Text>
+                    )}
+                    <Badge
+                      appearance="tint"
+                      color={inspected.target.signature === 'valid' ? 'success' : 'subtle'}
+                    >
+                      {signatureLabels[inspected.target.signature][lang]}
+                    </Badge>
+                    {inspected.target.signer && (
+                      <Text size={200}>
+                        {lang === 'zh' ? '证书签名者' : 'Certificate signer'} · {inspected.target.signer}
+                      </Text>
+                    )}
+                    {inspected.target.company && (
+                      <Text size={200}>
+                        {lang === 'zh' ? '文件声明的公司' : 'Company from file metadata'} · {inspected.target.company}
+                      </Text>
+                    )}
+                    <Text size={200} style={{ color: tokens.colorNeutralForeground3 }}>
+                      {lang === 'zh'
+                        ? '核对启动命令指定的文件或快捷方式目标。命令参数可能另外引用文件。'
+                        : 'Checks the file named by the startup command or the shortcut target. Arguments may reference other files.'}
+                    </Text>
+                  </section>
+                  {inspectionActionError && (
+                    <MessageBar intent="error"><MessageBarBody>{inspectionActionError}</MessageBarBody></MessageBar>
+                  )}
+                </>
+              ) : (
+                <Spinner label={lang === 'zh' ? '正在读取来源并验证签名…' : 'Checking source and signature…'} />
+              )}
+            </DialogContent>
+            <DialogActions>
+              <Button appearance="secondary" onClick={() => setInspection(null)}>
+                {lang === 'zh' ? '关闭' : 'Close'}
+              </Button>
+            </DialogActions>
+          </DialogBody>
+        </DialogSurface>
+      </Dialog>
     </div>
   );
 };

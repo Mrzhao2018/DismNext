@@ -35,6 +35,51 @@ pub struct StartupItem {
     pub target_exists: bool,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum StartupOrigin {
+    Registry { key_path: String, value_name: String },
+    StartupFolder { path: String },
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StartupSignature {
+    Valid,
+    Unsigned,
+    Untrusted,
+    HashMismatch,
+    Unsupported,
+    MissingTarget,
+    UnresolvedTarget,
+    Unavailable,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct StartupTargetInspection {
+    pub path: Option<String>,
+    pub signature: StartupSignature,
+    pub signer: Option<String>,
+    pub company: Option<String>,
+}
+
+impl StartupTargetInspection {
+    fn without_signature(path: Option<String>, signature: StartupSignature) -> Self {
+        Self {
+            path,
+            signature,
+            signer: None,
+            company: None,
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub struct StartupInspection {
+    pub origin: StartupOrigin,
+    pub target: StartupTargetInspection,
+}
+
 #[derive(Clone, Copy)]
 enum SourceKind {
     RegistryRun,
@@ -50,6 +95,19 @@ struct StartupSourceDef {
     run_subkey: &'static str,
     approved_subkey: &'static str,
     sam: u32,
+}
+
+impl StartupSourceDef {
+    fn registry_path(&self) -> String {
+        match self.scope {
+            StartupScope::User => format!(r"HKEY_CURRENT_USER\{}", self.run_subkey),
+            StartupScope::System if self.sam == KEY_WOW64_32KEY => {
+                let software_subkey = self.run_subkey.trim_start_matches(r"SOFTWARE\");
+                format!(r"HKEY_LOCAL_MACHINE\SOFTWARE\WOW6432Node\{software_subkey}")
+            }
+            StartupScope::System => format!(r"HKEY_LOCAL_MACHINE\{}", self.run_subkey),
+        }
+    }
 }
 
 const SOURCES: &[StartupSourceDef] = &[
@@ -189,15 +247,128 @@ pub fn list_startup_items() -> Vec<StartupItem> {
     items
 }
 
-/// Non-destructively enables or disables a startup item by writing Windows `StartupApproved` 12-byte status.
-pub fn set_startup_enabled(id: &str, enable: bool) -> Result<StartupItem> {
+/// Reads a listed startup entry and inspects the launch file without running its command.
+pub fn inspect_startup_item(id: &str) -> Result<StartupInspection> {
+    let (source, _) = startup_source(id)?;
+    let item = list_startup_items()
+        .into_iter()
+        .find(|item| item.id == id)
+        .with_context(|| format!("Startup item '{id}' no longer exists"))?;
+    let (origin, target) = match source.kind {
+        SourceKind::RegistryRun => (
+            StartupOrigin::Registry {
+                key_path: source.registry_path(),
+                value_name: item.name,
+            },
+            inspection_command_path(&item.command),
+        ),
+        SourceKind::StartupFolder => (
+            StartupOrigin::StartupFolder { path: item.command },
+            item.target_path,
+        ),
+    };
+    let target = target.map_or_else(
+        || StartupTargetInspection::without_signature(None, StartupSignature::UnresolvedTarget),
+        inspect_launch_file,
+    );
+    Ok(StartupInspection { origin, target })
+}
+
+fn startup_source(id: &str) -> Result<(&'static StartupSourceDef, &str)> {
     let (tag, name) = id
         .split_once(':')
         .ok_or_else(|| anyhow!("Invalid startup item id '{}'", id))?;
-    let src = SOURCES
+    let source = SOURCES
         .iter()
-        .find(|s| s.tag == tag)
+        .find(|source| source.tag == tag)
         .ok_or_else(|| anyhow!("Unknown startup source '{}'", tag))?;
+    Ok((source, name))
+}
+
+fn inspection_command_path(command: &str) -> Option<String> {
+    let expanded = expand_env_vars(command, None);
+    let command = expanded.trim();
+    let path = if let Some(quoted) = command.strip_prefix('"') {
+        quoted.split_once('"')?.0
+    } else {
+        // A bare path containing spaces or a PATH lookup cannot identify a single file reliably.
+        let first = command.split_whitespace().next()?;
+        Path::new(first).extension()?;
+        first
+    };
+    Path::new(path).is_absolute().then(|| path.to_string())
+}
+
+fn inspect_launch_file(path: String) -> StartupTargetInspection {
+    // Use a fixed script and pass the observed path as data, even if it contains shell syntax.
+    const SCRIPT: &str = r#"
+$ErrorActionPreference = 'Stop'
+[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
+$target = $env:DISMNEXT_STARTUP_INSPECT_PATH
+$result = @{ path = $target; signature = 'unavailable'; signer = $null; company = $null }
+function Test-LocalPath($candidate) {
+    return $candidate -match '^[A-Za-z]:[\\/]' -and
+        [IO.DriveInfo]::new($candidate.Substring(0, 3)).DriveType -ne 'Network'
+}
+
+try {
+    if ((Test-LocalPath $target) -and [IO.Path]::GetExtension($target) -ieq '.lnk') {
+        $null = Get-Item -LiteralPath $target -Force
+        $shell = New-Object -ComObject WScript.Shell
+        $link = $shell.CreateShortcut($target)
+        $target = [Environment]::ExpandEnvironmentVariables($link.TargetPath)
+        $result.path = $target
+    }
+
+    if (!(Test-LocalPath $target)) {
+        $result.signature = 'unresolved_target'
+    } else {
+        $file = Get-Item -LiteralPath $target -Force
+        if ($file.PSIsContainer) {
+            $result.signature = 'unsupported'
+        } else {
+            try { $result.company = $file.VersionInfo.CompanyName } catch {}
+            $signature = Microsoft.PowerShell.Security\Get-AuthenticodeSignature -LiteralPath $target
+            $result.signature = switch ($signature.Status.ToString()) {
+                'Valid' { 'valid' }
+                'NotSigned' { 'unsigned' }
+                'NotTrusted' { 'untrusted' }
+                'HashMismatch' { 'hash_mismatch' }
+                'NotSupportedFileFormat' { 'unsupported' }
+                default { 'unavailable' }
+            }
+            if ($signature.SignerCertificate) {
+                $result.signer = $signature.SignerCertificate.GetNameInfo('SimpleName', $false)
+            }
+        }
+    }
+} catch [System.Management.Automation.ItemNotFoundException] {
+    $result.signature = 'missing_target'
+} catch {}
+
+$result | ConvertTo-Json -Compress
+"#;
+
+    let system_root = std::env::var_os("SystemRoot").unwrap_or_else(|| r"C:\Windows".into());
+    let powershell = PathBuf::from(system_root).join(r"System32\WindowsPowerShell\v1.0");
+    let output = Command::new(powershell.join("powershell.exe"))
+        .creation_flags(CREATE_NO_WINDOW)
+        .args(["-NoProfile", "-NonInteractive", "-Command", SCRIPT])
+        .env("PSModulePath", powershell.join("Modules"))
+        .env("DISMNEXT_STARTUP_INSPECT_PATH", &path)
+        .output();
+    output
+        .ok()
+        .filter(|output| output.status.success())
+        .and_then(|output| serde_json::from_slice(&output.stdout).ok())
+        .unwrap_or_else(|| {
+            StartupTargetInspection::without_signature(Some(path), StartupSignature::Unavailable)
+        })
+}
+
+/// Non-destructively enables or disables a startup item by writing Windows `StartupApproved` 12-byte status.
+pub fn set_startup_enabled(id: &str, enable: bool) -> Result<StartupItem> {
+    let (src, name) = startup_source(id)?;
 
     let root = RegKey::predef(src.hive);
     let (approved_key, _) = root
@@ -650,5 +821,28 @@ mod tests {
             extract_target_path(r"C:\Windows\System32\OneDriveSetup.exe /thfirstsetup").as_deref(),
             Some(r"C:\Windows\System32\OneDriveSetup.exe")
         );
+    }
+
+    #[test]
+    fn inspection_reports_exact_run_views_and_unambiguous_launch_files() {
+        let (source, name) = startup_source("hklm_run32:Example:Updater").unwrap();
+        assert_eq!(name, "Example:Updater");
+        assert_eq!(
+            source.registry_path(),
+            r"HKEY_LOCAL_MACHINE\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Run"
+        );
+        assert_eq!(
+            startup_source("hkcu_run:Example").unwrap().0.registry_path(),
+            r"HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Run"
+        );
+        for path in [
+            r#""C:\Program Files\Example\update.exe" C:\Other\tool.exe"#,
+            r"C:\Apps\update.exe C:\Other\tool.exe",
+        ] {
+            assert!(inspection_command_path(path).unwrap().ends_with(r"\update.exe"));
+        }
+        assert!(inspection_command_path(r"C:\Program Files\Example\update.exe").is_none());
+        assert!(inspection_command_path("cmd.exe /c update.cmd").is_none());
+        assert!(inspection_command_path(r#""C:\Apps\update.exe"#).is_none());
     }
 }

@@ -21,7 +21,7 @@ use dism_core::optimizer::{
 use dism_core::report::generate_health_report;
 use dism_core::rescue::{create_restore_point, list_restore_points, run_rescue_action};
 use dism_core::startup::{
-    list_scheduled_tasks, list_startup_items, list_third_party_services,
+    inspect_startup_item, list_scheduled_tasks, list_startup_items, list_third_party_services,
     set_scheduled_task_enabled, set_service_start_mode, set_startup_enabled,
 };
 use dism_core::sysinfo::relaunch_as_admin;
@@ -160,6 +160,11 @@ struct CancelScanReq {
 #[derive(Deserialize)]
 struct RevealReq {
     path: String,
+}
+
+#[derive(Deserialize)]
+struct StartupInspectReq {
+    id: String,
 }
 
 #[derive(Deserialize)]
@@ -758,6 +763,10 @@ fn dispatch_api(
         (&Method::Get, "/api/startup/list") => {
             let items = list_startup_items();
             Ok(serde_json::json!({ "items": items }))
+        }
+        (&Method::Post, "/api/startup/inspect") => {
+            let payload: StartupInspectReq = read_json_body(req)?;
+            Ok(serde_json::to_value(inspect_startup_item(&payload.id)?)?)
         }
         (&Method::Post, "/api/startup/toggle") => {
             let payload: StartupToggleReq = read_json_body(req)?;

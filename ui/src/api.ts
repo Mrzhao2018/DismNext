@@ -291,6 +291,27 @@ export interface StartupItem {
   target_exists: boolean;
 }
 
+export type StartupSignature =
+  | 'valid'
+  | 'unsigned'
+  | 'untrusted'
+  | 'hash_mismatch'
+  | 'unsupported'
+  | 'missing_target'
+  | 'unresolved_target'
+  | 'unavailable';
+
+export interface StartupInspection {
+  origin: { kind: 'registry'; key_path: string; value_name: string }
+    | { kind: 'startup_folder'; path: string };
+  target: {
+    path: string | null;
+    signature: StartupSignature;
+    signer: string | null;
+    company: string | null;
+  };
+}
+
 export type AppxCategory = 'bloatware' | 'user_app' | 'framework' | 'system_core';
 
 export interface AppxPackageInfo {
@@ -633,6 +654,11 @@ export const api = {
       body: JSON.stringify({ keeper, candidates }),
     }),
   getStartupItems: () => reqJson<{ items: StartupItem[] }>('/api/startup/list'),
+  inspectStartupItem: (id: string) =>
+    reqJson<StartupInspection>('/api/startup/inspect', {
+      method: 'POST',
+      body: JSON.stringify({ id }),
+    }),
   toggleStartup: (id: string, enabled: boolean) =>
     reqJson<{ item: StartupItem; items: StartupItem[] }>('/api/startup/toggle', {
       method: 'POST',
