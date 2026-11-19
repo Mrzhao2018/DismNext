@@ -10,6 +10,7 @@ use dism_core::diskmap::{
     find_duplicate_files_with_progress, find_orphaned_app_dirs, get_presets, recycle_path,
 };
 use dism_core::drivers::{default_backup_dir, delete_driver, export_drivers, list_drivers};
+use dism_core::duplicate_recycle::{recycle_duplicates, DuplicateRecycleTarget};
 use dism_core::evaluator::eval_condition;
 use dism_core::features::{list_optional_features, set_feature_enabled};
 use dism_core::lockcheck::{find_locking_processes, terminate_locking_process};
@@ -222,6 +223,12 @@ struct RescueRunReq {
 struct DuplicatesReq {
     path: String,
     min_size_bytes: Option<u64>,
+}
+
+#[derive(Deserialize)]
+struct RecycleDuplicatesReq {
+    keeper: DuplicateRecycleTarget,
+    candidates: Vec<DuplicateRecycleTarget>,
 }
 
 #[derive(Deserialize)]
@@ -720,6 +727,12 @@ fn dispatch_api(
                 "freed_bytes": freed,
                 "system": updated_sys,
             }))
+        }
+        (&Method::Post, "/api/diskmap/recycle-duplicates") => {
+            let payload: RecycleDuplicatesReq = read_json_body(req)?;
+            let _operation = state.begin_cleanup_mutation();
+            let items = state.scan_jobs.run_inline(|| Ok(recycle_duplicates(&payload.keeper, &payload.candidates)))?;
+            Ok(serde_json::json!({ "items": items, "system": SystemInfo::collect() }))
         }
         (&Method::Get, "/api/startup/list") => {
             let items = list_startup_items();

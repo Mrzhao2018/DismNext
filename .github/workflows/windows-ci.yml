@@ -1,0 +1,32 @@
+name: Windows CI
+
+on: [push, pull_request]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: windows-2025
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+      - name: Build frontend
+        working-directory: ui
+        run: |
+          npm ci --no-audit
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          npm run build
+      - name: Install stable Rust
+        run: rustup toolchain install stable --profile minimal
+      - name: Test Rust workspace
+        run: cargo +stable test --workspace --locked
+      - name: Build release binaries
+        run: cargo +stable build --release --workspace --locked
+      - name: Verify portable desktop UI
+        run: ./scripts/check_portable_ui.ps1 -Executable ./target/release/dism-app.exe

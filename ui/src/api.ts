@@ -417,7 +417,19 @@ export interface DuplicateFileEntry {
   name: string;
   modified_date: string;
   modified_unix: number;
+  stamp?: string;
 }
+
+export interface DuplicateRecycleTarget {
+  path: string;
+  stamp: string;
+}
+
+export type DuplicateRecycleResult = { path: string } & (
+  | { status: 'recycled'; size_bytes: number }
+  | { status: 'skipped'; reason: 'keeper_unavailable' | 'changed' | 'missing' | 'same_file' | 'protected' | 'different_content' }
+  | { status: 'failed'; error: string }
+);
 
 export interface DuplicateGroup {
   hash_hex: string;
@@ -588,6 +600,11 @@ export const api = {
     reqJson<{ freed_bytes: number; system: SystemInfo }>('/api/diskmap/recycle', {
       method: 'POST',
       body: JSON.stringify({ path }),
+    }),
+  recycleDuplicates: (keeper: DuplicateRecycleTarget, candidates: DuplicateRecycleTarget[]) =>
+    reqJson<{ items: DuplicateRecycleResult[]; system: SystemInfo }>('/api/diskmap/recycle-duplicates', {
+      method: 'POST',
+      body: JSON.stringify({ keeper, candidates }),
     }),
   getStartupItems: () => reqJson<{ items: StartupItem[] }>('/api/startup/list'),
   toggleStartup: (id: string, enabled: boolean) =>

@@ -1,4 +1,5 @@
 use crate::catalog::LocalizedText;
+use crate::duplicate_recycle::FileState;
 use crate::scan_progress::{ScanPhase, ScanProgress};
 use crate::sysinfo::SystemInfo;
 use anyhow::{anyhow, Result};
@@ -705,6 +706,8 @@ pub struct DuplicateFileEntry {
     pub name: String,
     pub modified_date: String,
     pub modified_unix: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stamp: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -829,17 +832,31 @@ fn find_duplicate_files_inner(root: &Path, min_size_bytes: u64, progress: Option
         .into_par_iter()
         .filter_map(|(sz, path, mod_unix)| {
             if let Err(error) = check_scan(progress) { return Some(Err(error)); }
-            let hash = File::open(&path).ok().and_then(|file| full_hash_128(file, progress));
+            let result = (|| {
+                let file = File::open(&path).ok()?;
+                let state = FileState::read(&file).ok();
+                let hash = full_hash_128(&file, progress)?;
+                let size = state.as_ref().map(|state| state.size).or_else(|| file.metadata().ok().map(|meta| meta.len()))?;
+                if size != sz || state != FileState::read(&file).ok() {
+                    return None;
+                }
+                Some((sz, hash, path, mod_unix, state))
+            })();
             if let Some(progress) = progress { progress.file_processed(); }
-            hash.map(|hash| Ok((sz, hash, path, mod_unix)))
+            result.map(Ok)
         })
         .collect::<Result<Vec<_>>>()?;
 
     if let Some(progress) = progress { progress.set_phase(ScanPhase::Finishing, None); }
 
-    let mut by_full: HashMap<(u64, u128), Vec<DuplicateFileEntry>> = HashMap::new();
-    for (sz, h, path, mod_unix) in hashed {
+    const WINDOWS_EPOCH_SECONDS: u64 = 11_644_473_600;
+    const TICKS_PER_SECOND: u64 = 10_000_000;
+    let mut by_full: HashMap<(u64, u128), Vec<(u64, DuplicateFileEntry)>> = HashMap::new();
+    for (sz, h, path, mod_unix, state) in hashed {
         check_scan(progress)?;
+        let modified_ticks = state.as_ref().map(|state| state.modified)
+            .unwrap_or_else(|| mod_unix.saturating_add(WINDOWS_EPOCH_SECONDS).saturating_mul(TICKS_PER_SECOND));
+        let mod_unix = (modified_ticks / TICKS_PER_SECOND).saturating_sub(WINDOWS_EPOCH_SECONDS);
         let name = path
             .file_name()
             .and_then(|s| s.to_str())
@@ -848,12 +865,13 @@ fn find_duplicate_files_inner(root: &Path, min_size_bytes: u64, progress: Option
         let modified_date = DateTime::from_timestamp(mod_unix as i64, 0)
             .map(|dt| dt.format("%Y-%m-%d").to_string())
             .unwrap_or_default();
-        by_full.entry((sz, h)).or_default().push(DuplicateFileEntry {
+        by_full.entry((sz, h)).or_default().push((modified_ticks, DuplicateFileEntry {
             path: path.to_string_lossy().into_owned(),
             name,
             modified_date,
             modified_unix: mod_unix,
-        });
+            stamp: state.map(|state| state.stamp()),
+        }));
     }
 
     let mut groups = Vec::new();
@@ -862,13 +880,13 @@ fn find_duplicate_files_inner(root: &Path, min_size_bytes: u64, progress: Option
         if files.len() < 2 {
             continue;
         }
-        files.sort_by(|a, b| b.modified_unix.cmp(&a.modified_unix));
+        files.sort_by(|(a_time, a), (b_time, b)| b_time.cmp(a_time).then_with(|| a.path.cmp(&b.path)));
         let wasted_bytes = sz.saturating_mul((files.len() - 1) as u64);
         groups.push(DuplicateGroup {
             hash_hex: format!("{:032x}", h),
             size_bytes: sz,
             wasted_bytes,
-            files,
+            files: files.into_iter().map(|(_, file)| file).collect(),
         });
     }
 
@@ -1333,10 +1351,17 @@ mod tests {
         File::create(base.join("b\\dup2.bin")).unwrap().write_all(&same_payload).unwrap();
         File::create(base.join("b\\unique.bin")).unwrap().write_all(&diff_payload).unwrap();
 
+        let same_second = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        for (name, milliseconds) in [("a\\dup1.bin", 100), ("b\\dup2.bin", 900)] {
+            let file = std::fs::OpenOptions::new().write(true).open(base.join(name)).unwrap();
+            file.set_times(std::fs::FileTimes::new().set_modified(same_second + Duration::from_millis(milliseconds))).unwrap();
+        }
+
         let report = find_duplicate_files(&base, 64 * 1024).unwrap();
         assert_eq!(report.total_groups, 1);
         assert_eq!(report.total_wasted_bytes, 70 * 1024);
         assert_eq!(report.groups[0].files.len(), 2);
+        assert_eq!(report.groups[0].files[0].name, "dup2.bin");
 
         let _ = fs::remove_dir_all(&base);
     }

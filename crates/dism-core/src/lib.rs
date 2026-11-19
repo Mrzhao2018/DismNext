@@ -3,6 +3,7 @@ pub mod catalog;
 pub mod cleaner;
 pub mod diskmap;
 pub mod drivers;
+pub mod duplicate_recycle;
 pub mod evaluator;
 pub mod features;
 pub mod lockcheck;
