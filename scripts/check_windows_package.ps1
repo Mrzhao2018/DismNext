@@ -66,7 +66,7 @@ $desktopVersion = & $portable --version
 if ($LASTEXITCODE -ne 0 -or $desktopVersion -cne "dism-app $version") {
     throw 'The portable EXE version differs from its release filename.'
 }
-& (Join-Path $PSScriptRoot 'check_portable_ui.ps1') -Executable $portable
+& (Join-Path $PSScriptRoot 'check_portable_ui.ps1') -Executable $portable -VerifyCleanup
 
 $scratch = Join-Path ([IO.Path]::GetTempPath()) "dismnext-release-check-$([Guid]::NewGuid())"
 $cli = Join-Path $scratch $cliName

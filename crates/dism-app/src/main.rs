@@ -1320,6 +1320,8 @@ mod tests {
         assert!(slot.take(&current, now).is_some());
         assert!(slot.take(&current, now).is_none());
 
+        let last_valid = slot.store(new_plan(), now);
+        assert!(slot.take(&last_valid, now + CLEANUP_REVIEW_TTL - Duration::from_millis(1)).is_some());
         let expiring = slot.store(new_plan(), now);
         assert!(slot.take(&expiring, now + CLEANUP_REVIEW_TTL).is_none());
         assert!(slot.pending.is_none());
