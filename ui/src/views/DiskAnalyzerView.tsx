@@ -44,6 +44,8 @@ import {
   formatBytes,
   pickText,
 } from '../api';
+import { useScanJob } from '../useScanJob';
+import { ScanStatusBar } from '../ScanStatusBar';
 
 interface Props {
   lang: Lang;
@@ -475,7 +477,7 @@ export const DiskAnalyzerView: React.FC<Props> = ({ lang, onSystemUpdated }) => 
   const styles = useStyles();
   const [presets, setPresets] = useState<DiskPreset[]>([]);
   const [targetPath, setTargetPath] = useState('');
-  const [loading, setLoading] = useState(false);
+  const scan = useScanJob();
   const [report, setReport] = useState<DiskAnalysisReport | null>(null);
   const [expandedPaths, setExpandedPaths] = useState<Set<string>>(new Set());
   const [loadingDirs, setLoadingDirs] = useState<Set<string>>(new Set());
@@ -483,7 +485,6 @@ export const DiskAnalyzerView: React.FC<Props> = ({ lang, onSystemUpdated }) => 
   const [zoomStack, setZoomStack] = useState<string[]>([]);
   const [leftTab, setLeftTab] = useState<'tree' | 'files' | 'duplicates' | 'orphans'>('tree');
   const [dupReport, setDupReport] = useState<DuplicateScanReport | null>(null);
-  const [dupLoading, setDupLoading] = useState(false);
   const [orphanDirs, setOrphanDirs] = useState<OrphanDirEntry[] | null>(null);
   const [orphanLoading, setOrphanLoading] = useState(false);
   const [activeExt, setActiveExt] = useState<string | null>(null);
@@ -534,13 +535,13 @@ export const DiskAnalyzerView: React.FC<Props> = ({ lang, onSystemUpdated }) => 
 
   const runAnalyze = async (pathToScan: string) => {
     const trimmed = pathToScan.trim();
-    if (!trimmed) return;
-    setLoading(true);
+    if (!trimmed || scan.active) return;
     setErrorMsg(null);
-    setActiveExt(null);
-    setHoveredLeaf(null);
     try {
-      const res = await api.analyzeDisk(trimmed, 4);
+      const res = await scan.run({ kind: 'disk_analysis', path: trimmed, max_depth: 4 });
+      if (!res) return;
+      setActiveExt(null);
+      setHoveredLeaf(null);
       setReport(res);
       setTargetPath(res.root_path);
       setExpandedPaths(new Set([res.tree.path]));
@@ -549,21 +550,17 @@ export const DiskAnalyzerView: React.FC<Props> = ({ lang, onSystemUpdated }) => 
       setDupReport(null);
     } catch (e) {
       setErrorMsg(String(e));
-    } finally {
-      setLoading(false);
     }
   };
 
   const runDupScan = async (rootPath: string) => {
-    setDupLoading(true);
+    if (scan.active) return;
     setErrorMsg(null);
     try {
-      const res = await api.findDuplicates(rootPath, 512 * 1024);
-      setDupReport(res);
+      const res = await scan.run({ kind: 'duplicate_files', path: rootPath, min_size_bytes: 512 * 1024 });
+      if (res) setDupReport(res);
     } catch (e) {
       setErrorMsg(String(e));
-    } finally {
-      setDupLoading(false);
     }
   };
 
@@ -582,7 +579,7 @@ export const DiskAnalyzerView: React.FC<Props> = ({ lang, onSystemUpdated }) => 
 
   const handleSelectLeftTab = (next: 'tree' | 'files' | 'duplicates' | 'orphans') => {
     setLeftTab(next);
-    if (next === 'duplicates' && report && (!dupReport || dupReport.root_path !== report.root_path) && !dupLoading) {
+    if (next === 'duplicates' && report && (!dupReport || dupReport.root_path !== report.root_path) && !scan.active) {
       void runDupScan(report.root_path);
     }
     if (next === 'orphans' && orphanDirs === null && !orphanLoading) {
@@ -603,14 +600,18 @@ export const DiskAnalyzerView: React.FC<Props> = ({ lang, onSystemUpdated }) => 
     }
 
     if (node.children.length === 0 && node.file_count + node.dir_count > 0) {
+      if (scan.active) return;
+      setErrorMsg(null);
       setLoadingDirs((prev) => new Set(prev).add(p));
       try {
-        const sub = await api.analyzeDisk(p, 2);
+        const sub = await scan.run({ kind: 'disk_analysis', path: p, max_depth: 2 });
+        if (!sub) return;
         setReport((prev) =>
           prev ? { ...prev, tree: spliceTreeChildren(prev.tree, p, sub.tree.children) } : prev
         );
       } catch (e) {
         setErrorMsg(String(e));
+        return;
       } finally {
         setLoadingDirs((prev) => {
           const next = new Set(prev);
@@ -974,7 +975,7 @@ export const DiskAnalyzerView: React.FC<Props> = ({ lang, onSystemUpdated }) => 
               key={p.path}
               size="small"
               appearance={targetPath === p.path ? 'primary' : 'outline'}
-              disabled={loading}
+              disabled={Boolean(scan.active)}
               onClick={() => runAnalyze(p.path)}
             >
               {pickText(p.label, lang)}
@@ -1002,16 +1003,10 @@ export const DiskAnalyzerView: React.FC<Props> = ({ lang, onSystemUpdated }) => 
             <Button
               size="small"
               appearance="primary"
-              disabled={loading || !targetPath.trim()}
+              disabled={Boolean(scan.active) || !targetPath.trim()}
               onClick={() => runAnalyze(targetPath)}
             >
-              {loading
-                ? lang === 'zh'
-                  ? '扫描中...'
-                  : 'Scanning...'
-                : lang === 'zh'
-                ? '开始分析'
-                : 'Analyze'}
+              {lang === 'zh' ? '开始分析' : 'Analyze'}
             </Button>
           </div>
 
@@ -1034,17 +1029,9 @@ export const DiskAnalyzerView: React.FC<Props> = ({ lang, onSystemUpdated }) => 
         </div>
       </div>
 
-      {loading ? (
-        <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-          <Spinner
-            label={
-              lang === 'zh'
-                ? '正在并行扫描目录树并构建立体空间分布图...'
-                : 'Scanning directory tree and computing layout...'
-            }
-          />
-        </div>
-      ) : !report ? (
+      <ScanStatusBar active={scan.active} cancelled={scan.cancelled} cancel={scan.cancel} lang={lang} />
+
+      {!report ? (
         <div
           className={styles.paneCard}
           style={{ flex: 1, alignItems: 'center', justifyContent: 'center', gap: 8, padding: 24 }}
@@ -1284,23 +1271,19 @@ export const DiskAnalyzerView: React.FC<Props> = ({ lang, onSystemUpdated }) => 
                             ? `扫描耗时 ${dupReport.elapsed_ms}ms · ${dupReport.total_groups} 组重复文件 · 可节省 ${formatBytes(dupReport.total_wasted_bytes)}`
                             : `${dupReport.total_groups} duplicate groups · ${formatBytes(dupReport.total_wasted_bytes)} wasted (${dupReport.elapsed_ms}ms)`
                           : lang === 'zh'
-                          ? '正在准备重复文件扫描...'
-                          : 'Preparing duplicate scan...'}
+                          ? '重复文件扫描'
+                          : 'Duplicate file scan'}
                       </Text>
                       <Button
                         size="small"
                         appearance="outline"
-                        disabled={dupLoading}
+                        disabled={Boolean(scan.active)}
                         onClick={() => void runDupScan(report.root_path)}
                       >
-                        {dupLoading ? <Spinner size="tiny" /> : lang === 'zh' ? '重新查重' : 'Rescan'}
+                        {dupReport ? (lang === 'zh' ? '重新查重' : 'Rescan') : (lang === 'zh' ? '开始查重' : 'Find duplicates')}
                       </Button>
                     </div>
-                    {dupLoading ? (
-                      <div style={{ display: 'flex', justifyContent: 'center', padding: 30 }}>
-                        <Spinner label={lang === 'zh' ? '三阶哈希查重中 (大小 -> 首尾采样 -> 全文)...' : 'Hashing duplicates...'} />
-                      </div>
-                    ) : !dupReport || dupReport.groups.length === 0 ? (
+                    {!dupReport ? null : dupReport.groups.length === 0 ? (
                       <Text size={200} style={{ color: tokens.colorNeutralForeground3 }}>
                         {lang === 'zh' ? '该目录下未发现大于 512 KB 的重复文件。' : 'No duplicate files (>512 KB) found.'}
                       </Text>

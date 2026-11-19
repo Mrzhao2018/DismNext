@@ -167,13 +167,17 @@ export const DashboardView: React.FC<Props> = ({
   const [confirmCleanupOpen, setConfirmCleanupOpen] = useState(false);
   const [taskFeedback, setTaskFeedback] = useState<string | null>(null);
   const [reportLoading, setReportLoading] = useState(false);
+  const [reportError, setReportError] = useState<string | null>(null);
   const [reportData, setReportData] = useState<HealthReportPayload | null>(null);
 
   const handleExportReport = async () => {
     setReportLoading(true);
+    setReportError(null);
     try {
       const data = await api.exportHealthReport();
       setReportData(data);
+    } catch (error) {
+      setReportError(String(error));
     } finally {
       setReportLoading(false);
     }
@@ -246,6 +250,7 @@ export const DashboardView: React.FC<Props> = ({
 
   return (
     <div className={styles.root}>
+      {reportError && <Text role="alert" style={{ color: tokens.colorPaletteRedForeground1 }}>{reportError}</Text>}
       <div className={styles.heroCard}>
         <div className={styles.heroTop}>
           <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>

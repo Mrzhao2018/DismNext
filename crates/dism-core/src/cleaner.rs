@@ -1,7 +1,8 @@
 use crate::catalog::{Action, CleanupRule, CleanupScan, LocalizedText};
 use crate::evaluator::{
-    eval_condition, expand_expression, resolve_wildcard_roots, wildcard_match_ci,
+    eval_condition, expand_expression, resolve_wildcard_roots_until, wildcard_match_ci,
 };
+use crate::scan_progress::{ScanPhase, ScanProgress};
 use crate::sysinfo::SystemInfo;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -146,12 +147,13 @@ struct IndexedTarget {
 const INDEX_SHARDS: usize = 32;
 
 #[derive(Default)]
-struct ScanIndex {
+struct ScanIndex<'a> {
     hasher: RandomState,
     targets: [Mutex<HashMap<TargetKey, IndexedTarget>>; INDEX_SHARDS],
+    progress: Option<&'a ScanProgress>,
 }
 
-impl ScanIndex {
+impl ScanIndex<'_> {
     fn observe(
         &self,
         key: &TargetKey,
@@ -161,10 +163,16 @@ impl ScanIndex {
     ) -> Option<(u64, FileStatus, Option<String>)> {
         let shard = self.hasher.hash_one(key) as usize % INDEX_SHARDS;
         let mut targets = self.targets[shard].lock().unwrap();
+        if self.progress.is_some_and(ScanProgress::is_cancelled) {
+            return None;
+        }
         // Diagnose a shared path once so parallel probes never lock each other out.
         match targets.entry(key.clone()) {
             Entry::Vacant(entry) => {
                 let (status, reason) = diagnose();
+                if let Some(progress) = self.progress {
+                    progress.file_processed();
+                }
                 entry.insert(IndexedTarget {
                     size,
                     status,
@@ -185,11 +193,14 @@ impl ScanIndex {
         }
     }
 
-    fn summarize(self, rules: &[CleanupRule]) -> CleanupScanSummary {
+    fn summarize(self, rules: &[CleanupRule]) -> anyhow::Result<CleanupScanSummary> {
         let mut summary = CleanupScanSummary::default();
         let mut overlaps = BTreeMap::<Vec<usize>, u64>::new();
         for shard in self.targets {
             for mut target in shard.into_inner().unwrap().into_values() {
+                if let Some(progress) = self.progress {
+                    progress.check()?;
+                }
                 match target.status {
                     FileStatus::Ready => {
                         summary.cleanable_bytes += target.size;
@@ -214,7 +225,7 @@ impl ScanIndex {
                 cleanable_bytes,
             })
             .collect();
-        summary
+        Ok(summary)
     }
 }
 
@@ -235,7 +246,7 @@ struct FileTotals {
 #[derive(Default)]
 struct CollectedFiles<'a> {
     preview_only: bool,
-    index: Option<(&'a ScanIndex, usize)>,
+    index: Option<(&'a ScanIndex<'a>, usize)>,
     targets: Vec<(TargetKey, PreviewFile)>,
     items: Vec<PreviewFile>,
     ready: FileTotals,
@@ -244,6 +255,12 @@ struct CollectedFiles<'a> {
 }
 
 impl CollectedFiles<'_> {
+    fn cancelled(&self) -> bool {
+        self.index
+            .and_then(|(index, _)| index.progress)
+            .is_some_and(ScanProgress::is_cancelled)
+    }
+
     fn observe(
         &self,
         key: &TargetKey,
@@ -330,17 +347,54 @@ pub fn scan_all(rules: &[CleanupRule], sys: &SystemInfo) -> Vec<CleanupScanResul
 }
 
 pub fn scan_all_with_summary(rules: &[CleanupRule], sys: &SystemInfo) -> CleanupBatchScan {
-    let index = ScanIndex::default();
+    scan_all_with_summary_inner(rules, sys, None)
+        .expect("Untracked cleanup scans cannot be cancelled")
+}
+
+pub fn scan_all_with_progress(
+    rules: &[CleanupRule],
+    sys: &SystemInfo,
+    progress: &ScanProgress,
+) -> anyhow::Result<CleanupBatchScan> {
+    scan_all_with_summary_inner(rules, sys, Some(progress))
+}
+
+fn scan_all_with_summary_inner(
+    rules: &[CleanupRule],
+    sys: &SystemInfo,
+    progress: Option<&ScanProgress>,
+) -> anyhow::Result<CleanupBatchScan> {
+    let index = ScanIndex {
+        progress,
+        ..ScanIndex::default()
+    };
     let items = rules
         .par_iter()
         .enumerate()
-        .map(|(rule_index, rule)| scan_rule_with_budget(rule, sys, 64, Some((&index, rule_index))))
-        .filter(|result| result.applicable)
-        .collect();
-    CleanupBatchScan {
-        items,
-        summary: index.summarize(rules),
+        .map(|(rule_index, rule)| {
+            if let Some(progress) = progress {
+                progress.check()?;
+            }
+            Ok(scan_rule_with_budget(
+                rule,
+                sys,
+                64,
+                Some((&index, rule_index)),
+            ))
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    if let Some(progress) = progress {
+        progress.check()?;
+        progress.set_phase(ScanPhase::Finishing, None);
     }
+    let summary = index.summarize(rules)?;
+    Ok(CleanupBatchScan {
+        items: items
+            .into_iter()
+            .filter(|result| result.applicable)
+            .collect(),
+        summary,
+    })
 }
 
 /// Scans a single rule using fast budgeted handle probing (ideal for bulk `scan_all`).
@@ -387,7 +441,7 @@ fn scan_rule_with_budget(
     rule: &CleanupRule,
     sys: &SystemInfo,
     probe_budget: usize,
-    index: Option<(&ScanIndex, usize)>,
+    index: Option<(&ScanIndex<'_>, usize)>,
 ) -> CleanupScanResult {
     let Some(active_scan) = select_active_scan(rule, sys) else {
         return empty_result(rule, false);
@@ -637,7 +691,7 @@ fn collect_scan_targets<'a>(
     sys: &SystemInfo,
     mut probe_budget: usize,
     preview_only: bool,
-    index: Option<(&'a ScanIndex, usize)>,
+    index: Option<(&'a ScanIndex<'a>, usize)>,
 ) -> CollectedTargets<'a> {
     let mut files = CollectedFiles {
         preview_only,
@@ -651,6 +705,9 @@ fn collect_scan_targets<'a>(
     let mut system_task_hint: Option<LocalizedText> = None;
 
     for action in &scan.actions {
+        if files.cancelled() {
+            break;
+        }
         match action {
             Action::General {
                 root_path,
@@ -735,8 +792,12 @@ fn collect_general_action(
             (expanded_root, queries.to_vec())
         };
 
-    let roots = resolve_wildcard_roots(&effective_root, &sys.fixed_drives);
+    let roots =
+        resolve_wildcard_roots_until(&effective_root, &sys.fixed_drives, &|| files.cancelled());
     for root_dir in roots {
+        if files.cancelled() {
+            return;
+        }
         let Ok(root_meta) = std::fs::symlink_metadata(&root_dir) else {
             continue;
         };
@@ -779,8 +840,14 @@ fn collect_general_action(
                     root_str.trim_end_matches('\\'),
                     q_norm.trim_start_matches('\\')
                 );
-                let matched_roots = resolve_wildcard_roots(&pattern, &sys.fixed_drives);
+                let matched_roots =
+                    resolve_wildcard_roots_until(&pattern, &sys.fixed_drives, &|| {
+                        files.cancelled()
+                    });
                 for target in matched_roots {
+                    if files.cancelled() {
+                        return;
+                    }
                     if is_excluded(&target, &root_dir, &expanded_exclusions) {
                         continue;
                     }
@@ -893,6 +960,9 @@ fn handle_custom_proc(
             let orphans = crate::systasks::find_orphaned_installer_files();
             let orphan_count = orphans.len();
             for (path, sz) in orphans {
+                if files.cancelled() {
+                    return;
+                }
                 let reparse = std::fs::symlink_metadata(&path)
                     .is_ok_and(|meta| meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0);
                 record_file_with_size(
@@ -1079,29 +1149,29 @@ fn walk_dir_filtered(
     removable_dirs: &mut Vec<PathBuf>,
     probe_budget: &mut usize,
 ) {
-    let walker = WalkDir::new(dir).follow_links(false).into_iter();
-    for entry in walker.filter_entry(|e| {
-        if e.path() == dir {
-            return true;
-        }
-        if e.path_is_symlink() {
-            return false;
-        }
-        if e.file_type().is_dir() {
-            let is_rp = e
-                .metadata()
-                .map(|m| (m.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT) != 0)
-                .unwrap_or(false);
-            if is_rp {
-                return false;
-            }
-        }
-        !is_excluded(e.path(), anchor_root, exclusions)
-    }) {
+    let mut walker = WalkDir::new(dir).follow_links(false).into_iter();
+    while !files.cancelled() {
+        let Some(entry) = walker.next() else {
+            break;
+        };
         let Ok(entry) = entry else {
             continue;
         };
         let path = entry.path();
+        let is_dir = entry.file_type().is_dir();
+        if path != dir
+            && (entry.path_is_symlink()
+                || (is_dir
+                    && entry.metadata().is_ok_and(|meta| {
+                        meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+                    }))
+                || is_excluded(path, anchor_root, exclusions))
+        {
+            if is_dir {
+                walker.skip_current_dir();
+            }
+            continue;
+        }
         if entry.file_type().is_file() {
             let meta = entry.metadata().ok();
             record_file_with_meta(
@@ -1112,11 +1182,7 @@ fn walk_dir_filtered(
                 sys_is_admin,
                 probe_budget,
             );
-        } else if entry.file_type().is_dir()
-            && allow_dirs
-            && !files.preview_only
-            && (path != dir || remove_self)
-        {
+        } else if is_dir && allow_dirs && !files.preview_only && (path != dir || remove_self) {
             removable_dirs.push(path.to_path_buf());
         }
     }
@@ -1392,7 +1458,15 @@ mod tests {
         let rules = [rule_a, rule_b, rule_c];
         let sys = SystemInfo::collect();
 
-        let batch = scan_all_with_summary(&rules, &sys);
+        let progress = ScanProgress::default();
+        let batch = scan_all_with_progress(&rules, &sys, &progress).unwrap();
+        let snapshot = serde_json::to_value(progress.snapshot()).unwrap();
+        assert_eq!(snapshot["processed_files"], 112);
+        assert_eq!(snapshot["phase"], "finishing");
+        progress.cancel();
+        assert!(scan_all_with_progress(&rules, &sys, &progress)
+            .unwrap_err()
+            .is::<crate::scan_progress::ScanCancelled>());
         assert_eq!(
             batch
                 .items

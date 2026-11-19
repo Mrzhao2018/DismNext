@@ -2,11 +2,12 @@ use anyhow::Result;
 use clap::Parser;
 use dism_core::appx::{list_appx_packages, remove_appx_package};
 use dism_core::cleaner::{
-    execute_cleanup, is_deferred_system_task_proc, scan_all_with_summary, scan_custom_proc_name,
+    execute_cleanup, is_deferred_system_task_proc, scan_all_with_progress, scan_all_with_summary, scan_custom_proc_name,
     scan_rule_preview, CleanupBatchScan, CleanupScanResult,
 };
 use dism_core::diskmap::{
-    analyze_path, find_duplicate_files, find_orphaned_app_dirs, get_presets, recycle_path,
+    analyze_path, analyze_path_with_progress, find_duplicate_files,
+    find_duplicate_files_with_progress, find_orphaned_app_dirs, get_presets, recycle_path,
 };
 use dism_core::drivers::{default_backup_dir, delete_driver, export_drivers, list_drivers};
 use dism_core::evaluator::eval_condition;
@@ -39,6 +40,9 @@ use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
 
 include!(concat!(env!("OUT_DIR"), "/embedded_ui.rs"));
 
+mod scan_jobs;
+use scan_jobs::{ScanBusy, ScanJobs};
+
 #[derive(Parser)]
 #[command(name = "dism-app", about = "DismNext Desktop Host Server & GUI Launcher")]
 struct Args {
@@ -61,6 +65,7 @@ struct AppState {
     snap_mgr: SnapshotManager,
     scan_cache: RwLock<CleanupScanCache>,
     cleanup_operation: Mutex<()>,
+    scan_jobs: Arc<ScanJobs>,
     ui_dir: Option<PathBuf>,
 }
 
@@ -95,6 +100,15 @@ impl AppState {
         *self.scan_cache.write().unwrap() = CleanupScanCache::default();
         operation
     }
+
+    fn publish_cleanup_scan(&self, results: CleanupBatchScan, started: Instant) -> serde_json::Value {
+        let results = {
+            let mut cache = self.scan_cache.write().unwrap();
+            cache.rules.clear();
+            cache.store_full_scan(results, started)
+        };
+        serde_json::json!({ "items": results.items, "summary": results.summary })
+    }
 }
 
 #[derive(Deserialize)]
@@ -119,6 +133,19 @@ struct RestoreReq {
 struct DiskAnalyzeReq {
     path: String,
     max_depth: Option<usize>,
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum ScanRequest {
+    DiskAnalysis { path: String, max_depth: Option<usize> },
+    DuplicateFiles { path: String, min_size_bytes: Option<u64> },
+    CleanupRules,
+}
+
+#[derive(Deserialize)]
+struct CancelScanReq {
+    id: u64,
 }
 
 #[derive(Deserialize)]
@@ -232,6 +259,7 @@ fn main() -> Result<()> {
         snap_mgr,
         scan_cache: RwLock::new(CleanupScanCache::default()),
         cleanup_operation: Mutex::new(()),
+        scan_jobs: Arc::new(ScanJobs::default()),
         ui_dir,
     });
 
@@ -325,7 +353,7 @@ fn launch_desktop_window(url: &str) {
     let _ = Command::new("cmd").args(["/C", "start", "", url]).spawn();
 }
 
-fn handle_request(mut req: Request, state: &AppState) {
+fn handle_request(mut req: Request, state: &Arc<AppState>) {
     let origin_header = header_value(&req, "origin");
     if let Err(reason) = verify_request_security(&req, state.port) {
         let mut resp = Response::from_string(
@@ -363,12 +391,13 @@ fn handle_request(mut req: Request, state: &AppState) {
                 origin_header.as_deref(),
             ),
             Err(err) => {
+                let code = if err.is::<ScanBusy>() { 409 } else { 400 };
                 let body = ErrorPayload {
                     error: err.to_string(),
                 };
                 respond_json(
                     req,
-                    StatusCode(400),
+                    StatusCode(code),
                     &body,
                     state.port,
                     origin_header.as_deref(),
@@ -455,8 +484,44 @@ fn dispatch_api(
     req: &mut Request,
     path: &str,
     query: &str,
-    state: &AppState,
+    state: &Arc<AppState>,
 ) -> Result<serde_json::Value> {
+    match (req.method(), path) {
+        (&Method::Post, "/api/scans/start") => {
+            let payload: ScanRequest = read_json_body(req)?;
+            let app = Arc::clone(state);
+            let id = state.scan_jobs.start(move |progress| match payload {
+                ScanRequest::DiskAnalysis { path, max_depth } => {
+                    let report = analyze_path_with_progress(Path::new(path.trim()), max_depth.unwrap_or(4), progress)?;
+                    Ok(serde_json::to_value(report)?)
+                }
+                ScanRequest::DuplicateFiles { path, min_size_bytes } => {
+                    let report = find_duplicate_files_with_progress(Path::new(path.trim()), min_size_bytes.unwrap_or(512 * 1024), progress)?;
+                    Ok(serde_json::to_value(report)?)
+                }
+                ScanRequest::CleanupRules => {
+                    let _cleanup = app.cleanup_operation.try_lock()
+                        .map_err(|_| anyhow::anyhow!("Another cleanup operation is already running"))?;
+                    let started = Instant::now();
+                    let sys = SystemInfo::collect();
+                    let results = scan_all_with_progress(&app.catalog.read().unwrap().cleanup_rules, &sys, progress)?;
+                    if progress.is_cancelled() { return Err(dism_core::scan_progress::ScanCancelled.into()); }
+                    Ok(app.publish_cleanup_scan(results, started))
+                }
+            })?;
+            return Ok(serde_json::json!({ "id": id }));
+        }
+        (&Method::Get, "/api/scans/status") => {
+            let id = parse_query_param(query, "id").ok_or_else(|| anyhow::anyhow!("Missing ?id= parameter"))?.parse()?;
+            return state.scan_jobs.status(id);
+        }
+        (&Method::Post, "/api/scans/cancel") => {
+            let payload: CancelScanReq = read_json_body(req)?;
+            state.scan_jobs.cancel(payload.id)?;
+            return Ok(serde_json::json!({ "ok": true }));
+        }
+        _ => {}
+    }
     let sys = SystemInfo::collect();
 
     match (req.method(), path) {
@@ -507,11 +572,10 @@ fn dispatch_api(
         (&Method::Post, "/api/cleanup/scan") => {
             let _operation = state.cleanup_operation.lock().unwrap();
             let started = Instant::now();
-            let results = scan_all_with_summary(&state.catalog.read().unwrap().cleanup_rules, &sys);
-            let mut cache = state.scan_cache.write().unwrap();
-            cache.rules.clear();
-            let results = cache.store_full_scan(results, started);
-            Ok(serde_json::json!({ "items": results.items, "summary": results.summary }))
+            let results = state.scan_jobs.run_inline(|| {
+                Ok(scan_all_with_summary(&state.catalog.read().unwrap().cleanup_rules, &sys))
+            })?;
+            Ok(state.publish_cleanup_scan(results, started))
         }
         (&Method::Get, "/api/cleanup/preview") => {
             let id = parse_query_param(query, "id")
@@ -630,10 +694,10 @@ fn dispatch_api(
         }
         (&Method::Post, "/api/diskmap/analyze") => {
             let payload: DiskAnalyzeReq = read_json_body(req)?;
-            let report = analyze_path(
+            let report = state.scan_jobs.run_inline(|| analyze_path(
                 Path::new(payload.path.trim()),
                 payload.max_depth.unwrap_or(4),
-            )?;
+            ))?;
             Ok(serde_json::to_value(report)?)
         }
         (&Method::Post, "/api/diskmap/reveal") => {
@@ -814,10 +878,10 @@ fn dispatch_api(
         }
         (&Method::Post, "/api/diskmap/duplicates") => {
             let payload: DuplicatesReq = read_json_body(req)?;
-            let report = find_duplicate_files(
+            let report = state.scan_jobs.run_inline(|| find_duplicate_files(
                 Path::new(payload.path.trim()),
                 payload.min_size_bytes.unwrap_or(512 * 1024),
-            )?;
+            ))?;
             Ok(serde_json::to_value(report)?)
         }
         (&Method::Get, "/api/diskmap/orphans") => {
@@ -855,15 +919,15 @@ fn dispatch_api(
                     .read()
                     .unwrap()
                     .fresh_full_scan(Instant::now());
-                let scans = cached.unwrap_or_else(|| {
+                let scans = if let Some(scans) = cached { scans } else {
                     let started = Instant::now();
-                    let results = scan_all_with_summary(&cat.cleanup_rules, &sys);
+                    let results = state.scan_jobs.run_inline(|| Ok(scan_all_with_summary(&cat.cleanup_rules, &sys)))?;
                     state
                         .scan_cache
                         .write()
                         .unwrap()
                         .store_full_scan(results, started)
-                });
+                };
                 (cat, scans)
             };
             let report = generate_health_report(&cat, Some(&scans));

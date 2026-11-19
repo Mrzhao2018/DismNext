@@ -92,6 +92,11 @@ export interface CleanupRulesPayload {
   summary: CleanupScanSummary | null;
 }
 
+export interface CleanupScanPayload {
+  items: CleanupScanResult[];
+  summary: CleanupScanSummary;
+}
+
 export interface RuleCleanOutcome {
   id: string;
   name: LocalizedText;
@@ -429,6 +434,24 @@ export interface DuplicateScanReport {
   groups: DuplicateGroup[];
 }
 
+export interface ScanProgress {
+  phase: 'walking' | 'sampling' | 'hashing' | 'finishing';
+  processed_files: number;
+  total_files: number | null;
+  bytes_read: number;
+}
+
+export type ScanRequest =
+  | { kind: 'disk_analysis'; path: string; max_depth: number }
+  | { kind: 'duplicate_files'; path: string; min_size_bytes: number }
+  | { kind: 'cleanup_rules' };
+
+export type ScanStatus<T> =
+  | { state: 'running' | 'cancelling'; progress: ScanProgress }
+  | { state: 'completed'; result: T }
+  | { state: 'cancelled' }
+  | { state: 'failed'; error: string };
+
 export interface OrphanDirEntry {
   name: string;
   path: string;
@@ -518,7 +541,6 @@ export const api = {
       method: 'POST',
     }),
   getCleanupRules: () => reqJson<CleanupRulesPayload>('/api/cleanup/rules'),
-  scanCleanup: () => reqJson<{ items: CleanupScanResult[]; summary: CleanupScanSummary }>('/api/cleanup/scan', { method: 'POST' }),
   previewCleanup: (id: string) =>
     reqJson<CleanupScanResult>(`/api/cleanup/preview?id=${encodeURIComponent(id)}`),
   executeCleanup: (rule_ids: string[], dry_run: boolean) =>
@@ -545,11 +567,18 @@ export const api = {
       }
     ),
   getDiskPresets: () => reqJson<{ presets: DiskPreset[] }>('/api/diskmap/presets'),
-  analyzeDisk: (path: string, max_depth = 4) =>
-    reqJson<DiskAnalysisReport>('/api/diskmap/analyze', {
-      method: 'POST',
-      body: JSON.stringify({ path, max_depth }),
-    }),
+  startScan: (request: ScanRequest) => reqJson<{ id: number }>('/api/scans/start', {
+    method: 'POST',
+    body: JSON.stringify(request),
+  }),
+  getScanStatus: <T>(id: number) => reqJson<ScanStatus<T>>(`/api/scans/status?id=${id}`, {
+    cache: 'no-store',
+  }),
+  cancelScan: (id: number) => reqJson<{ ok: boolean }>('/api/scans/cancel', {
+    method: 'POST',
+    body: JSON.stringify({ id }),
+    keepalive: true,
+  }),
   revealInExplorer: (path: string) =>
     reqJson<{ ok: boolean }>('/api/diskmap/reveal', {
       method: 'POST',
@@ -646,11 +675,6 @@ export const api = {
     reqJson<RescueActionOutcome>('/api/rescue/run', {
       method: 'POST',
       body: JSON.stringify({ action_id }),
-    }),
-  findDuplicates: (path: string, min_size_bytes = 524288) =>
-    reqJson<DuplicateScanReport>('/api/diskmap/duplicates', {
-      method: 'POST',
-      body: JSON.stringify({ path, min_size_bytes }),
     }),
   getOrphanDirs: () => reqJson<{ orphans: OrphanDirEntry[] }>('/api/diskmap/orphans'),
   getWin32Apps: () => reqJson<{ apps: Win32AppInfo[] }>('/api/uninstaller/list'),

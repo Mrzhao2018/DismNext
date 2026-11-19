@@ -523,6 +523,15 @@ fn path_or_wildcard_exists(path: &str, fixed_drives: &[String]) -> bool {
 
 /// Expands a `RootPath` pattern (supporting leading `*\` for fixed drives and intermediate `*`/`?` segments).
 pub fn resolve_wildcard_roots(pattern: &str, fixed_drives: &[String]) -> Vec<PathBuf> {
+    resolve_wildcard_roots_until(pattern, fixed_drives, &|| false)
+}
+
+pub(crate) fn resolve_wildcard_roots_until(
+    pattern: &str,
+    fixed_drives: &[String],
+    cancelled: &impl Fn() -> bool,
+) -> Vec<PathBuf> {
+    if cancelled() { return Vec::new(); }
     let norm = pattern.replace('/', "\\");
     let trimmed = norm.trim();
     if trimmed.is_empty() {
@@ -534,7 +543,7 @@ pub fn resolve_wildcard_roots(pattern: &str, fixed_drives: &[String]) -> Vec<Pat
         let mut results = Vec::new();
         for drv in fixed_drives {
             let candidate = format!("{}{}", drv, rest);
-            results.extend(resolve_wildcard_roots(&candidate, fixed_drives));
+            results.extend(resolve_wildcard_roots_until(&candidate, fixed_drives, cancelled));
         }
         return results;
     }
@@ -591,6 +600,7 @@ pub fn resolve_wildcard_roots(pattern: &str, fixed_drives: &[String]) -> Vec<Pat
         }
         let has_wild = seg.contains('*') || seg.contains('?');
         for dir in current {
+            if cancelled() { return Vec::new(); }
             if !has_wild {
                 let candidate = dir.join(seg);
                 if candidate.exists() {
@@ -598,6 +608,7 @@ pub fn resolve_wildcard_roots(pattern: &str, fixed_drives: &[String]) -> Vec<Pat
                 }
             } else if let Ok(rd) = std::fs::read_dir(&dir) {
                 for entry in rd.flatten() {
+                    if cancelled() { return Vec::new(); }
                     let name = entry.file_name();
                     let name_str = name.to_string_lossy();
                     if wildcard_match_ci(seg, &name_str) {

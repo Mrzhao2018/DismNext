@@ -10,6 +10,7 @@ pub mod mcp;
 pub mod optimizer;
 pub mod report;
 pub mod rescue;
+pub mod scan_progress;
 pub mod snapshot;
 pub mod startup;
 pub mod sysinfo;

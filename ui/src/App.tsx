@@ -31,6 +31,8 @@ import {
   formatBytes,
 } from './api';
 import { DashboardTargetTab, DashboardView } from './views/DashboardView';
+import { ScanStatusBar } from './ScanStatusBar';
+import { useScanJob } from './useScanJob';
 
 const SpaceRecycleView = lazy(() =>
   import('./views/SpaceRecycleView').then((m) => ({ default: m.SpaceRecycleView }))
@@ -174,7 +176,8 @@ const AppShell: React.FC<{
   const cleanupSummary = cleanupData?.summary ?? null;
   const { data: optGroups, setData: setOptGroups } = optimizer;
   const { data: snapshots, setData: setSnapshots, reload: refreshSnapshots } = snapshotList;
-  const [scanning, setScanning] = useState(false);
+  const cleanupScan = useScanJob();
+  const scanning = Boolean(cleanupScan.active);
   const [scanError, setScanError] = useState<string | null>(null);
   const [elevating, setElevating] = useState(false);
   const [elevateErr, setElevateErr] = useState<string | null>(null);
@@ -211,16 +214,13 @@ const AppShell: React.FC<{
   };
 
   const handleScan = async () => {
-    setScanning(true);
+    if (scanning) return;
     setScanError(null);
-    setCleanupData((previous) => previous && { ...previous, summary: null });
     try {
-      const res = await api.scanCleanup();
-      setCleanupData({ items: res.items.map((rule) => ({ scanned: true, rule })), summary: res.summary });
+      const res = await cleanupScan.run({ kind: 'cleanup_rules' });
+      if (res) setCleanupData({ items: res.items.map((rule) => ({ scanned: true, rule })), summary: res.summary });
     } catch (error) {
       setScanError(String(error));
-    } finally {
-      setScanning(false);
     }
   };
 
@@ -457,6 +457,9 @@ const AppShell: React.FC<{
         </header>
 
         <section className={styles.contentArea}>
+          {(scanning || tab === 'dashboard' || tab === 'cleanup') && (
+            <ScanStatusBar active={cleanupScan.active} cancelled={cleanupScan.cancelled} cancel={cleanupScan.cancel} lang={lang} />
+          )}
           {(tab === 'dashboard' || tab === 'cleanup') && scanError && resourceFeedback(
             lang === 'zh' ? '扫描清理规则' : 'Scan cleanup rules', scanError, handleScan,
           )}
@@ -496,10 +499,12 @@ const AppShell: React.FC<{
                 onEntriesUpdated={(items) => setCleanupData({ items, summary: null })}
                 onExecuted={async (sys) => {
                   setSysPayload((prev) => (prev ? { ...prev, system: sys } : prev));
+                  setCleanupData((prev) => prev && { ...prev, summary: null });
                   await handleScan();
                 }}
                 onSystemTaskDone={async (sys) => {
                   setSysPayload((prev) => (prev ? { ...prev, system: sys } : prev));
+                  setCleanupData((prev) => prev && { ...prev, summary: null });
                   await handleScan();
                 }}
               />

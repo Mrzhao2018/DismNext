@@ -334,7 +334,7 @@ export const SpaceRecycleView: React.FC<Props> = ({
 
   const runCleanup = async (dryRun: boolean) => {
     const ids = selectedEntries.map((e) => e.rule.id);
-    if (ids.length === 0) return;
+    if (scanning || ids.length === 0) return;
     setExecuting(true);
     setErrorMsg(null);
     setTaskNotice(null);
@@ -973,7 +973,7 @@ export const SpaceRecycleView: React.FC<Props> = ({
         </div>
         <div style={{ display: 'flex', gap: '8px' }}>
           <Button
-            disabled={executing || selectedEntries.length === 0}
+            disabled={scanning || executing || selectedEntries.length === 0}
             onClick={() => runCleanup(true)}
           >
             {lang === 'zh' ? '模拟清理 (Dry-Run)' : 'Simulate (Dry-Run)'}
@@ -981,7 +981,7 @@ export const SpaceRecycleView: React.FC<Props> = ({
           <Button
             appearance="primary"
             icon={<Delete24Regular />}
-            disabled={executing || selectedEntries.length === 0}
+            disabled={scanning || executing || selectedEntries.length === 0}
             onClick={() => {
               if (hasRiskySelection) setConfirmOpen(true);
               else runCleanup(false);

@@ -1,4 +1,5 @@
 use crate::catalog::LocalizedText;
+use crate::scan_progress::{ScanPhase, ScanProgress};
 use crate::sysinfo::SystemInfo;
 use anyhow::{anyhow, Result};
 use chrono::DateTime;
@@ -163,13 +164,29 @@ pub fn get_presets(sys: &SystemInfo) -> Vec<DiskPreset> {
 
 /// Performs a parallel directory tree & extension analysis without following NTFS reparse points.
 pub fn analyze_path(root: &Path, max_depth: usize) -> Result<DiskAnalysisReport> {
+    analyze_path_inner(root, max_depth, None)
+}
+
+pub fn analyze_path_with_progress(root: &Path, max_depth: usize, progress: &ScanProgress) -> Result<DiskAnalysisReport> {
+    analyze_path_inner(root, max_depth, Some(progress))
+}
+
+fn check_scan(progress: Option<&ScanProgress>) -> Result<()> {
+    progress.map_or(Ok(()), ScanProgress::check)
+}
+
+fn analyze_path_inner(root: &Path, max_depth: usize, progress: Option<&ScanProgress>) -> Result<DiskAnalysisReport> {
+    check_scan(progress)?;
     if !root.exists() {
         return Err(anyhow!("Path does not exist: {}", root.display()));
     }
     let started = Instant::now();
     let depth_limit = max_depth.clamp(1, 6);
 
-    let acc = scan_recursive(root, Some(depth_limit));
+    let acc = scan_recursive(root, Some(depth_limit), progress)?;
+    if let Some(progress) = progress {
+        progress.set_phase(ScanPhase::Finishing, None);
+    }
     let total_bytes = acc.node.size_bytes;
     let total_files = acc.node.file_count;
     let total_dirs = acc.node.dir_count;
@@ -214,6 +231,7 @@ pub fn analyze_path(root: &Path, max_depth: usize) -> Result<DiskAnalysisReport>
         });
     }
 
+    check_scan(progress)?;
     Ok(DiskAnalysisReport {
         root_path: root.to_string_lossy().into_owned(),
         elapsed_ms: started.elapsed().as_millis() as u64,
@@ -226,7 +244,8 @@ pub fn analyze_path(root: &Path, max_depth: usize) -> Result<DiskAnalysisReport>
     })
 }
 
-fn scan_recursive(path: &Path, visible_depth: Option<usize>) -> ScanAccumulator {
+fn scan_recursive(path: &Path, visible_depth: Option<usize>, progress: Option<&ScanProgress>) -> Result<ScanAccumulator> {
+    check_scan(progress)?;
     let (name, path_str) = if visible_depth.is_some() {
         let path_str = path.to_string_lossy().into_owned();
         let name = path
@@ -243,14 +262,15 @@ fn scan_recursive(path: &Path, visible_depth: Option<usize>) -> ScanAccumulator 
     let child_depth = visible_depth.and_then(|depth| depth.checked_sub(1));
 
     let Ok(meta) = std::fs::symlink_metadata(path) else {
-        return empty_acc(name, path_str, false);
+        return Ok(empty_acc(name, path_str, false));
     };
 
     if (meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT) != 0 {
-        return empty_acc(name, path_str, meta.is_dir());
+        return Ok(empty_acc(name, path_str, meta.is_dir()));
     }
 
     if meta.is_file() {
+        if let Some(progress) = progress { progress.file_processed(); }
         let size = meta.len();
         let ext = extract_ext(path);
         let mut exts = HashMap::new();
@@ -261,7 +281,7 @@ fn scan_recursive(path: &Path, visible_depth: Option<usize>) -> ScanAccumulator 
             ext: ext.clone(),
             size_bytes: size,
         }];
-        return ScanAccumulator {
+        return Ok(ScanAccumulator {
             node: RawNode {
                 name,
                 path: path_str,
@@ -275,11 +295,11 @@ fn scan_recursive(path: &Path, visible_depth: Option<usize>) -> ScanAccumulator 
             },
             exts,
             top_files,
-        };
+        });
     }
 
     let Ok(rd) = std::fs::read_dir(path) else {
-        return empty_acc(name, path_str, true);
+        return Ok(empty_acc(name, path_str, true));
     };
 
     let mut total_bytes = 0u64;
@@ -292,6 +312,7 @@ fn scan_recursive(path: &Path, visible_depth: Option<usize>) -> ScanAccumulator 
     let mut sub_dirs: Vec<PathBuf> = Vec::new();
 
     for entry in rd.flatten() {
+        check_scan(progress)?;
         let Ok(c_meta) = entry.metadata() else {
             continue;
         };
@@ -300,6 +321,7 @@ fn scan_recursive(path: &Path, visible_depth: Option<usize>) -> ScanAccumulator 
         }
         let child_path = entry.path();
         if c_meta.is_file() {
+            if let Some(progress) = progress { progress.file_processed(); }
             let sz = c_meta.len();
             let c_name = entry.file_name().to_string_lossy().into_owned();
             let c_path_str = child_path.to_string_lossy().into_owned();
@@ -344,10 +366,11 @@ fn scan_recursive(path: &Path, visible_depth: Option<usize>) -> ScanAccumulator 
 
     // Merge each batch before starting more subtrees, so completed branches can be dropped early.
     for batch in sub_dirs.chunks(32) {
-        let child_accs: Vec<_> = batch
+        check_scan(progress)?;
+        let child_accs = batch
             .par_iter()
-            .map(|path| scan_recursive(path, child_depth))
-            .collect();
+            .map(|path| scan_recursive(path, child_depth, progress))
+            .collect::<Result<Vec<_>>>()?;
         for c in child_accs {
             total_bytes = total_bytes.saturating_add(c.node.size_bytes);
             total_files += c.node.file_count;
@@ -373,7 +396,7 @@ fn scan_recursive(path: &Path, visible_depth: Option<usize>) -> ScanAccumulator 
     trim_largest_files(&mut top_files);
     trim_children(&mut children, &mut omitted_children);
 
-    ScanAccumulator {
+    Ok(ScanAccumulator {
         node: RawNode {
             name,
             path: path_str,
@@ -387,7 +410,7 @@ fn scan_recursive(path: &Path, visible_depth: Option<usize>) -> ScanAccumulator 
         },
         exts,
         top_files,
-    }
+    })
 }
 
 fn trim_largest_files(files: &mut Vec<LargeFileEntry>) {
@@ -713,6 +736,15 @@ pub struct OrphanDirEntry {
 
 /// Three-stage parallel duplicate file finder (`size -> 4KB head/tail sample -> 128-bit full hash`).
 pub fn find_duplicate_files(root: &Path, min_size_bytes: u64) -> Result<DuplicateScanReport> {
+    find_duplicate_files_inner(root, min_size_bytes, None)
+}
+
+pub fn find_duplicate_files_with_progress(root: &Path, min_size_bytes: u64, progress: &ScanProgress) -> Result<DuplicateScanReport> {
+    find_duplicate_files_inner(root, min_size_bytes, Some(progress))
+}
+
+fn find_duplicate_files_inner(root: &Path, min_size_bytes: u64, progress: Option<&ScanProgress>) -> Result<DuplicateScanReport> {
+    check_scan(progress)?;
     if !root.exists() {
         return Err(anyhow!("Path does not exist: {}", root.display()));
     }
@@ -725,29 +757,27 @@ pub fn find_duplicate_files(root: &Path, min_size_bytes: u64) -> Result<Duplicat
     let driverstore_prefix = format!(r"{}\system32\driverstore", sys_root);
 
     let mut by_size: HashMap<u64, Vec<(PathBuf, u64)>> = HashMap::new();
-    for entry in WalkDir::new(root)
-        .follow_links(false)
-        .into_iter()
-        .filter_entry(|e| {
-            let p_str = e.path().to_string_lossy().to_ascii_lowercase();
-            if p_str.starts_with(&winsxs_prefix) || p_str.starts_with(&driverstore_prefix) {
-                return false;
-            }
-            if e.path() == root {
-                return true;
-            }
-            std::fs::symlink_metadata(e.path())
-                .map(|m| (m.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT) == 0)
-                .unwrap_or(false)
-        })
-        .flatten()
-    {
+    let mut walker = WalkDir::new(root).follow_links(false).into_iter();
+    loop {
+        check_scan(progress)?;
+        let Some(entry) = walker.next() else { break; };
+        let Ok(entry) = entry else { continue; };
+        let path = entry.path();
+        let lower = path.to_string_lossy().to_ascii_lowercase();
+        if lower.starts_with(&winsxs_prefix) || lower.starts_with(&driverstore_prefix)
+            || (path != root && !std::fs::symlink_metadata(path)
+                .is_ok_and(|meta| meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT == 0))
+        {
+            if entry.file_type().is_dir() { walker.skip_current_dir(); }
+            continue;
+        }
         if !entry.file_type().is_file() {
             continue;
         }
         let Ok(meta) = entry.metadata() else {
             continue;
         };
+        if let Some(progress) = progress { progress.file_processed(); }
         let sz = meta.len();
         if sz < threshold {
             continue;
@@ -767,16 +797,22 @@ pub fn find_duplicate_files(root: &Path, min_size_bytes: u64) -> Result<Duplicat
         .flat_map(|(sz, list)| list.into_iter().map(move |(p, m)| (sz, p, m)))
         .collect();
 
-    let sampled: Vec<(u64, u64, PathBuf, u64)> = size_candidates
+    if let Some(progress) = progress {
+        progress.set_phase(ScanPhase::Sampling, Some(size_candidates.len()));
+    }
+    let sampled = size_candidates
         .into_par_iter()
         .filter_map(|(sz, path, mod_unix)| {
-            let sample = sample_hash_file(&path, sz)?;
-            Some((sz, sample, path, mod_unix))
+            if let Err(error) = check_scan(progress) { return Some(Err(error)); }
+            let sample = sample_hash_file(&path, sz, progress);
+            if let Some(progress) = progress { progress.file_processed(); }
+            sample.map(|hash| Ok((sz, hash, path, mod_unix)))
         })
-        .collect();
+        .collect::<Result<Vec<_>>>()?;
 
     let mut by_sample: HashMap<(u64, u64), Vec<(PathBuf, u64)>> = HashMap::new();
     for (sz, sample, path, mod_unix) in sampled {
+        check_scan(progress)?;
         by_sample.entry((sz, sample)).or_default().push((path, mod_unix));
     }
 
@@ -786,16 +822,24 @@ pub fn find_duplicate_files(root: &Path, min_size_bytes: u64) -> Result<Duplicat
         .flat_map(|((sz, _), list)| list.into_iter().map(move |(p, m)| (sz, p, m)))
         .collect();
 
-    let hashed: Vec<(u64, u128, PathBuf, u64)> = full_candidates
+    if let Some(progress) = progress {
+        progress.set_phase(ScanPhase::Hashing, Some(full_candidates.len()));
+    }
+    let hashed = full_candidates
         .into_par_iter()
         .filter_map(|(sz, path, mod_unix)| {
-            let h = full_hash_128(&path)?;
-            Some((sz, h, path, mod_unix))
+            if let Err(error) = check_scan(progress) { return Some(Err(error)); }
+            let hash = File::open(&path).ok().and_then(|file| full_hash_128(file, progress));
+            if let Some(progress) = progress { progress.file_processed(); }
+            hash.map(|hash| Ok((sz, hash, path, mod_unix)))
         })
-        .collect();
+        .collect::<Result<Vec<_>>>()?;
+
+    if let Some(progress) = progress { progress.set_phase(ScanPhase::Finishing, None); }
 
     let mut by_full: HashMap<(u64, u128), Vec<DuplicateFileEntry>> = HashMap::new();
     for (sz, h, path, mod_unix) in hashed {
+        check_scan(progress)?;
         let name = path
             .file_name()
             .and_then(|s| s.to_str())
@@ -814,6 +858,7 @@ pub fn find_duplicate_files(root: &Path, min_size_bytes: u64) -> Result<Duplicat
 
     let mut groups = Vec::new();
     for ((sz, h), mut files) in by_full {
+        check_scan(progress)?;
         if files.len() < 2 {
             continue;
         }
@@ -832,6 +877,7 @@ pub fn find_duplicate_files(root: &Path, min_size_bytes: u64) -> Result<Duplicat
     let total_wasted_bytes: u64 = groups.iter().map(|g| g.wasted_bytes).sum();
     groups.truncate(100);
 
+    check_scan(progress)?;
     Ok(DuplicateScanReport {
         root_path: root.to_string_lossy().into_owned(),
         elapsed_ms: started.elapsed().as_millis() as u64,
@@ -841,19 +887,27 @@ pub fn find_duplicate_files(root: &Path, min_size_bytes: u64) -> Result<Duplicat
     })
 }
 
-fn sample_hash_file(path: &Path, size: u64) -> Option<u64> {
+fn read_hash_chunk(reader: &mut impl Read, buffer: &mut [u8], progress: Option<&ScanProgress>) -> Option<usize> {
+    check_scan(progress).ok()?;
+    let bytes = reader.read(buffer).ok()?;
+    if let Some(progress) = progress { progress.read_bytes(bytes); }
+    Some(bytes)
+}
+
+fn sample_hash_file(path: &Path, size: u64, progress: Option<&ScanProgress>) -> Option<u64> {
     let mut f = File::open(path).ok()?;
     let mut h: u64 = 0xcbf29ce484222325 ^ size;
     let mut buf = [0u8; 4096];
-    let n1 = f.read(&mut buf).ok()?;
+    let n1 = read_hash_chunk(&mut f, &mut buf, progress)?;
     for &b in &buf[..n1] {
         h ^= b as u64;
         h = h.wrapping_mul(0x100000001b3);
     }
     if size > 4096 {
+        check_scan(progress).ok()?;
         let tail_pos = size.saturating_sub(4096);
         f.seek(SeekFrom::Start(tail_pos)).ok()?;
-        let n2 = f.read(&mut buf).ok()?;
+        let n2 = read_hash_chunk(&mut f, &mut buf, progress)?;
         for &b in &buf[..n2] {
             h ^= b as u64;
             h = h.wrapping_mul(0x100000001b3);
@@ -862,13 +916,12 @@ fn sample_hash_file(path: &Path, size: u64) -> Option<u64> {
     Some(h)
 }
 
-fn full_hash_128(path: &Path) -> Option<u128> {
-    let mut f = File::open(path).ok()?;
+fn full_hash_128(mut reader: impl Read, progress: Option<&ScanProgress>) -> Option<u128> {
     let mut h1: u64 = 0xcbf29ce484222325;
     let mut h2: u64 = 0x9e3779b97f4a7c15;
     let mut buf = [0u8; 65536];
     loop {
-        let n = f.read(&mut buf).ok()?;
+        let n = read_hash_chunk(&mut reader, &mut buf, progress)?;
         if n == 0 {
             break;
         }
@@ -1154,6 +1207,25 @@ mod tests {
     use std::io::Write;
 
     #[test]
+    fn full_hash_checks_for_cancellation_before_reading_the_next_chunk() {
+        struct CancelAfterChunk<'a> { progress: &'a ScanProgress, reads: usize }
+        impl Read for CancelAfterChunk<'_> {
+            fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+                self.reads += 1;
+                buffer.fill(1);
+                self.progress.cancel();
+                Ok(buffer.len())
+            }
+        }
+        let progress = ScanProgress::default();
+        let mut reader = CancelAfterChunk { progress: &progress, reads: 0 };
+        assert!(full_hash_128(&mut reader, Some(&progress)).is_none());
+        assert_eq!(reader.reads, 1);
+        let snapshot = serde_json::to_value(progress.snapshot()).unwrap();
+        assert_eq!(snapshot["bytes_read"], 65536);
+    }
+
+    #[test]
     fn test_diskmap_aggregation_extensions_and_pruning() {
         let base = std::env::temp_dir().join(format!("dismnext_diskmap_test_{}", std::process::id()));
         let _ = fs::remove_dir_all(&base);
@@ -1186,6 +1258,15 @@ mod tests {
         assert_eq!(report.extensions[0].size_bytes, 4096);
         assert_eq!(report.largest_files[0].name, "big.bin");
         assert!(report.extensions.iter().any(|e| e.ext == "(no ext)"));
+
+        let progress = ScanProgress::default();
+        let tracked = analyze_path_with_progress(&base, 2, &progress).unwrap();
+        let snapshot = serde_json::to_value(progress.snapshot()).unwrap();
+        assert_eq!(tracked.total_bytes, report.total_bytes);
+        assert_eq!(snapshot["processed_files"], 3);
+        assert_eq!(snapshot["phase"], "finishing");
+        progress.cancel();
+        assert!(analyze_path_with_progress(&base, 2, &progress).unwrap_err().is::<crate::scan_progress::ScanCancelled>());
 
         let _ = fs::remove_dir_all(&base);
     }
