@@ -12,6 +12,12 @@ import {
   MessageBar,
   MessageBarBody,
   Spinner,
+  Table,
+  TableBody,
+  TableCell,
+  TableHeader,
+  TableHeaderCell,
+  TableRow,
   Text,
   makeStyles,
   tokens,
@@ -24,7 +30,7 @@ import {
   ToolboxRegular,
   Warning16Regular,
 } from '@fluentui/react-icons';
-import { Lang, RestorePointInfo, api } from '../api';
+import { Lang, MountedWim, RestorePointInfo, WimInspection, api } from '../api';
 
 interface Props {
   lang: Lang;
@@ -142,7 +148,140 @@ const useStyles = makeStyles({
     gap: '12px',
     minHeight: '155px',
   },
+  imageForm: {
+    display: 'flex',
+    alignItems: 'center',
+    flexWrap: 'wrap',
+    gap: '8px',
+  },
+  imagePath: {
+    fontFamily: 'Consolas, monospace',
+    overflowWrap: 'anywhere',
+    color: tokens.colorNeutralForeground2,
+  },
+  mountEntry: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '4px',
+    padding: '6px 0',
+  },
 });
+
+const mountStateLabels: Record<MountedWim['state'], Record<Lang, string>> = {
+  mounted: { zh: '已挂载', en: 'Mounted' },
+  mounting: { zh: '正在挂载', en: 'Mounting' },
+  remountable: { zh: '可重新挂载', en: 'Remountable' },
+  invalid: { zh: '挂载无效', en: 'Invalid mount' },
+  unknown: { zh: '状态未知', en: 'Unknown status' },
+};
+
+const WimInspectionCard: React.FC<{ lang: Lang }> = ({ lang }) => {
+  const styles = useStyles();
+  const zh = lang === 'zh';
+  const [path, setPath] = useState('');
+  const [report, setReport] = useState<WimInspection | null>(null);
+  const [inspecting, setInspecting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const inspect = async (event: React.FormEvent) => {
+    event.preventDefault();
+    if (!path.trim() || inspecting) return;
+    setInspecting(true);
+    setReport(null);
+    setError(null);
+    try {
+      setReport(await api.inspectWim(path.trim()));
+    } catch (failure) {
+      setError(String(failure));
+    } finally {
+      setInspecting(false);
+    }
+  };
+
+  return (
+    <section className={styles.restoreCard} aria-label={zh ? '离线 WIM 镜像' : 'Offline WIM image'}>
+      <Text size={400} weight="semibold">{zh ? '离线 WIM 镜像' : 'Offline WIM Image'}</Text>
+      <form className={styles.imageForm} onSubmit={inspect}>
+        <Input
+          size="small"
+          aria-label={zh ? 'WIM 镜像路径' : 'WIM image path'}
+          placeholder={zh ? '输入或粘贴 .wim 文件路径' : 'Enter or paste a .wim file path'}
+          value={path}
+          onChange={(_, data) => setPath(data.value)}
+          style={{ flex: '1 1 280px' }}
+        />
+        <Button type="submit" size="small" appearance="primary" disabled={inspecting || !path.trim()}>
+          {inspecting
+            ? (zh ? '正在读取镜像…' : 'Reading image…')
+            : (zh ? '检查镜像（只读）' : 'Inspect Image (Read-only)')}
+        </Button>
+      </form>
+      {error && <MessageBar intent="error"><MessageBarBody>{error}</MessageBarBody></MessageBar>}
+      {report && (
+        <>
+          <Text className={styles.imagePath}>{report.path}</Text>
+          {report.images.length > 0 ? (
+            <div style={{ overflowX: 'auto' }}>
+              <Table size="small" aria-label={zh ? '镜像索引' : 'Image indices'}>
+                <TableHeader>
+                  <TableRow>
+                    <TableHeaderCell>{zh ? '索引' : 'Index'}</TableHeaderCell>
+                    <TableHeaderCell>{zh ? '镜像名称' : 'Image name'}</TableHeaderCell>
+                    <TableHeaderCell>{zh ? '版本' : 'Version'}</TableHeaderCell>
+                    <TableHeaderCell>{zh ? '版本类型' : 'Edition'}</TableHeaderCell>
+                    <TableHeaderCell>{zh ? '架构' : 'Architecture'}</TableHeaderCell>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {report.images.map((image) => (
+                    <TableRow key={image.index}>
+                      <TableCell>{image.index}</TableCell>
+                      <TableCell title={image.description ?? undefined}>
+                        {image.name ?? (zh ? '未命名镜像' : 'Unnamed image')}
+                      </TableCell>
+                      <TableCell>{image.version ?? '—'}</TableCell>
+                      <TableCell>{image.edition ?? '—'}</TableCell>
+                      <TableCell>{image.architecture ?? '—'}</TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            </div>
+          ) : (
+            <Text>{zh ? '此文件未包含镜像索引。' : 'This file contains no image indices.'}</Text>
+          )}
+          <Text weight="semibold">{zh ? '系统 WIM 挂载记录' : 'System WIM Mounts'}</Text>
+          {report.mounts.status === 'access_denied' ? (
+            <MessageBar intent="info">
+              <MessageBarBody>
+                {zh
+                  ? 'Windows 拒绝读取挂载记录。请以管理员身份运行后重新检查。'
+                  : 'Windows denied access to the mount list. Run as administrator and check again.'}
+              </MessageBarBody>
+            </MessageBar>
+          ) : report.mounts.status === 'unavailable' ? (
+            <MessageBar intent="warning"><MessageBarBody>{report.mounts.error}</MessageBarBody></MessageBar>
+          ) : report.mounts.entries.length === 0 ? (
+            <Text size={200}>{zh ? '系统没有报告 WIM 挂载记录。' : 'Windows reported no WIM mounts.'}</Text>
+          ) : (
+            report.mounts.entries.map((mount) => (
+              <div key={mount.mount_path} className={styles.mountEntry}>
+                <Text size={200}>
+                  {mountStateLabels[mount.state][lang]} · {zh ? '索引' : 'Index'} {mount.index}
+                  {' · '}{mount.read_write ? (zh ? '读写' : 'Read/write') : (zh ? '只读' : 'Read-only')}
+                </Text>
+                <Text size={200} className={styles.imagePath}>{mount.image_path}</Text>
+                <Text size={200} className={styles.imagePath}>
+                  {zh ? '挂载路径' : 'Mount path'} · {mount.mount_path}
+                </Text>
+              </div>
+            ))
+          )}
+        </>
+      )}
+    </section>
+  );
+};
 
 export const RescueView: React.FC<Props> = ({ lang, isAdmin }) => {
   const styles = useStyles();
@@ -231,6 +370,8 @@ export const RescueView: React.FC<Props> = ({ lang, isAdmin }) => {
           </MessageBarBody>
         </MessageBar>
       )}
+
+      <WimInspectionCard lang={lang} />
 
       <div className={styles.restoreCard}>
         <div

@@ -14,6 +14,7 @@ use dism_core::duplicate_recycle::{recycle_duplicates, DuplicateRecycleTarget};
 use dism_core::evaluator::eval_condition;
 use dism_core::features::{list_optional_features, set_feature_enabled};
 use dism_core::lockcheck::{find_locking_processes, terminate_locking_process};
+use dism_core::offline_wim::inspect_wim;
 use dism_core::optimizer::{
     apply_optimization, apply_optimization_batch, evaluate_all_groups, export_optimization_profile,
     get_optimization_presets, ApplyValue, OptimizationProfileEntry, ScopeName,
@@ -230,6 +231,11 @@ struct CreateRestorePointReq {
 #[derive(Deserialize)]
 struct RescueRunReq {
     action_id: String,
+}
+
+#[derive(Deserialize)]
+struct WimInspectReq {
+    path: String,
 }
 
 #[derive(Deserialize)]
@@ -918,6 +924,11 @@ fn dispatch_api(
             let _operation = state.begin_cleanup_mutation();
             let outcome = run_rescue_action(&payload.action_id)?;
             Ok(serde_json::to_value(outcome)?)
+        }
+        (&Method::Post, "/api/rescue/wim/inspect") => {
+            let payload: WimInspectReq = read_json_body(req)?;
+            let path = payload.path.trim().trim_matches('"');
+            Ok(serde_json::to_value(inspect_wim(Path::new(path))?)?)
         }
         (&Method::Post, "/api/diskmap/duplicates") => {
             let payload: DuplicatesReq = read_json_body(req)?;

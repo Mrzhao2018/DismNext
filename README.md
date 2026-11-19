@@ -46,7 +46,7 @@ cargo build --release --workspace --locked
 | 重复文件 | 按内容找出重复文件，选择保留最新副本。回收前重新核对文件，界面逐项显示移入回收站、跳过和失败的结果。 |
 | 系统优化 | 查看和应用 Windows 设置，记录相关注册表修改的快照，并从快照历史执行回滚。 |
 | 应用与系统管理 | 查看启动项来源和目标签名，管理启动项、服务、计划任务、AppX/MSIX 和 Windows 可选功能。支持 Win32 应用卸载与残留扫描，以及第三方驱动枚举和备份。 |
-| 系统急救与报告 | 查看或创建系统还原点，运行 DISM 和 SFC 检查或修复，并将健康报告导出为 Markdown 或 HTML。 |
+| 系统急救与报告 | 查看或创建系统还原点，运行 DISM 和 SFC 检查或修复，只读查看离线 WIM 的镜像索引与系统挂载记录，并将健康报告导出为 Markdown 或 HTML。 |
 
 第一次清理时，可以按 **扫描 → 预览 → Dry Run → 确认执行** 的顺序操作。部分系统级清理、驱动和注册表操作需要管理员权限。普通清理规则可能直接删除文件，注册表快照用于恢复其记录的注册表修改。
 
@@ -69,6 +69,8 @@ $cli = '.\target\release\dism-cli.exe'
 `clean-042` 是内置的「临时文件」规则。`clean` 默认执行 Dry Run，确认目标后，用 `clean clean-042 --execute` 执行实际清理。用 `--help` 查看所有命令，或用 `drivers --help`、`snapshot --help` 查看子命令。`info`、`scan` 和 `preview` 等命令支持 `--json`。
 
 `diskmap --allocated` 会额外读取 NTFS 文件数据的分配空间，并报告无法测量的文件。目录树、文件类型和大文件排名按逻辑大小计算。
+
+用 `wim "D:\sources\install.wim" --json` 查看离线镜像的索引、版本和架构。Windows 允许时，报告也会列出系统 WIM 挂载记录。
 
 ## MCP 接入
 

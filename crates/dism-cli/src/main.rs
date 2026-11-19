@@ -5,6 +5,7 @@ use dism_core::cleaner::{execute_cleanup, scan_all, scan_all_with_summary, scan_
 use dism_core::diskmap::{analyze_path_with_options, DiskAllocation};
 use dism_core::drivers::{delete_driver, export_drivers, list_drivers};
 use dism_core::evaluator::eval_condition;
+use dism_core::offline_wim::{inspect_wim, WimMounts};
 use dism_core::features::{list_optional_features, set_feature_enabled, FeatureCategory};
 use dism_core::mcp::run_mcp_stdio;
 use dism_core::optimizer::{apply_optimization, evaluate_all_groups, ApplyValue, ScopeName, ScopeStatus};
@@ -67,6 +68,12 @@ enum Commands {
         /// Also measure allocated file data on NTFS, counting hard links once
         #[arg(long)]
         allocated: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Inspect a WIM file and the current Windows WIM mounts
+    Wim {
+        path: PathBuf,
         #[arg(long)]
         json: bool,
     },
@@ -520,6 +527,45 @@ fn main() -> Result<()> {
                         .map(|bytes| format!(" (allocated {})", fmt_bytes(bytes)))
                         .unwrap_or_default();
                     println!("  {:>10}  {}{}", fmt_bytes(lf.size_bytes), lf.path, allocation);
+                }
+            }
+        }
+        Commands::Wim { path, json } => {
+            let report = inspect_wim(&path)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                println!("{} ({} image indices)", report.path, report.images.len());
+                for image in &report.images {
+                    let name = image.name.as_deref().unwrap_or("Unnamed image");
+                    let edition = image.edition.as_deref().unwrap_or("-");
+                    let architecture = image.architecture.as_deref().unwrap_or("-");
+                    let version = image.version.as_deref().unwrap_or("-");
+                    println!("  #{} {name} | {edition} | {architecture} | {version}", image.index);
+                    if let Some(description) = &image.description {
+                        println!("    {description}");
+                    }
+                }
+                match report.mounts {
+                    WimMounts::Available { entries } if entries.is_empty() => {
+                        println!("No WIM mounts reported by Windows.");
+                    }
+                    WimMounts::Available { entries } => {
+                        println!("Windows WIM mounts");
+                        for mount in entries {
+                            let access = if mount.read_write { "read/write" } else { "read-only" };
+                            println!(
+                                "  {} #{} -> {} | {:?} | {access}",
+                                mount.image_path, mount.index, mount.mount_path, mount.state
+                            );
+                        }
+                    }
+                    WimMounts::AccessDenied => {
+                        println!("Windows denied access to the mount list. Run as administrator to check it.");
+                    }
+                    WimMounts::Unavailable { error } => {
+                        println!("Could not query the Windows WIM mounts\n  {error}");
+                    }
                 }
             }
         }

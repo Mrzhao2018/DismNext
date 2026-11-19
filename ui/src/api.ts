@@ -312,6 +312,29 @@ export interface StartupInspection {
   };
 }
 
+export interface WimInspection {
+  path: string;
+  images: {
+    index: number;
+    name: string | null;
+    description: string | null;
+    edition: string | null;
+    architecture: string | null;
+    version: string | null;
+  }[];
+  mounts: { status: 'available'; entries: MountedWim[] }
+    | { status: 'access_denied' }
+    | { status: 'unavailable'; error: string };
+}
+
+export interface MountedWim {
+  image_path: string;
+  mount_path: string;
+  index: number;
+  state: 'mounted' | 'mounting' | 'remountable' | 'invalid' | 'unknown';
+  read_write: boolean;
+}
+
 export type AppxCategory = 'bloatware' | 'user_app' | 'framework' | 'system_core';
 
 export interface AppxPackageInfo {
@@ -744,6 +767,11 @@ export const api = {
     reqJson<RescueActionOutcome>('/api/rescue/run', {
       method: 'POST',
       body: JSON.stringify({ action_id }),
+    }),
+  inspectWim: (path: string) =>
+    reqJson<WimInspection>('/api/rescue/wim/inspect', {
+      method: 'POST',
+      body: JSON.stringify({ path }),
     }),
   getOrphanDirs: () => reqJson<{ orphans: OrphanDirEntry[] }>('/api/diskmap/orphans'),
   getWin32Apps: () => reqJson<{ apps: Win32AppInfo[] }>('/api/uninstaller/list'),

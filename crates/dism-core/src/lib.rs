@@ -9,6 +9,7 @@ pub mod evaluator;
 pub mod features;
 pub mod lockcheck;
 pub mod mcp;
+pub mod offline_wim;
 pub mod optimizer;
 pub mod report;
 pub mod rescue;
