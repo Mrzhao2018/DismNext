@@ -185,6 +185,27 @@ const useStyles = makeStyles({
     backgroundColor: tokens.colorNeutralBackground1,
     border: `1px solid ${tokens.colorNeutralStroke2}`,
   },
+  reviewList: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '8px',
+    maxHeight: '52vh',
+    overflowY: 'auto',
+    marginTop: '10px',
+    paddingRight: '4px',
+  },
+  reviewMetrics: {
+    display: 'flex',
+    flexWrap: 'wrap',
+    columnGap: '12px',
+    rowGap: '4px',
+  },
+  reviewErrors: {
+    margin: 0,
+    paddingLeft: '20px',
+    overflowWrap: 'anywhere',
+    color: tokens.colorPaletteRedForeground1,
+  },
   footer: {
     display: 'flex',
     alignItems: 'center',
@@ -195,6 +216,91 @@ const useStyles = makeStyles({
     border: `1px solid ${tokens.colorNeutralStroke2}`,
   },
 });
+
+const CleanupDetails: React.FC<{
+  lang: Lang;
+  report: CleanupExecutionReport;
+  confirming?: boolean;
+}> = ({ lang, report, confirming = false }) => {
+  const styles = useStyles();
+  const zh = lang === 'zh';
+  const labels = report.dry_run
+    ? {
+        permanent_delete: zh ? '将永久删除' : 'Permanently delete',
+        recycle: zh ? '将移入回收站' : 'Move to Recycle Bin',
+        remove_driver: zh ? '将卸载驱动包' : 'Remove driver packages',
+      }
+    : {
+        permanent_delete: zh ? '已永久删除' : 'Permanently deleted',
+        recycle: zh ? '已移入回收站' : 'Moved to Recycle Bin',
+        remove_driver: zh ? '已卸载驱动包' : 'Driver packages removed',
+      };
+  const actionKinds = ['permanent_delete', 'recycle', 'remove_driver'] as const;
+
+  return (
+    <div className={styles.reviewList}>
+      {report.outcomes.map((outcome) => (
+        <div key={outcome.id} className={styles.fileRow}>
+          <div className={styles.rowTitleLine}>
+            <Text weight="semibold">{pickText(outcome.name, lang)}</Text>
+            {confirming && outcome.level !== null && outcome.level <= 1 && (
+              <Badge size="small" appearance="tint" color={outcome.level === 0 ? 'danger' : 'warning'}>
+                {outcome.level === 0
+                  ? (zh ? '高风险' : 'High risk')
+                  : (zh ? '谨慎' : 'Caution')}
+              </Badge>
+            )}
+          </div>
+          {confirming && outcome.description && (
+            <Text size={200}>{pickText(outcome.description, lang)}</Text>
+          )}
+          {confirming && outcome.warning && (
+            <Text size={200} style={{ color: tokens.colorPaletteDarkOrangeForeground1 }}>
+              {pickText(outcome.warning, lang)}
+            </Text>
+          )}
+          <div className={styles.reviewMetrics}>
+            {actionKinds.map((kind) => {
+              const totals = outcome.actions[kind];
+              return totals.count > 0 && (
+                <Text key={kind} size={200}>
+                  {labels[kind]} {totals.count} · {formatBytes(totals.bytes)}
+                </Text>
+              );
+            })}
+            {outcome.skipped_locked_files > 0 && (
+              <Text size={200}>{zh ? '跳过（占用）' : 'Skipped (locked)'} {outcome.skipped_locked_files}</Text>
+            )}
+            {outcome.skipped_protected_files > 0 && (
+              <Text size={200}>{zh ? '跳过（受保护）' : 'Skipped (protected)'} {outcome.skipped_protected_files}</Text>
+            )}
+            {outcome.failed_files > 0 && (
+              <Text size={200} weight="semibold">
+                {zh ? '失败' : 'Failed'} {outcome.failed_files}
+              </Text>
+            )}
+            {outcome.deleted_files === 0 && outcome.skipped_locked_files === 0
+              && outcome.skipped_protected_files === 0 && outcome.failed_files === 0 && (
+              <Text size={200}>{zh ? '无待处理目标' : 'No targets assigned to this rule'}</Text>
+            )}
+          </div>
+          {outcome.errors.length > 0 && (
+            <ul className={styles.reviewErrors}>
+              {outcome.errors.map((error, index) => <li key={index}><Text size={200}>{error}</Text></li>)}
+              {outcome.failed_files > outcome.errors.length && (
+                <li><Text size={200}>
+                  {zh
+                    ? `还有 ${outcome.failed_files - outcome.errors.length} 项失败未展开`
+                    : `${outcome.failed_files - outcome.errors.length} more failures`}
+                </Text></li>
+              )}
+            </ul>
+          )}
+        </div>
+      ))}
+    </div>
+  );
+};
 
 export const SpaceRecycleView: React.FC<Props> = ({
   lang,
@@ -232,13 +338,14 @@ export const SpaceRecycleView: React.FC<Props> = ({
   );
   const [previewItem, setPreviewItem] = useState<CleanupScanResult | null>(null);
   const [previewLoading, setPreviewLoading] = useState(false);
-  const [executing, setExecuting] = useState(false);
+  const [cleanupPhase, setCleanupPhase] = useState<'preview' | 'simulate' | 'execute' | null>(null);
   const [taskRunning, setTaskRunning] = useState<string | null>(null);
   const [pendingSysTask, setPendingSysTask] = useState<string | null>(null);
   const [taskNotice, setTaskNotice] = useState<string | null>(null);
   const [lockBusyKey, setLockBusyKey] = useState<string | null>(null);
-  const [confirmOpen, setConfirmOpen] = useState(false);
+  const [confirmation, setConfirmation] = useState<CleanupExecutionReport | null>(null);
   const [lastReport, setLastReport] = useState<CleanupExecutionReport | null>(null);
+  const [reportOpen, setReportOpen] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
   const groups = useMemo(() => {
@@ -289,10 +396,7 @@ export const SpaceRecycleView: React.FC<Props> = ({
   const totalScanLabel = summary ? formatBytes(summary.cleanable_bytes) : pendingScan;
   const selectedLabel = selectedBytes === null ? pendingScan : formatBytes(selectedBytes);
 
-  const hasRiskySelection = useMemo(
-    () => selectedEntries.some((e) => e.rule.level === 0 || Boolean(e.rule.warning)),
-    [selectedEntries]
-  );
+  const failedCount = lastReport?.outcomes.reduce((count, row) => count + row.failed_files, 0) ?? 0;
 
   const toggleSelect = (id: string) => {
     setSelectedIds((prev) => {
@@ -332,23 +436,33 @@ export const SpaceRecycleView: React.FC<Props> = ({
     }
   };
 
-  const runCleanup = async (dryRun: boolean) => {
-    const ids = selectedEntries.map((e) => e.rule.id);
-    if (scanning || ids.length === 0) return;
-    setExecuting(true);
+  const runCleanup = async (action: 'preview' | 'simulate' | 'execute') => {
+    const ids = action === 'execute'
+      ? (confirmation?.outcomes.map(({ id }) => id) ?? [])
+      : selectedEntries.map(({ rule }) => rule.id);
+    if (scanning || cleanupPhase || ids.length === 0) return;
+    const dryRun = action !== 'execute';
+    setCleanupPhase(action);
     setErrorMsg(null);
     setTaskNotice(null);
     try {
       const { report, system } = await api.executeCleanup(ids, dryRun);
-      setLastReport(report);
-      if (!dryRun) {
-        onExecuted(system);
+      if (action === 'preview') {
+        if (report.outcomes.length === 0) {
+          setErrorMsg(lang === 'zh' ? '所选规则已不可用，请刷新后重试。' : 'The selected rules are unavailable. Refresh and try again.');
+        } else {
+          setConfirmation(report);
+        }
+      } else {
+        setLastReport(report);
+        setReportOpen(true);
+        if (!dryRun) onExecuted(system);
       }
     } catch (e) {
       setErrorMsg(String(e));
     } finally {
-      setExecuting(false);
-      setConfirmOpen(false);
+      setCleanupPhase(null);
+      if (action === 'execute') setConfirmation(null);
     }
   };
 
@@ -512,20 +626,19 @@ export const SpaceRecycleView: React.FC<Props> = ({
         </MessageBar>
       )}
       {lastReport && (
-        <MessageBar intent={lastReport.dry_run ? 'info' : 'success'}>
+        <MessageBar intent={failedCount > 0 ? 'warning' : lastReport.dry_run ? 'info' : 'success'}>
           <MessageBarBody>
             <MessageBarTitle>
               {lastReport.dry_run
-                ? lang === 'zh'
-                  ? 'Dry-Run 模拟完成：'
-                  : 'Dry-Run Simulation:'
-                : lang === 'zh'
-                ? '清理完成：'
-                : 'Cleanup Complete:'}
+                ? (lang === 'zh' ? '模拟结果' : 'Simulation results')
+                : (lang === 'zh' ? '清理结果' : 'Cleanup results')}
             </MessageBarTitle>
             {lang === 'zh'
-              ? `${lastReport.dry_run ? '预计可释放' : '实际释放'} ${formatBytes(lastReport.total_deleted_bytes)}（${lastReport.total_deleted_files} 个文件），自动跳过 ${lastReport.total_skipped_files} 个占用/受保护文件。`
-              : `${lastReport.dry_run ? 'Estimated' : 'Freed'} ${formatBytes(lastReport.total_deleted_bytes)} (${lastReport.total_deleted_files} files), safely skipped ${lastReport.total_skipped_files} locked/protected files.`}
+              ? `${lastReport.dry_run ? '预计处理' : '已处理'} ${lastReport.total_deleted_files} 项 · 跳过 ${lastReport.total_skipped_files} 项 · 失败 ${failedCount} 项`
+              : `${lastReport.total_deleted_files} ${lastReport.dry_run ? 'planned' : 'processed'} · ${lastReport.total_skipped_files} skipped · ${failedCount} failed`}
+            <Button size="small" appearance="subtle" onClick={() => setReportOpen(true)}>
+              {lang === 'zh' ? '查看明细' : 'View Details'}
+            </Button>
           </MessageBarBody>
         </MessageBar>
       )}
@@ -535,7 +648,7 @@ export const SpaceRecycleView: React.FC<Props> = ({
           <Button
             appearance="primary"
             icon={scanning ? <Spinner size="tiny" /> : <Broom24Regular />}
-            disabled={scanning}
+            disabled={scanning || cleanupPhase !== null}
             onClick={() => onScan()}
           >
             {scanning
@@ -962,8 +1075,8 @@ export const SpaceRecycleView: React.FC<Props> = ({
         <div style={{ display: 'flex', gap: '16px', alignItems: 'center' }}>
           <Text size={300}>
             {lang === 'zh'
-              ? `本次扫描总可释放：${totalScanLabel}`
-              : `Total Reclaimable: ${totalScanLabel}`}
+              ? `可处理目标大小 · ${totalScanLabel}`
+              : `Target size · ${totalScanLabel}`}
           </Text>
           <Text size={300} weight="bold" style={{ color: tokens.colorBrandForeground1 }}>
             {lang === 'zh'
@@ -973,50 +1086,78 @@ export const SpaceRecycleView: React.FC<Props> = ({
         </div>
         <div style={{ display: 'flex', gap: '8px' }}>
           <Button
-            disabled={scanning || executing || selectedEntries.length === 0}
-            onClick={() => runCleanup(true)}
+            disabled={scanning || cleanupPhase !== null || selectedEntries.length === 0}
+            onClick={() => void runCleanup('simulate')}
           >
-            {lang === 'zh' ? '模拟清理 (Dry-Run)' : 'Simulate (Dry-Run)'}
+            {cleanupPhase === 'simulate'
+              ? (lang === 'zh' ? '正在模拟…' : 'Simulating…')
+              : (lang === 'zh' ? '模拟清理 (Dry Run)' : 'Simulate (Dry Run)')}
           </Button>
           <Button
             appearance="primary"
             icon={<Delete24Regular />}
-            disabled={scanning || executing || selectedEntries.length === 0}
-            onClick={() => {
-              if (hasRiskySelection) setConfirmOpen(true);
-              else runCleanup(false);
-            }}
+            disabled={scanning || cleanupPhase !== null || selectedEntries.length === 0}
+            onClick={() => void runCleanup('preview')}
           >
-            {executing
-              ? lang === 'zh'
-                ? '清理中...'
-                : 'Cleaning...'
-              : lang === 'zh'
-              ? '安全清理选中项'
-              : 'Clean Selected'}
+            {cleanupPhase === 'preview'
+              ? (lang === 'zh' ? '正在准备预览…' : 'Preparing review…')
+              : (lang === 'zh' ? '核对并清理选中项' : 'Review and Clean Selected')}
           </Button>
         </div>
       </div>
 
-      <Dialog open={confirmOpen} onOpenChange={(_, d) => setConfirmOpen(d.open)}>
-        <DialogSurface>
+      <Dialog
+        open={confirmation !== null}
+        onOpenChange={(_, d) => {
+          if (!d.open && !cleanupPhase) setConfirmation(null);
+        }}
+      >
+        <DialogSurface style={{ maxWidth: 720 }}>
           <DialogBody>
             <DialogTitle>
-              {lang === 'zh' ? '确认清理高风险或带警告项？' : 'Confirm Cleanup Warning'}
+              {lang === 'zh' ? '核对本次清理' : 'Review Cleanup'}
             </DialogTitle>
             <DialogContent>
               <Text>
                 {lang === 'zh'
-                  ? '您选中的规则包含 Level 0 专家项或带有官方注意提示的清理项，清理后部分功能或缓存将需要重新生成/下载。确定继续吗？'
-                  : 'Your selection includes Level 0 or warning-tagged rules. Continue cleaning?'}
+                  ? '同一目标只计入一条规则。执行时会重新检查目标，实际结果可能与预估不同。规则允许时也会移除清理后为空的目录。'
+                  : 'Each target is counted under one rule. Targets are checked again during cleanup, so actual results may vary. Rules may also remove directories that are empty after cleanup.'}
               </Text>
+              {confirmation && <CleanupDetails lang={lang} report={confirmation} confirming />}
             </DialogContent>
             <DialogActions>
-              <Button appearance="secondary" onClick={() => setConfirmOpen(false)}>
+              <Button appearance="secondary" disabled={cleanupPhase !== null} onClick={() => setConfirmation(null)}>
                 {lang === 'zh' ? '取消' : 'Cancel'}
               </Button>
-              <Button appearance="primary" onClick={() => runCleanup(false)}>
-                {lang === 'zh' ? '确认执行清理' : 'Confirm Clean'}
+              <Button
+                appearance="primary"
+                disabled={scanning || cleanupPhase !== null}
+                icon={cleanupPhase === 'execute' ? <Spinner size="tiny" /> : undefined}
+                onClick={() => void runCleanup('execute')}
+              >
+                {cleanupPhase === 'execute'
+                  ? (lang === 'zh' ? '正在清理…' : 'Cleaning…')
+                  : (lang === 'zh' ? '确认执行清理' : 'Confirm Cleanup')}
+              </Button>
+            </DialogActions>
+          </DialogBody>
+        </DialogSurface>
+      </Dialog>
+
+      <Dialog open={reportOpen} onOpenChange={(_, d) => setReportOpen(d.open)}>
+        <DialogSurface style={{ maxWidth: 720 }}>
+          <DialogBody>
+            <DialogTitle>
+              {lastReport?.dry_run
+                ? (lang === 'zh' ? '模拟清理明细' : 'Simulation Details')
+                : (lang === 'zh' ? '清理结果明细' : 'Cleanup Details')}
+            </DialogTitle>
+            <DialogContent>
+              {lastReport && <CleanupDetails lang={lang} report={lastReport} />}
+            </DialogContent>
+            <DialogActions>
+              <Button appearance="secondary" onClick={() => setReportOpen(false)}>
+                {lang === 'zh' ? '关闭' : 'Close'}
               </Button>
             </DialogActions>
           </DialogBody>

@@ -224,7 +224,7 @@ fn recycle_duplicates_with(
         .collect()
 }
 
-fn move_to_recycle_bin(path: &Path) -> Result<()> {
+pub(crate) fn move_to_recycle_bin(path: &Path) -> Result<()> {
     struct Apartment;
     impl Drop for Apartment {
         fn drop(&mut self) {
@@ -233,6 +233,9 @@ fn move_to_recycle_bin(path: &Path) -> Result<()> {
     }
 
     let path = std::path::absolute(path)?;
+    if is_protected_recycle_target(&path) {
+        return Err(anyhow!("Refusing to recycle protected path '{}'", path.display()));
+    }
     let wide: Vec<_> = path.as_os_str().encode_wide().chain(Some(0)).collect();
     unsafe {
         CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok()?;

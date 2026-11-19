@@ -97,12 +97,25 @@ export interface CleanupScanPayload {
   summary: CleanupScanSummary;
 }
 
+export interface CleanupTargetTotals {
+  bytes: number;
+  count: number;
+}
+
 export interface RuleCleanOutcome {
   id: string;
   name: LocalizedText;
+  description: LocalizedText | null;
+  warning: LocalizedText | null;
+  level: number | null;
   dry_run: boolean;
   deleted_bytes: number;
   deleted_files: number;
+  actions: {
+    permanent_delete: CleanupTargetTotals;
+    recycle: CleanupTargetTotals;
+    remove_driver: CleanupTargetTotals;
+  };
   skipped_locked_files: number;
   skipped_protected_files: number;
   failed_files: number;

@@ -319,7 +319,7 @@ fn main() -> Result<()> {
                 println!("{}", serde_json::to_string_pretty(&report)?);
             } else {
                 println!(
-                    "{} complete: {} files, {} freed, {} skipped",
+                    "{} complete: {} targets ({} total size), {} skipped",
                     if dry_run { "Dry-Run" } else { "Cleanup" },
                     report.total_deleted_files,
                     fmt_bytes(report.total_deleted_bytes),
@@ -327,15 +327,22 @@ fn main() -> Result<()> {
                 );
                 for o in &report.outcomes {
                     println!(
-                        "  {} ({}) -> {} ({} files, {} locked, {} protected, {} failed)",
+                        "  {} ({}): permanent deletion {} ({}), Recycle Bin {} ({}), driver removal {} ({}), {} locked, {} protected, {} failed",
                         o.id,
                         o.name.zh,
-                        fmt_bytes(o.deleted_bytes),
-                        o.deleted_files,
+                        o.actions.permanent_delete.count,
+                        fmt_bytes(o.actions.permanent_delete.bytes),
+                        o.actions.recycle.count,
+                        fmt_bytes(o.actions.recycle.bytes),
+                        o.actions.remove_driver.count,
+                        fmt_bytes(o.actions.remove_driver.bytes),
                         o.skipped_locked_files,
                         o.skipped_protected_files,
                         o.failed_files
                     );
+                    for error in &o.errors {
+                        println!("    {error}");
+                    }
                 }
             }
         }

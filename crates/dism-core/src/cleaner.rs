@@ -69,13 +69,29 @@ pub struct CleanupScanResult {
 pub struct RuleCleanOutcome {
     pub id: String,
     pub name: LocalizedText,
+    #[serde(default)]
+    pub description: Option<LocalizedText>,
+    #[serde(default)]
+    pub warning: Option<LocalizedText>,
+    #[serde(default)]
+    pub level: Option<u8>,
     pub dry_run: bool,
+    // Keep the aggregate fields for existing CLI, HTTP and MCP clients.
     pub deleted_bytes: u64,
     pub deleted_files: usize,
+    #[serde(default)]
+    pub actions: CleanupActionTotals,
     pub skipped_locked_files: usize,
     pub skipped_protected_files: usize,
     pub failed_files: usize,
     pub errors: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CleanupActionTotals {
+    pub permanent_delete: CleanupTargetTotals,
+    pub recycle: CleanupTargetTotals,
+    pub remove_driver: CleanupTargetTotals,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -237,10 +253,10 @@ struct CollectedTargets<'a> {
     system_task_hint: Option<LocalizedText>,
 }
 
-#[derive(Default)]
-struct FileTotals {
-    bytes: u64,
-    count: usize,
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CleanupTargetTotals {
+    pub bytes: u64,
+    pub count: usize,
 }
 
 #[derive(Default)]
@@ -249,9 +265,9 @@ struct CollectedFiles<'a> {
     index: Option<(&'a ScanIndex<'a>, usize)>,
     targets: Vec<(TargetKey, PreviewFile)>,
     items: Vec<PreviewFile>,
-    ready: FileTotals,
-    locked: FileTotals,
-    protected: FileTotals,
+    ready: CleanupTargetTotals,
+    locked: CleanupTargetTotals,
+    protected: CleanupTargetTotals,
 }
 
 impl CollectedFiles<'_> {
@@ -498,6 +514,13 @@ pub fn execute_cleanup(
         let outcome = &mut outcomes[target.owner];
         match target.apply(dry_run) {
             Ok((FileStatus::Ready, bytes)) => {
+                let totals = match target.action {
+                    CleanupAction::Delete => &mut outcome.actions.permanent_delete,
+                    CleanupAction::Recycle => &mut outcome.actions.recycle,
+                    CleanupAction::RemoveDriver(_) => &mut outcome.actions.remove_driver,
+                };
+                totals.count += 1;
+                totals.bytes += bytes;
                 outcome.deleted_files += 1;
                 outcome.deleted_bytes += bytes;
             }
@@ -569,7 +592,7 @@ impl PlannedTarget {
             return Ok((status, 0));
         }
         if matches!(self.action, CleanupAction::Recycle) {
-            crate::diskmap::recycle_path(path)?;
+            crate::duplicate_recycle::move_to_recycle_bin(path)?;
         } else {
             remove_file_safe(path, meta.permissions())?;
         }
@@ -600,9 +623,19 @@ fn plan_cleanup(
             name: active_scan
                 .and_then(|scan| scan.name_override.clone())
                 .unwrap_or_else(|| rule.name.clone()),
+            description: Some(
+                active_scan
+                    .and_then(|scan| scan.description_override.clone())
+                    .unwrap_or_else(|| rule.description.clone()),
+            ),
+            warning: active_scan
+                .and_then(|scan| scan.warning_override.clone())
+                .or_else(|| rule.warning.clone()),
+            level: Some(rule.level),
             dry_run,
             deleted_bytes: 0,
             deleted_files: 0,
+            actions: CleanupActionTotals::default(),
             skipped_locked_files: 0,
             skipped_protected_files: 0,
             failed_files: 0,
@@ -1488,12 +1521,18 @@ mod tests {
         let dry = execute_cleanup(&rules, &selected, &sys, true);
         assert_eq!(dry.total_deleted_bytes, 4);
         assert_eq!(dry.total_deleted_files, 2);
+        assert_eq!(dry.outcomes[0].actions.permanent_delete.count, 2);
+        assert_eq!(dry.outcomes[0].actions.permanent_delete.bytes, 4);
+        assert_eq!(dry.outcomes[1].actions.permanent_delete.count, 0);
         assert!(shared.exists() && only_b.exists());
 
         let real = execute_cleanup(&rules, &selected, &sys, false);
         assert_eq!(real.total_deleted_bytes, dry.total_deleted_bytes);
         assert_eq!(real.total_deleted_files, dry.total_deleted_files);
         assert_eq!(real.outcomes[1].deleted_files, 0);
+        assert_eq!(real.outcomes[0].actions.permanent_delete.count, 2);
+        assert_eq!(real.outcomes[0].actions.recycle.count, 0);
+        assert_eq!(real.outcomes[0].actions.remove_driver.count, 0);
         assert!(real
             .outcomes
             .iter()
