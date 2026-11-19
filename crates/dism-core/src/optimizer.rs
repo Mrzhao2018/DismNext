@@ -496,7 +496,7 @@ pub fn execute_action(action: &Action) -> Result<()> {
             cmd.as_deref(),
         ),
         Action::FileCreateByZIP { path, .. } => exec_create_blank_ico(path),
-        Action::General { .. } | Action::Custom { .. } => Ok(()),
+        Action::General { .. } | Action::VersionedDirectory { .. } | Action::Custom { .. } => Ok(()),
     }
 }
 

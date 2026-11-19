@@ -32,7 +32,9 @@ import {
   Warning16Regular,
 } from '@fluentui/react-icons';
 import {
+  ApiError,
   CleanupExecutionReport,
+  CleanupReview,
   CleanupRuleEntry,
   CleanupScanResult,
   CleanupScanSummary,
@@ -274,13 +276,27 @@ const CleanupDetails: React.FC<{
             {outcome.skipped_protected_files > 0 && (
               <Text size={200}>{zh ? '跳过（受保护）' : 'Skipped (protected)'} {outcome.skipped_protected_files}</Text>
             )}
+            {!!outcome.review?.directories && (
+              <Text size={200}>
+                {report.dry_run
+                  ? (zh ? '待检查是否为空的目录' : 'Directories to check for emptiness')
+                  : (zh ? '已移除空目录' : 'Empty directories removed')} {outcome.review.directories}
+              </Text>
+            )}
+            {!!outcome.review?.skipped_changed && (
+              <Text size={200}>{zh ? '跳过（已变更）' : 'Skipped (changed)'} {outcome.review.skipped_changed}</Text>
+            )}
+            {!!outcome.review?.skipped_missing && (
+              <Text size={200}>{zh ? '跳过（已不在原路径）' : 'Skipped (missing)'} {outcome.review.skipped_missing}</Text>
+            )}
             {outcome.failed_files > 0 && (
               <Text size={200} weight="semibold">
                 {zh ? '失败' : 'Failed'} {outcome.failed_files}
               </Text>
             )}
             {outcome.deleted_files === 0 && outcome.skipped_locked_files === 0
-              && outcome.skipped_protected_files === 0 && outcome.failed_files === 0 && (
+              && outcome.skipped_protected_files === 0 && outcome.failed_files === 0
+              && !outcome.review?.directories && !outcome.review?.skipped_changed && !outcome.review?.skipped_missing && (
               <Text size={200}>{zh ? '无待处理目标' : 'No targets assigned to this rule'}</Text>
             )}
           </div>
@@ -343,7 +359,7 @@ export const SpaceRecycleView: React.FC<Props> = ({
   const [pendingSysTask, setPendingSysTask] = useState<string | null>(null);
   const [taskNotice, setTaskNotice] = useState<string | null>(null);
   const [lockBusyKey, setLockBusyKey] = useState<string | null>(null);
-  const [confirmation, setConfirmation] = useState<CleanupExecutionReport | null>(null);
+  const [confirmation, setConfirmation] = useState<CleanupReview | null>(null);
   const [lastReport, setLastReport] = useState<CleanupExecutionReport | null>(null);
   const [reportOpen, setReportOpen] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
@@ -437,33 +453,44 @@ export const SpaceRecycleView: React.FC<Props> = ({
   };
 
   const runCleanup = async (action: 'preview' | 'simulate' | 'execute') => {
-    const ids = action === 'execute'
-      ? (confirmation?.outcomes.map(({ id }) => id) ?? [])
-      : selectedEntries.map(({ rule }) => rule.id);
-    if (scanning || cleanupPhase || ids.length === 0) return;
-    const dryRun = action !== 'execute';
+    const ids = selectedEntries.map(({ rule }) => rule.id);
+    const planId = confirmation?.plan_id;
+    if (scanning || cleanupPhase || (action === 'execute' ? !planId : ids.length === 0)) return;
     setCleanupPhase(action);
     setErrorMsg(null);
     setTaskNotice(null);
     try {
-      const { report, system } = await api.executeCleanup(ids, dryRun);
       if (action === 'preview') {
-        if (report.outcomes.length === 0) {
+        const review = await api.reviewCleanup(ids);
+        if (!review.plan_id) {
           setErrorMsg(lang === 'zh' ? '所选规则已不可用，请刷新后重试。' : 'The selected rules are unavailable. Refresh and try again.');
         } else {
-          setConfirmation(report);
+          setConfirmation(review);
         }
-      } else {
+      } else if (action === 'execute' && planId) {
+        const { report, system } = await api.confirmCleanup(planId);
         setLastReport(report);
         setReportOpen(true);
-        if (!dryRun) onExecuted(system);
+        onExecuted(system);
+      } else {
+        const { report } = await api.simulateCleanup(ids);
+        setLastReport(report);
+        setReportOpen(true);
       }
     } catch (e) {
-      setErrorMsg(String(e));
+      setErrorMsg(action === 'execute' && e instanceof ApiError && e.status === 409
+        ? (lang === 'zh' ? '这份清理计划已失效，请重新核对后再执行。' : 'This cleanup plan is no longer available. Review the selected rules again.')
+        : String(e));
     } finally {
       setCleanupPhase(null);
       if (action === 'execute') setConfirmation(null);
     }
+  };
+
+  const dismissConfirmation = () => {
+    const planId = confirmation?.plan_id;
+    setConfirmation(null);
+    if (planId) void api.discardCleanupReview(planId).catch((e) => setErrorMsg(String(e)));
   };
 
   const handleRunSystemTask = async (taskId: string) => {
@@ -626,7 +653,7 @@ export const SpaceRecycleView: React.FC<Props> = ({
         </MessageBar>
       )}
       {lastReport && (
-        <MessageBar intent={failedCount > 0 ? 'warning' : lastReport.dry_run ? 'info' : 'success'}>
+        <MessageBar intent={failedCount > 0 || (!lastReport.dry_run && lastReport.total_skipped_files > 0) ? 'warning' : lastReport.dry_run ? 'info' : 'success'}>
           <MessageBarBody>
             <MessageBarTitle>
               {lastReport.dry_run
@@ -1109,7 +1136,7 @@ export const SpaceRecycleView: React.FC<Props> = ({
       <Dialog
         open={confirmation !== null}
         onOpenChange={(_, d) => {
-          if (!d.open && !cleanupPhase) setConfirmation(null);
+          if (!d.open && !cleanupPhase) dismissConfirmation();
         }}
       >
         <DialogSurface style={{ maxWidth: 720 }}>
@@ -1120,13 +1147,13 @@ export const SpaceRecycleView: React.FC<Props> = ({
             <DialogContent>
               <Text>
                 {lang === 'zh'
-                  ? '同一目标只计入一条规则。执行时会重新检查目标，实际结果可能与预估不同。规则允许时也会移除清理后为空的目录。'
-                  : 'Each target is counted under one rule. Targets are checked again during cleanup, so actual results may vary. Rules may also remove directories that are empty after cleanup.'}
+                  ? '仅处理本次核对时记录的目标。执行前会复核目标，已变更、移走或被占用的项目会跳过。计划有效期为 5 分钟。'
+                  : 'Only targets recorded for this review are eligible. Changed, missing, or locked targets are skipped. This plan expires after 5 minutes.'}
               </Text>
-              {confirmation && <CleanupDetails lang={lang} report={confirmation} confirming />}
+              {confirmation && <CleanupDetails lang={lang} report={confirmation.report} confirming />}
             </DialogContent>
             <DialogActions>
-              <Button appearance="secondary" disabled={cleanupPhase !== null} onClick={() => setConfirmation(null)}>
+              <Button appearance="secondary" disabled={cleanupPhase !== null} onClick={dismissConfirmation}>
                 {lang === 'zh' ? '取消' : 'Cancel'}
               </Button>
               <Button

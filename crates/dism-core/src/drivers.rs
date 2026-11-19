@@ -96,7 +96,7 @@ pub fn list_drivers() -> Vec<DriverPackageInfo> {
     computed
 }
 
-fn compute_drivers_uncached() -> Vec<DriverPackageInfo> {
+pub(crate) fn compute_drivers_uncached() -> Vec<DriverPackageInfo> {
     let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
     let Ok(pkg_root) = hklm.open_subkey_with_flags(DRIVER_PACKAGES_KEY, KEY_READ) else {
         return Vec::new();

@@ -189,8 +189,11 @@
         "zh": "360浏览器在升级到新版本后留下的备份文件，在故障时回滚到老版本。",
         "en": "Backup files created by 360 Web Browser when upgrading to a newer version. This is used to restore to the previous version should the program malfunctions."
       },
-      "warning": null,
-      "level": 2,
+      "warning": {
+        "zh": "删除旧版本后会失去对应的回滚文件。请在浏览器更新完成后清理。",
+        "en": "Removing older versions discards their rollback files. Clean up after browser updates finish."
+      },
+      "level": 1,
       "work": null,
       "source": "dismnext-core",
       "scans": [
@@ -217,16 +220,9 @@
           "named_applicables": {},
           "actions": [
             {
-              "type": "General",
+              "type": "VersionedDirectory",
               "root_path": "%APPDATA%\\360se6\\Application",
-              "flags": "Directory",
-              "id": null,
-              "queries": [
-                "*.*.*.*"
-              ],
-              "excluded": [
-                "?GetFileVersion(%Root%360se.exe)"
-              ]
+              "version_file": "360se.exe"
             }
           ],
           "rescan": false,
@@ -311,8 +307,11 @@
         "zh": "清理 Microsoft Edge 升级后遗留在 Application 目录下的旧版本回滚文件夹，严格保留当前运行版本。",
         "en": "Removes outdated version folders left by Microsoft Edge updates while preserving the active executable version."
       },
-      "warning": null,
-      "level": 2,
+      "warning": {
+        "zh": "删除旧版本后会失去对应的回滚文件。请在浏览器更新完成后清理。",
+        "en": "Removing older versions discards their rollback files. Clean up after browser updates finish."
+      },
+      "level": 1,
       "work": null,
       "source": "win11-modern",
       "scans": [
@@ -345,40 +344,19 @@
           "named_applicables": {},
           "actions": [
             {
-              "type": "General",
+              "type": "VersionedDirectory",
               "root_path": "%ProgramFilesX86%\\Microsoft\\Edge\\Application",
-              "flags": "Directory",
-              "id": null,
-              "queries": [
-                "*.*.*.*"
-              ],
-              "excluded": [
-                "?GetFileVersion(%Root%msedge.exe)"
-              ]
+              "version_file": "msedge.exe"
             },
             {
-              "type": "General",
+              "type": "VersionedDirectory",
               "root_path": "%ProgramFiles%\\Microsoft\\Edge\\Application",
-              "flags": "Directory",
-              "id": null,
-              "queries": [
-                "*.*.*.*"
-              ],
-              "excluded": [
-                "?GetFileVersion(%Root%msedge.exe)"
-              ]
+              "version_file": "msedge.exe"
             },
             {
-              "type": "General",
+              "type": "VersionedDirectory",
               "root_path": "%LOCALAPPDATA%\\Microsoft\\Edge\\Application",
-              "flags": "Directory",
-              "id": null,
-              "queries": [
-                "*.*.*.*"
-              ],
-              "excluded": [
-                "?GetFileVersion(%Root%msedge.exe)"
-              ]
+              "version_file": "msedge.exe"
             }
           ],
           "rescan": false,
@@ -400,8 +378,11 @@
         "zh": "Chrome浏览器升级到新版本后留下的备份文件，在故障时回滚到老版本。",
         "en": "Previous Backup created by Chrome when upgrading to a newer version. This is used to restore to the previous version should the program malfunctions."
       },
-      "warning": null,
-      "level": 2,
+      "warning": {
+        "zh": "删除旧版本后会失去对应的回滚文件。请在浏览器更新完成后清理。",
+        "en": "Removing older versions discards their rollback files. Clean up after browser updates finish."
+      },
+      "level": 1,
       "work": null,
       "source": "dismnext-core",
       "scans": [
@@ -452,64 +433,29 @@
           "named_applicables": {},
           "actions": [
             {
-              "type": "General",
+              "type": "VersionedDirectory",
               "root_path": "%ProgramFiles%\\Google\\Chrome\\Application",
-              "flags": "Directory",
-              "id": null,
-              "queries": [
-                "*.*.*.*"
-              ],
-              "excluded": [
-                "?GetFileVersion(%Root%chrome.exe)"
-              ]
+              "version_file": "chrome.exe"
             },
             {
-              "type": "General",
+              "type": "VersionedDirectory",
               "root_path": "%ProgramFilesX86%\\Google\\Chrome\\Application",
-              "flags": "Directory",
-              "id": null,
-              "queries": [
-                "*.*.*.*"
-              ],
-              "excluded": [
-                "?GetFileVersion(%Root%chrome.exe)"
-              ]
+              "version_file": "chrome.exe"
             },
             {
-              "type": "General",
+              "type": "VersionedDirectory",
               "root_path": "%LOCALAPPDATA%\\Google\\Chrome\\Application",
-              "flags": "Directory",
-              "id": null,
-              "queries": [
-                "*.*.*.*"
-              ],
-              "excluded": [
-                "?GetFileVersion(%Root%chrome.exe)"
-              ]
+              "version_file": "chrome.exe"
             },
             {
-              "type": "General",
+              "type": "VersionedDirectory",
               "root_path": "?GetRegSz(HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\App Paths\\chrome.exe,Path)",
-              "flags": "Directory",
-              "id": null,
-              "queries": [
-                "*.*.*.*"
-              ],
-              "excluded": [
-                "?GetFileVersion(%Root%Chrome.exe)"
-              ]
+              "version_file": "Chrome.exe"
             },
             {
-              "type": "General",
+              "type": "VersionedDirectory",
               "root_path": "?GetRegSz(HKEY_LOCAL_MACHINE\\Software\\Microsoft\\Windows\\CurrentVersion\\App Paths\\chrome.exe,Path)",
-              "flags": "Directory",
-              "id": null,
-              "queries": [
-                "*.*.*.*"
-              ],
-              "excluded": [
-                "?GetFileVersion(%Root%Chrome.exe)"
-              ]
+              "version_file": "Chrome.exe"
             }
           ],
           "rescan": false,
@@ -531,8 +477,11 @@
         "zh": "Opera浏览器升级到新版本后留下的备份文件，在故障时回滚到老版本。",
         "en": "Previous Backup created by Opera when upgrading to a newer version. This is used to restore to the previous version should the program malfunctions."
       },
-      "warning": null,
-      "level": 2,
+      "warning": {
+        "zh": "删除旧版本后会失去对应的回滚文件。请在浏览器更新完成后清理。",
+        "en": "Removing older versions discards their rollback files. Clean up after browser updates finish."
+      },
+      "level": 1,
       "work": null,
       "source": "dismnext-core",
       "scans": [
@@ -596,28 +545,14 @@
           },
           "actions": [
             {
-              "type": "General",
+              "type": "VersionedDirectory",
               "root_path": "?GetRegSz(HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\App Paths\\opera.exe,Path)",
-              "flags": "Directory",
-              "id": "Applicable_1",
-              "queries": [
-                "*.*.*.*"
-              ],
-              "excluded": [
-                "?GetFileVersion(%Root%Launcher.exe)"
-              ]
+              "version_file": "Launcher.exe"
             },
             {
-              "type": "General",
+              "type": "VersionedDirectory",
               "root_path": "?GetRegSz(HKEY_LOCAL_MACHINE\\Software\\Microsoft\\Windows\\CurrentVersion\\App Paths\\opera.exe,Path)",
-              "flags": "Directory",
-              "id": "Applicable_2",
-              "queries": [
-                "*.*.*.*"
-              ],
-              "excluded": [
-                "?GetFileVersion(%Root%Launcher.exe)"
-              ]
+              "version_file": "Launcher.exe"
             }
           ],
           "rescan": false,
@@ -1057,8 +992,11 @@
         "zh": "Windows在运行过程中产生的事件。",
         "en": "Event files created when running various Windows programs."
       },
-      "warning": null,
-      "level": 3,
+      "warning": {
+        "zh": "删除事件日志会丢失对应的故障排查和审计记录。需要保留时请先导出。",
+        "en": "Deleting event logs removes their troubleshooting and audit history. Export any records you need to retain."
+      },
+      "level": 1,
       "work": null,
       "source": "dismnext-core",
       "scans": [
@@ -2971,8 +2909,8 @@
         "en": "Temporary Files"
       },
       "description": {
-        "zh": "一些程序为特定用户产生的临时文件。",
-        "en": "Temporary files created by Windows services and user applications."
+        "zh": "清理系统和应用临时目录中至少 7 天未修改的文件。",
+        "en": "Clears files in system and application temp folders that have not been modified for at least 7 days."
       },
       "warning": null,
       "level": 2,
@@ -2997,7 +2935,8 @@
               "flags": "Directory|File",
               "id": null,
               "queries": [],
-              "excluded": []
+              "excluded": [],
+              "min_age_days": 7
             },
             {
               "type": "General",
@@ -3005,17 +2944,8 @@
               "flags": "Directory|File",
               "id": null,
               "queries": [],
-              "excluded": []
-            },
-            {
-              "type": "General",
-              "root_path": "*\\",
-              "flags": "Directory|File",
-              "id": null,
-              "queries": [
-                "Found.*"
-              ],
-              "excluded": []
+              "excluded": [],
+              "min_age_days": 7
             },
             {
               "type": "General",
@@ -3023,7 +2953,8 @@
               "flags": "Directory|File",
               "id": null,
               "queries": [],
-              "excluded": []
+              "excluded": [],
+              "min_age_days": 7
             },
             {
               "type": "General",
@@ -3031,7 +2962,8 @@
               "flags": "Directory|File",
               "id": null,
               "queries": [],
-              "excluded": []
+              "excluded": [],
+              "min_age_days": 7
             },
             {
               "type": "General",
@@ -3039,7 +2971,8 @@
               "flags": "Directory|File",
               "id": null,
               "queries": [],
-              "excluded": []
+              "excluded": [],
+              "min_age_days": 7
             },
             {
               "type": "General",
@@ -3047,7 +2980,8 @@
               "flags": "Directory|File",
               "id": null,
               "queries": [],
-              "excluded": []
+              "excluded": [],
+              "min_age_days": 7
             },
             {
               "type": "General",
@@ -3055,7 +2989,8 @@
               "flags": "Directory|File",
               "id": null,
               "queries": [],
-              "excluded": []
+              "excluded": [],
+              "min_age_days": 7
             }
           ],
           "rescan": false,
@@ -3078,7 +3013,8 @@
               "flags": "Directory|File",
               "id": null,
               "queries": [],
-              "excluded": []
+              "excluded": [],
+              "min_age_days": 7
             },
             {
               "type": "General",
@@ -3086,7 +3022,8 @@
               "flags": "Directory|File",
               "id": null,
               "queries": [],
-              "excluded": []
+              "excluded": [],
+              "min_age_days": 7
             },
             {
               "type": "General",
@@ -3094,7 +3031,8 @@
               "flags": "Directory|File",
               "id": null,
               "queries": [],
-              "excluded": []
+              "excluded": [],
+              "min_age_days": 7
             },
             {
               "type": "General",
@@ -3102,7 +3040,8 @@
               "flags": "Directory|File",
               "id": null,
               "queries": [],
-              "excluded": []
+              "excluded": [],
+              "min_age_days": 7
             },
             {
               "type": "General",
@@ -3110,7 +3049,8 @@
               "flags": "Directory|File",
               "id": null,
               "queries": [],
-              "excluded": []
+              "excluded": [],
+              "min_age_days": 7
             },
             {
               "type": "General",
@@ -3118,7 +3058,8 @@
               "flags": "Directory|File",
               "id": null,
               "queries": [],
-              "excluded": []
+              "excluded": [],
+              "min_age_days": 7
             },
             {
               "type": "General",
@@ -3126,7 +3067,8 @@
               "flags": "Directory|File",
               "id": null,
               "queries": [],
-              "excluded": []
+              "excluded": [],
+              "min_age_days": 7
             }
           ],
           "rescan": false,
@@ -3137,19 +3079,22 @@
     {
       "id": "clean-043",
       "name": {
-        "zh": "常见的驱动临时解压目录",
-        "en": "Temporary Driver Directories"
+        "zh": "AMD 与 NVIDIA 驱动安装解压包",
+        "en": "Extracted AMD and NVIDIA Driver Packages"
       },
       "group": {
         "zh": "临时文件",
         "en": "Temporary Files"
       },
       "description": {
-        "zh": "Intel、AMD以及Nvidia驱动在安装时留下的解压目录。",
-        "en": "Temporary driver extraction folders left behind on the system drive after driver installation."
+        "zh": "检查系统盘 AMD 和 NVIDIA 目录中具有安装程序和驱动包结构的解压目录。",
+        "en": "Finds extracted driver packages under the system drive's AMD and NVIDIA folders by installer and package layout."
       },
-      "warning": null,
-      "level": 3,
+      "warning": {
+        "zh": "请在驱动安装完成后核对目录。清理会删除可用于再次安装的解压文件。",
+        "en": "Review the folders after driver installation finishes. Cleanup removes the extracted files used to reinstall the driver."
+      },
+      "level": 1,
       "work": null,
       "source": "dismnext-core",
       "scans": [
@@ -3169,11 +3114,6 @@
               },
               {
                 "type": "FileExist",
-                "file_path": "%SystemDrive%\\Intel",
-                "wow64": null
-              },
-              {
-                "type": "FileExist",
                 "file_path": "%SystemDrive%\\NVIDIA",
                 "wow64": null
               }
@@ -3183,16 +3123,47 @@
           "actions": [
             {
               "type": "General",
-              "root_path": "%SystemDrive%",
-              "flags": "Directory",
+              "root_path": "%SystemDrive%\\AMD",
+              "flags": "Directory|File",
               "id": null,
               "queries": [
-                "AMD",
-                "Intel",
-                "NVIDIA",
-                "Prog"
+                "*"
               ],
-              "excluded": []
+              "excluded": [],
+              "directory_markers": [
+                "Setup.exe",
+                "Packages\\"
+              ]
+            },
+            {
+              "type": "General",
+              "root_path": "%SystemDrive%\\NVIDIA",
+              "flags": "Directory|File",
+              "id": null,
+              "queries": [
+                "*"
+              ],
+              "excluded": [],
+              "directory_markers": [
+                "setup.exe",
+                "Display.Driver\\"
+              ]
+            },
+            {
+              "type": "General",
+              "root_path": "%SystemDrive%\\NVIDIA\\DisplayDriver",
+              "flags": "Directory|File",
+              "id": null,
+              "queries": [
+                "*",
+                "*\\*",
+                "*\\*\\*"
+              ],
+              "excluded": [],
+              "directory_markers": [
+                "setup.exe",
+                "Display.Driver\\"
+              ]
             }
           ],
           "rescan": false,
@@ -3501,8 +3472,8 @@
         "en": "Temporary Files"
       },
       "description": {
-        "zh": "百度网盘运行时产生的一些日志文件。",
-        "en": "Logs created when Baidu Yun is running."
+        "zh": "清理百度网盘 GuanJia 日志目录中的运行日志。",
+        "en": "Clears runtime logs in the Baidu Yun GuanJia logs directory."
       },
       "warning": null,
       "level": 3,
@@ -3516,30 +3487,12 @@
           "description_override": null,
           "warning_override": null,
           "applicable": {
-            "type": "Or",
-            "children": [
-              {
-                "type": "FileExist",
-                "file_path": "%APPDATA%\\BaiduYunKernel\\Data",
-                "wow64": null
-              },
-              {
-                "type": "FileExist",
-                "file_path": "%APPDATA%\\BaiduYunGuanjia\\logs",
-                "wow64": null
-              }
-            ]
+            "type": "FileExist",
+            "file_path": "%APPDATA%\\BaiduYunGuanjia\\logs",
+            "wow64": null
           },
           "named_applicables": {},
           "actions": [
-            {
-              "type": "General",
-              "root_path": "%APPDATA%\\BaiduYunKernel\\Data\\",
-              "flags": "Directory|File",
-              "id": null,
-              "queries": [],
-              "excluded": []
-            },
             {
               "type": "General",
               "root_path": "%APPDATA%\\BaiduYunGuanjia\\logs\\",
@@ -3645,8 +3598,11 @@
         "zh": "用于存放用户手动删除的文件目录。",
         "en": "Used to restore files manually deleted by the user."
       },
-      "warning": null,
-      "level": 3,
+      "warning": {
+        "zh": "清理后，相关文件无法再从回收站还原。请先检查需要恢复的文件。",
+        "en": "Cleared files can no longer be restored from the Recycle Bin. Check for files you need to recover."
+      },
+      "level": 1,
       "work": null,
       "source": "dismnext-core",
       "scans": [
@@ -7016,6 +6972,56 @@
               "flags": "Directory|File",
               "id": null,
               "queries": [],
+              "excluded": []
+            }
+          ],
+          "rescan": false,
+          "restart": null
+        }
+      ]
+    },
+    {
+      "id": "clean-094",
+      "name": {
+        "zh": "磁盘检查恢复文件",
+        "en": "Recovered Disk Check Files"
+      },
+      "group": {
+        "zh": "备份文件",
+        "en": "Backup Files"
+      },
+      "description": {
+        "zh": "查找固定磁盘根目录 FOUND.??? 文件夹中的 .chk 文件。",
+        "en": "Finds .chk files in FOUND.??? folders at the root of fixed drives."
+      },
+      "warning": {
+        "zh": "这些文件可能包含磁盘检查找回的数据。确认无需恢复后再清理。",
+        "en": "These files may contain recovered data from a disk check. Review them before cleanup."
+      },
+      "level": 1,
+      "work": null,
+      "source": "dismnext-core",
+      "scans": [
+        {
+          "work": 1,
+          "scan_type": null,
+          "name_override": null,
+          "description_override": null,
+          "warning_override": null,
+          "applicable": {
+            "type": "ImageFlags",
+            "mask": 1
+          },
+          "named_applicables": {},
+          "actions": [
+            {
+              "type": "General",
+              "root_path": "*\\Found.???",
+              "flags": "File",
+              "id": null,
+              "queries": [
+                "*.chk"
+              ],
               "excluded": []
             }
           ],

@@ -3,7 +3,7 @@ use clap::Parser;
 use dism_core::appx::{list_appx_packages, remove_appx_package};
 use dism_core::cleaner::{
     execute_cleanup, is_deferred_system_task_proc, scan_all_with_progress, scan_all_with_summary, scan_custom_proc_name,
-    scan_rule_preview, CleanupBatchScan, CleanupScanResult,
+    scan_rule_preview, CleanupBatchScan, CleanupScanResult, ReviewedCleanup,
 };
 use dism_core::diskmap::{
     analyze_path_with_options, find_duplicate_files,
@@ -34,6 +34,7 @@ use dism_core::{Catalog, CustomRuleInput, SnapshotManager, SystemInfo};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
+use std::hash::{BuildHasher, RandomState};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex, MutexGuard, RwLock};
@@ -66,13 +67,53 @@ struct AppState {
     catalog: RwLock<Catalog>,
     snap_mgr: SnapshotManager,
     scan_cache: RwLock<CleanupScanCache>,
-    cleanup_operation: Mutex<()>,
+    cleanup_operation: Mutex<CleanupReviewSlot>,
     scan_jobs: Arc<ScanJobs>,
     uninstall: Mutex<Option<Win32Uninstall>>,
     ui_dir: Option<PathBuf>,
 }
 
 const FULL_SCAN_TTL: Duration = Duration::from_secs(60);
+const CLEANUP_REVIEW_TTL: Duration = Duration::from_secs(5 * 60);
+
+#[derive(Default)]
+struct CleanupReviewSlot {
+    ids: RandomState,
+    sequence: u64,
+    pending: Option<(String, Instant, ReviewedCleanup)>,
+}
+
+impl CleanupReviewSlot {
+    fn store(&mut self, plan: ReviewedCleanup, now: Instant) -> String {
+        self.sequence += 1;
+        let id = format!("{:016x}", self.ids.hash_one(self.sequence));
+        self.pending = Some((id.clone(), now, plan));
+        id
+    }
+
+    fn take(&mut self, id: &str, now: Instant) -> Option<ReviewedCleanup> {
+        let (pending_id, created, _) = self.pending.as_ref()?;
+        if now.saturating_duration_since(*created) >= CLEANUP_REVIEW_TTL {
+            self.pending = None;
+            return None;
+        }
+        if id != pending_id {
+            return None;
+        }
+        self.pending.take().map(|(_, _, plan)| plan)
+    }
+}
+
+#[derive(Debug)]
+struct CleanupReviewUnavailable;
+
+impl std::fmt::Display for CleanupReviewUnavailable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Cleanup review is no longer available. Review the selected rules again.")
+    }
+}
+
+impl std::error::Error for CleanupReviewUnavailable {}
 
 #[derive(Default)]
 struct CleanupScanCache {
@@ -98,8 +139,9 @@ impl CleanupScanCache {
 }
 
 impl AppState {
-    fn begin_cleanup_mutation(&self) -> MutexGuard<'_, ()> {
-        let operation = self.cleanup_operation.lock().unwrap();
+    fn begin_cleanup_mutation(&self) -> MutexGuard<'_, CleanupReviewSlot> {
+        let mut operation = self.cleanup_operation.lock().unwrap();
+        operation.pending = None;
         *self.scan_cache.write().unwrap() = CleanupScanCache::default();
         operation
     }
@@ -118,6 +160,16 @@ impl AppState {
 struct ExecuteReq {
     rule_ids: Vec<String>,
     dry_run: bool,
+}
+
+#[derive(Deserialize)]
+struct CleanupReviewReq {
+    rule_ids: Vec<String>,
+}
+
+#[derive(Deserialize)]
+struct CleanupPlanReq {
+    plan_id: String,
 }
 
 #[derive(Deserialize)]
@@ -289,7 +341,7 @@ fn main() -> Result<()> {
         catalog: RwLock::new(catalog),
         snap_mgr,
         scan_cache: RwLock::new(CleanupScanCache::default()),
-        cleanup_operation: Mutex::new(()),
+        cleanup_operation: Mutex::default(),
         scan_jobs: Arc::new(ScanJobs::default()),
         uninstall: Mutex::new(None),
         ui_dir,
@@ -423,7 +475,7 @@ fn handle_request(mut req: Request, state: &Arc<AppState>) {
                 origin_header.as_deref(),
             ),
             Err(err) => {
-                let code = if err.is::<ScanBusy>() { 409 } else { 400 };
+                let code = if err.is::<ScanBusy>() || err.is::<CleanupReviewUnavailable>() { 409 } else { 400 };
                 let body = ErrorPayload {
                     error: err.to_string(),
                 };
@@ -634,23 +686,37 @@ fn dispatch_api(
         }
         (&Method::Post, "/api/cleanup/execute") => {
             let payload: ExecuteReq = read_json_body(req)?;
-            let _operation = if payload.dry_run {
-                state.cleanup_operation.lock().unwrap()
-            } else {
-                state.begin_cleanup_mutation()
-            };
+            anyhow::ensure!(payload.dry_run, "Desktop cleanup requires a reviewed plan");
+            let _operation = state.cleanup_operation.lock().unwrap();
             let cat = state.catalog.read().unwrap();
-            let report = execute_cleanup(
-                &cat.cleanup_rules,
-                &payload.rule_ids,
-                &sys,
-                payload.dry_run,
-            );
-            let updated_sys = SystemInfo::collect();
+            let report = execute_cleanup(&cat.cleanup_rules, &payload.rule_ids, &sys, true);
             Ok(serde_json::json!({
                 "report": report,
-                "system": updated_sys,
+                "system": sys,
             }))
+        }
+        (&Method::Post, "/api/cleanup/review") => {
+            let payload: CleanupReviewReq = read_json_body(req)?;
+            let mut operation = state.cleanup_operation.lock().unwrap();
+            operation.pending = None;
+            let cat = state.catalog.read().unwrap();
+            let (plan, report) = ReviewedCleanup::prepare(&cat.cleanup_rules, &payload.rule_ids, &sys);
+            let plan_id = (!report.outcomes.is_empty()).then(|| operation.store(plan, Instant::now()));
+            Ok(serde_json::json!({ "plan_id": plan_id, "report": report }))
+        }
+        (&Method::Post, "/api/cleanup/confirm") => {
+            let payload: CleanupPlanReq = read_json_body(req)?;
+            let mut operation = state.cleanup_operation.lock().unwrap();
+            let plan = operation.take(&payload.plan_id, Instant::now()).ok_or(CleanupReviewUnavailable)?;
+            *state.scan_cache.write().unwrap() = CleanupScanCache::default();
+            let report = plan.execute();
+            Ok(serde_json::json!({ "report": report, "system": SystemInfo::collect() }))
+        }
+        (&Method::Post, "/api/cleanup/discard-review") => {
+            let payload: CleanupPlanReq = read_json_body(req)?;
+            let mut operation = state.cleanup_operation.lock().unwrap();
+            operation.take(&payload.plan_id, Instant::now());
+            Ok(serde_json::json!({ "ok": true }))
         }
         (&Method::Post, "/api/cleanup/custom/test") => {
             let payload: CustomRuleInput = read_json_body(req)?;
@@ -1240,6 +1306,24 @@ fn add_cors_headers<R: std::io::Read>(resp: &mut Response<R>, port: u16, origin:
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cleanup_reviews_are_single_use_and_expire() {
+        let sys = SystemInfo::collect();
+        let new_plan = || ReviewedCleanup::prepare(&[], &[], &sys).0;
+        let mut slot = CleanupReviewSlot::default();
+        let now = Instant::now();
+        let first = slot.store(new_plan(), now);
+        let current = slot.store(new_plan(), now);
+        assert_ne!(first, current);
+        assert!(slot.take(&first, now).is_none());
+        assert!(slot.take(&current, now).is_some());
+        assert!(slot.take(&current, now).is_none());
+
+        let expiring = slot.store(new_plan(), now);
+        assert!(slot.take(&expiring, now + CLEANUP_REVIEW_TTL).is_none());
+        assert!(slot.pending.is_none());
+    }
 
     #[test]
     fn report_cache_requires_a_fresh_full_scan() {

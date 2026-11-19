@@ -330,7 +330,7 @@ pub fn read_file_version(path: &Path) -> Option<String> {
     val
 }
 
-fn read_file_version_uncached(path: &Path) -> Option<String> {
+pub(crate) fn read_file_version_uncached(path: &Path) -> Option<String> {
     if !path.exists() {
         return None;
     }

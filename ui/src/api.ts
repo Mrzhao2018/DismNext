@@ -120,6 +120,11 @@ export interface RuleCleanOutcome {
   skipped_protected_files: number;
   failed_files: number;
   errors: string[];
+  review?: {
+    directories: number;
+    skipped_changed: number;
+    skipped_missing: number;
+  };
 }
 
 export interface CleanupExecutionReport {
@@ -128,6 +133,11 @@ export interface CleanupExecutionReport {
   total_deleted_files: number;
   total_skipped_files: number;
   outcomes: RuleCleanOutcome[];
+}
+
+export interface CleanupReview {
+  plan_id: string | null;
+  report: CleanupExecutionReport;
 }
 
 export type ScopeName = 'current' | 'default' | 'system';
@@ -205,6 +215,12 @@ export function formatBytes(bytes: number): string {
   return `${val >= 10 || idx === 0 ? val.toFixed(idx === 0 ? 0 : 1) : val.toFixed(2)} ${units[idx]}`;
 }
 
+export class ApiError extends Error {
+  constructor(message: string, readonly status: number) {
+    super(message);
+  }
+}
+
 async function reqJson<T>(url: string, init?: RequestInit): Promise<T> {
   const res = await fetch(url, {
     ...init,
@@ -216,7 +232,7 @@ async function reqJson<T>(url: string, init?: RequestInit): Promise<T> {
   });
   const data = await res.json();
   if (!res.ok) {
-    throw new Error(data?.error || `HTTP ${res.status}`);
+    throw new ApiError(data?.error || `HTTP ${res.status}`, res.status);
   }
   return data as T;
 }
@@ -625,10 +641,25 @@ export const api = {
   getCleanupRules: () => reqJson<CleanupRulesPayload>('/api/cleanup/rules'),
   previewCleanup: (id: string) =>
     reqJson<CleanupScanResult>(`/api/cleanup/preview?id=${encodeURIComponent(id)}`),
-  executeCleanup: (rule_ids: string[], dry_run: boolean) =>
-    reqJson<{ report: CleanupExecutionReport; system: SystemInfo }>('/api/cleanup/execute', {
+  simulateCleanup: (rule_ids: string[]) =>
+    reqJson<{ report: CleanupExecutionReport }>('/api/cleanup/execute', {
       method: 'POST',
-      body: JSON.stringify({ rule_ids, dry_run }),
+      body: JSON.stringify({ rule_ids, dry_run: true }),
+    }),
+  reviewCleanup: (rule_ids: string[]) =>
+    reqJson<CleanupReview>('/api/cleanup/review', {
+      method: 'POST',
+      body: JSON.stringify({ rule_ids }),
+    }),
+  confirmCleanup: (plan_id: string) =>
+    reqJson<{ report: CleanupExecutionReport; system: SystemInfo }>('/api/cleanup/confirm', {
+      method: 'POST',
+      body: JSON.stringify({ plan_id }),
+    }),
+  discardCleanupReview: (plan_id: string) =>
+    reqJson<{ ok: boolean }>('/api/cleanup/discard-review', {
+      method: 'POST',
+      body: JSON.stringify({ plan_id }),
     }),
   getOptimizerGroups: () => reqJson<{ groups: OptimizationGroupStatus[] }>('/api/optimizer/groups'),
   applyOptimization: (item_id: string, scope: ScopeName, value: boolean | number) =>

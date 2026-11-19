@@ -157,7 +157,7 @@ pub fn find_orphaned_installer_files() -> Vec<(PathBuf, u64)> {
     val
 }
 
-fn compute_orphaned_installer_files_uncached() -> Vec<(PathBuf, u64)> {
+pub(crate) fn compute_orphaned_installer_files_uncached() -> Vec<(PathBuf, u64)> {
     let referenced = collect_referenced_installer_packages();
     // Safety guard: never classify Installer files as orphaned if registry DB could not be read reliably
     if referenced.len() < 10 {

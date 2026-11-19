@@ -67,6 +67,14 @@ pub enum Action {
         id: Option<String>,
         queries: Vec<String>,
         excluded: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        min_age_days: Option<u32>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        directory_markers: Vec<String>,
+    },
+    VersionedDirectory {
+        root_path: String,
+        version_file: String,
     },
     Custom {
         proc_name: String,
@@ -395,6 +403,8 @@ impl Catalog {
                     id: None,
                     queries,
                     excluded,
+                    min_age_days: None,
+                    directory_markers: Vec::new(),
                 }],
                 rescan: false,
                 restart: None,

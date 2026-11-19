@@ -13,7 +13,8 @@ use std::hash::{BuildHasher, RandomState};
 use std::os::windows::ffi::OsStrExt;
 use std::os::windows::fs::MetadataExt;
 use std::path::{Component, Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, SystemTime};
 use walkdir::WalkDir;
 use windows_sys::Win32::Foundation::{
     CloseHandle, GetLastError, ERROR_ACCESS_DENIED, ERROR_LOCK_VIOLATION, ERROR_SHARING_VIOLATION,
@@ -25,6 +26,11 @@ use windows_sys::Win32::Storage::FileSystem::{
 
 const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
 const MAX_PREVIEW_FILES: usize = 100;
+
+mod review;
+mod versions;
+pub use review::ReviewedCleanup;
+use versions::VersionGuard;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum FileStatus {
@@ -85,6 +91,15 @@ pub struct RuleCleanOutcome {
     pub skipped_protected_files: usize,
     pub failed_files: usize,
     pub errors: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review: Option<CleanupReviewCounts>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CleanupReviewCounts {
+    pub directories: usize,
+    pub skipped_changed: usize,
+    pub skipped_missing: usize,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -247,7 +262,7 @@ impl ScanIndex<'_> {
 
 struct CollectedTargets<'a> {
     files: CollectedFiles<'a>,
-    removable_dirs: Vec<PathBuf>,
+    removable_dirs: Vec<CleanupPath>,
     is_system_task: bool,
     system_task_proc: Option<String>,
     system_task_hint: Option<LocalizedText>,
@@ -263,7 +278,10 @@ pub struct CleanupTargetTotals {
 struct CollectedFiles<'a> {
     preview_only: bool,
     index: Option<(&'a ScanIndex<'a>, usize)>,
-    targets: Vec<(TargetKey, PreviewFile)>,
+    targets: Vec<(TargetKey, CleanupPath, PreviewFile)>,
+    version_guard: Option<Arc<VersionGuard>>,
+    modified_before: Option<SystemTime>,
+    directory_markers: Vec<String>,
     items: Vec<PreviewFile>,
     ready: CleanupTargetTotals,
     locked: CleanupTargetTotals,
@@ -294,11 +312,19 @@ impl CollectedFiles<'_> {
         Some((size, status, reason))
     }
 
-    fn record(&mut self, key: TargetKey, file: PreviewFile) {
+    fn record(&mut self, key: TargetKey, path: &Path, file: PreviewFile) {
         if self.preview_only {
             self.push_preview(file);
         } else {
-            self.targets.push((key, file));
+            self.targets.push((key, self.cleanup_path(path), file));
+        }
+    }
+
+    fn cleanup_path(&self, path: &Path) -> CleanupPath {
+        CleanupPath {
+            path: path.to_path_buf(),
+            version_guard: self.version_guard.clone(),
+            modified_before: self.modified_before,
         }
     }
 
@@ -509,50 +535,70 @@ pub fn execute_cleanup(
     dry_run: bool,
 ) -> CleanupExecutionReport {
     let wanted: HashSet<&str> = rule_ids.iter().map(|s| s.as_str()).collect();
-    let (mut outcomes, targets, mut dirs) = plan_cleanup(rules, &wanted, sys, dry_run);
+    let (mut outcomes, targets, mut dirs) = plan_cleanup(rules, &wanted, sys, !dry_run);
     for target in targets {
-        let outcome = &mut outcomes[target.owner];
-        match target.apply(dry_run) {
-            Ok((FileStatus::Ready, bytes)) => {
-                let totals = match target.action {
-                    CleanupAction::Delete => &mut outcome.actions.permanent_delete,
-                    CleanupAction::Recycle => &mut outcome.actions.recycle,
-                    CleanupAction::RemoveDriver(_) => &mut outcome.actions.remove_driver,
-                };
-                totals.count += 1;
-                totals.bytes += bytes;
-                outcome.deleted_files += 1;
-                outcome.deleted_bytes += bytes;
-            }
-            Ok((FileStatus::Locked, _)) => outcome.skipped_locked_files += 1,
-            Ok((FileStatus::Protected, _)) => outcome.skipped_protected_files += 1,
-            Err(error) => {
-                outcome.failed_files += 1;
-                if outcome.errors.len() < 10 {
-                    outcome.errors.push(format!("{}: {error}", target.path));
-                }
-            }
-        }
+        outcomes[target.owner].record_target(&target, target.apply(dry_run));
     }
 
     if !dry_run {
-        dirs.sort_by_key(|dir| Reverse(dir.components().count()));
-        for dir in dirs {
-            if std::fs::symlink_metadata(&dir).is_ok_and(|meta| {
+        dirs.sort_by_key(|(_, dir)| Reverse(dir.path.components().count()));
+        for (_, dir) in dirs {
+            let Ok(_version_lock) = dir.lock_version() else {
+                continue;
+            };
+            if std::fs::symlink_metadata(&dir.path).is_ok_and(|meta| {
                 meta.is_dir() && meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT == 0
             }) {
-                let _ = std::fs::remove_dir(dir);
+                let _ = std::fs::remove_dir(dir.path);
             }
         }
     }
 
+    cleanup_report(outcomes, dry_run)
+}
+
+impl RuleCleanOutcome {
+    fn record_target(&mut self, target: &PlannedTarget, result: anyhow::Result<(FileStatus, u64)>) {
+        match result {
+            Ok((FileStatus::Ready, bytes)) => {
+                let totals = match target.action {
+                    CleanupAction::Delete => &mut self.actions.permanent_delete,
+                    CleanupAction::Recycle => &mut self.actions.recycle,
+                    CleanupAction::RemoveDriver(_) => &mut self.actions.remove_driver,
+                };
+                totals.count += 1;
+                totals.bytes += bytes;
+                self.deleted_files += 1;
+                self.deleted_bytes += bytes;
+            }
+            Ok((FileStatus::Locked, _)) => self.skipped_locked_files += 1,
+            Ok((FileStatus::Protected, _)) => self.skipped_protected_files += 1,
+            Err(error) => self.record_error(&target.path, error),
+        }
+    }
+
+    fn record_error(&mut self, path: impl std::fmt::Display, error: impl std::fmt::Display) {
+        self.failed_files += 1;
+        if self.errors.len() < 10 {
+            self.errors.push(format!("{path}: {error}"));
+        }
+    }
+}
+
+fn cleanup_report(mut outcomes: Vec<RuleCleanOutcome>, dry_run: bool) -> CleanupExecutionReport {
+    for outcome in &mut outcomes {
+        outcome.dry_run = dry_run;
+    }
     CleanupExecutionReport {
         dry_run,
         total_deleted_bytes: outcomes.iter().map(|o| o.deleted_bytes).sum(),
         total_deleted_files: outcomes.iter().map(|o| o.deleted_files).sum(),
         total_skipped_files: outcomes
             .iter()
-            .map(|o| o.skipped_locked_files + o.skipped_protected_files)
+            .map(|o| {
+                o.skipped_locked_files + o.skipped_protected_files
+                    + o.review.as_ref().map_or(0, |r| r.skipped_changed + r.skipped_missing)
+            })
             .sum(),
         outcomes,
     }
@@ -561,9 +607,31 @@ pub fn execute_cleanup(
 struct PlannedTarget {
     owner: usize,
     path: String,
+    target: CleanupPath,
     size: u64,
     status: FileStatus,
     action: CleanupAction,
+}
+
+struct CleanupPath {
+    path: PathBuf,
+    version_guard: Option<Arc<VersionGuard>>,
+    modified_before: Option<SystemTime>,
+}
+
+impl CleanupPath {
+    fn lock_version(&self) -> Result<Option<std::fs::File>, ()> {
+        self.version_guard.as_ref().map(|guard| guard.lock().ok_or(())).transpose()
+    }
+
+    fn retain_filters(&mut self, other: Self) {
+        if self.version_guard.is_none() {
+            self.version_guard = other.version_guard;
+        }
+        if let Some(cutoff) = other.modified_before {
+            self.modified_before = Some(self.modified_before.map_or(cutoff, |existing| existing.min(cutoff)));
+        }
+    }
 }
 
 enum CleanupAction {
@@ -582,9 +650,14 @@ impl PlannedTarget {
             return Ok((FileStatus::Ready, self.size));
         }
 
-        let path = Path::new(&self.path);
+        let Ok(_version_lock) = self.target.lock_version() else {
+            return Ok((FileStatus::Protected, 0));
+        };
+        let path = &self.target.path;
         let meta = std::fs::symlink_metadata(path)?;
-        if !meta.is_file() || meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        if !meta.is_file() || meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+            || !old_enough(&meta, self.target.modified_before)
+        {
             return Ok((FileStatus::Protected, 0));
         }
         let (status, _) = diagnose_file(path, &self.path);
@@ -604,13 +677,13 @@ fn plan_cleanup(
     rules: &[CleanupRule],
     wanted: &HashSet<&str>,
     sys: &SystemInfo,
-    dry_run: bool,
-) -> (Vec<RuleCleanOutcome>, Vec<PlannedTarget>, Vec<PathBuf>) {
+    include_dirs: bool,
+) -> (Vec<RuleCleanOutcome>, Vec<PlannedTarget>, Vec<(usize, CleanupPath)>) {
     let mut outcomes = Vec::new();
     let mut targets: Vec<PlannedTarget> = Vec::new();
     let mut by_key = HashMap::<TargetKey, usize>::new();
-    let mut dirs = Vec::new();
-    let mut seen_dirs = HashSet::new();
+    let mut dirs: Vec<(usize, CleanupPath)> = Vec::new();
+    let mut by_dir = HashMap::<TargetKey, usize>::new();
 
     for rule in rules
         .iter()
@@ -632,7 +705,7 @@ fn plan_cleanup(
                 .and_then(|scan| scan.warning_override.clone())
                 .or_else(|| rule.warning.clone()),
             level: Some(rule.level),
-            dry_run,
+            dry_run: false,
             deleted_bytes: 0,
             deleted_files: 0,
             actions: CleanupActionTotals::default(),
@@ -640,6 +713,7 @@ fn plan_cleanup(
             skipped_protected_files: 0,
             failed_files: 0,
             errors: Vec::new(),
+            review: None,
         });
         let Some(active_scan) = active_scan else {
             continue;
@@ -647,10 +721,11 @@ fn plan_cleanup(
         let collected = collect_scan_targets(active_scan, sys, usize::MAX, false, None);
         let recycle = collected.system_task_proc.as_deref() == Some("BuiltinInstallerCleanup");
 
-        for (key, file) in collected.files.targets {
+        for (key, candidate, file) in collected.files.targets {
             if let Some(&index) = by_key.get(&key) {
                 let target = &mut targets[index];
                 target.status = target.status.max(file.status);
+                target.target.retain_filters(candidate);
                 if recycle && matches!(target.action, CleanupAction::Delete) {
                     target.action = CleanupAction::Recycle;
                 }
@@ -665,18 +740,22 @@ fn plan_cleanup(
             targets.push(PlannedTarget {
                 owner,
                 path: file.path,
+                target: candidate,
                 size: file.size_bytes,
                 status: file.status,
                 action,
             });
         }
-        if !dry_run {
-            dirs.extend(
-                collected
-                    .removable_dirs
-                    .into_iter()
-                    .filter(|dir| seen_dirs.insert(TargetKey::file(dir))),
-            );
+        if include_dirs {
+            for dir in collected.removable_dirs {
+                match by_dir.entry(TargetKey::file(&dir.path)) {
+                    Entry::Occupied(entry) => dirs[*entry.get()].1.retain_filters(dir),
+                    Entry::Vacant(entry) => {
+                        entry.insert(dirs.len());
+                        dirs.push((owner, dir));
+                    }
+                }
+            }
         }
     }
     (outcomes, targets, dirs)
@@ -736,6 +815,7 @@ fn collect_scan_targets<'a>(
     let mut is_system_task = false;
     let mut system_task_proc = scan_custom_proc_name(scan);
     let mut system_task_hint: Option<LocalizedText> = None;
+    let scan_time = SystemTime::now();
 
     for action in &scan.actions {
         if files.cancelled() {
@@ -748,6 +828,8 @@ fn collect_scan_targets<'a>(
                 id,
                 queries,
                 excluded,
+                min_age_days,
+                directory_markers,
             } => {
                 if let Some(cond_id) = id {
                     if let Some(cond) = scan.named_applicables.get(cond_id) {
@@ -756,11 +838,34 @@ fn collect_scan_targets<'a>(
                         }
                     }
                 }
+                files.modified_before = match min_age_days {
+                    Some(days) => {
+                        let Some(cutoff) = scan_time.checked_sub(Duration::from_secs(u64::from(*days) * 86_400)) else {
+                            continue;
+                        };
+                        Some(cutoff)
+                    }
+                    None => None,
+                };
+                files.directory_markers.clone_from(directory_markers);
                 collect_general_action(
                     root_path,
                     flags,
                     queries,
                     excluded,
+                    sys,
+                    &mut files,
+                    &mut seen_paths,
+                    &mut removable_dirs,
+                    &mut probe_budget,
+                );
+                files.modified_before = None;
+                files.directory_markers.clear();
+            }
+            Action::VersionedDirectory { root_path, version_file } => {
+                versions::collect_versioned_directories(
+                    root_path,
+                    version_file,
                     sys,
                     &mut files,
                     &mut seen_paths,
@@ -803,14 +908,14 @@ fn collect_general_action(
     sys: &SystemInfo,
     files: &mut CollectedFiles<'_>,
     seen_paths: &mut HashSet<TargetKey>,
-    removable_dirs: &mut Vec<PathBuf>,
+    removable_dirs: &mut Vec<CleanupPath>,
     probe_budget: &mut usize,
 ) {
     let Some(expanded_root) = expand_expression(root_path, None) else {
         return;
     };
 
-    let allow_dirs = flags_allows_dirs(flags);
+    let allow_dirs = files.modified_before.is_none() && flags_allows_dirs(flags);
 
     // Handle trailing wildcard file pattern directly in RootPath when queries is empty (e.g. `...\CLR_*\*.log`)
     let (effective_root, effective_queries): (String, Vec<String>) =
@@ -835,13 +940,18 @@ fn collect_general_action(
             continue;
         };
         let root_str = root_dir.to_string_lossy().into_owned();
-        let expanded_exclusions: Vec<String> = excluded
+        let Some(mut expanded_exclusions) = excluded
             .iter()
-            .filter_map(|ex| expand_expression(ex, Some(&root_str)))
-            .filter(|s| !s.trim().is_empty())
-            .collect();
+            .map(|ex| expand_expression(ex, Some(&root_str)))
+            .collect::<Option<Vec<_>>>() else {
+                continue;
+            };
+        expanded_exclusions.retain(|path| !path.trim().is_empty());
 
         if effective_queries.is_empty() {
+            if !has_directory_markers(&root_dir, &root_meta, &files.directory_markers) {
+                continue;
+            }
             if root_meta.is_file() {
                 record_file_with_meta(
                     &root_dir,
@@ -887,6 +997,9 @@ fn collect_general_action(
                     let Ok(t_meta) = std::fs::symlink_metadata(&target) else {
                         continue;
                     };
+                    if !has_directory_markers(&target, &t_meta, &files.directory_markers) {
+                        continue;
+                    }
                     if t_meta.is_file() {
                         record_file_with_meta(
                             &target,
@@ -918,13 +1031,37 @@ fn collect_general_action(
     }
 }
 
+fn has_directory_markers(path: &Path, meta: &std::fs::Metadata, markers: &[String]) -> bool {
+    if markers.is_empty() {
+        return true;
+    }
+    meta.is_dir()
+        && meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT == 0
+        && path.ancestors().skip(1).all(|parent| {
+            parent.symlink_metadata().is_ok_and(|metadata| {
+                metadata.is_dir() && metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT == 0
+            })
+        })
+        && markers.iter().all(|marker| {
+            let marker_name = marker.trim_end_matches(['\\', '/']);
+            let mut components = Path::new(marker_name).components();
+            if !matches!(components.next(), Some(Component::Normal(_))) || components.next().is_some() {
+                return false;
+            }
+            path.join(marker_name).symlink_metadata().is_ok_and(|entry| {
+                entry.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT == 0
+                    && if marker.ends_with(['\\', '/']) { entry.is_dir() } else { entry.is_file() }
+            })
+        })
+}
+
 #[allow(clippy::too_many_arguments)]
 fn handle_custom_proc(
     proc_name: &str,
     sys: &SystemInfo,
     files: &mut CollectedFiles<'_>,
     seen_paths: &mut HashSet<TargetKey>,
-    removable_dirs: &mut Vec<PathBuf>,
+    removable_dirs: &mut Vec<CleanupPath>,
     is_system_task: &mut bool,
     system_task_proc: &mut Option<String>,
     system_task_hint: &mut Option<LocalizedText>,
@@ -1082,11 +1219,9 @@ fn handle_custom_proc(
                     let newer = d.newer_version.as_deref().unwrap_or("newer");
                     files.record(
                         key,
+                        &driver_inf_path(&d.published_name),
                         PreviewFile {
-                            path: format!(
-                                "{} [{} · {} v{} -> {}]",
-                                d.repo_path, d.published_name, d.original_name, d.version, newer
-                            ),
+                            path: driver_target_label(d),
                             size_bytes,
                             status,
                             reason: Some(format!(
@@ -1151,6 +1286,23 @@ fn handle_custom_proc(
     }
 }
 
+fn driver_target_label(driver: &crate::drivers::DriverPackageInfo) -> String {
+    format!(
+        "{} [{} · {} v{} -> {}]",
+        driver.repo_path,
+        driver.published_name,
+        driver.original_name,
+        driver.version,
+        driver.newer_version.as_deref().unwrap_or("newer")
+    )
+}
+
+fn driver_inf_path(name: &str) -> PathBuf {
+    PathBuf::from(std::env::var_os("SystemRoot").unwrap_or_else(|| r"C:\Windows".into()))
+        .join("INF")
+        .join(name)
+}
+
 fn has_leaf_wildcard(path: &str) -> bool {
     let norm = path.replace('/', "\\");
     if let Some(last) = norm.rsplit('\\').next() {
@@ -1179,7 +1331,7 @@ fn walk_dir_filtered(
     sys_is_admin: bool,
     files: &mut CollectedFiles<'_>,
     seen_paths: &mut HashSet<TargetKey>,
-    removable_dirs: &mut Vec<PathBuf>,
+    removable_dirs: &mut Vec<CleanupPath>,
     probe_budget: &mut usize,
 ) {
     let mut walker = WalkDir::new(dir).follow_links(false).into_iter();
@@ -1216,7 +1368,7 @@ fn walk_dir_filtered(
                 probe_budget,
             );
         } else if is_dir && allow_dirs && !files.preview_only && (path != dir || remove_self) {
-            removable_dirs.push(path.to_path_buf());
+            removable_dirs.push(files.cleanup_path(path));
         }
     }
 }
@@ -1261,6 +1413,9 @@ fn record_file_with_meta(
             &owned
         }
     };
+    if !old_enough(meta, files.modified_before) {
+        return;
+    }
     let reparse = meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0;
     record_file_with_size(
         path,
@@ -1271,6 +1426,10 @@ fn record_file_with_meta(
         sys_is_admin,
         probe_budget,
     );
+}
+
+fn old_enough(meta: &std::fs::Metadata, cutoff: Option<SystemTime>) -> bool {
+    cutoff.is_none_or(|cutoff| meta.modified().is_ok_and(|modified| modified <= cutoff))
 }
 
 fn record_file_with_size(
@@ -1303,6 +1462,7 @@ fn record_file_with_size(
     };
     files.record(
         key,
+        path,
         PreviewFile {
             path: path_str,
             size_bytes,
@@ -1398,6 +1558,7 @@ mod tests {
     use std::collections::HashMap;
     use std::fs::{self, File};
     use std::io::Write;
+    use std::os::windows::fs::OpenOptionsExt;
 
     #[test]
     fn cleanup_preview_caps_details_without_losing_totals() {
@@ -1463,6 +1624,8 @@ mod tests {
                     id: None,
                     queries: Vec::new(),
                     excluded: excluded.iter().map(|name| name.to_string()).collect(),
+                    min_age_days: None,
+                    directory_markers: Vec::new(),
                 }],
                 rescan: false,
                 restart: None,
@@ -1544,8 +1707,6 @@ mod tests {
 
     #[test]
     fn planned_file_is_rechecked_before_deletion() {
-        use std::os::windows::fs::OpenOptionsExt;
-
         let path =
             std::env::temp_dir().join(format!("dismnext_recheck_{}.tmp", std::process::id()));
         fs::write(&path, b"keep").unwrap();
@@ -1554,7 +1715,7 @@ mod tests {
             &rules,
             &HashSet::from(["test"]),
             &SystemInfo::collect(),
-            false,
+            true,
         );
         assert_eq!(targets.len(), 1);
         assert_eq!(targets[0].status, FileStatus::Ready);
@@ -1569,6 +1730,165 @@ mod tests {
         assert_eq!(result.0, FileStatus::Locked);
         assert!(path.exists());
         fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn reviewed_cleanup_only_applies_to_unchanged_targets() {
+        let root = std::env::temp_dir().join(format!("dismnext_review_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("old_empty")).unwrap();
+        fs::create_dir(root.join("will_fill")).unwrap();
+        fs::create_dir(root.join("will_replace")).unwrap();
+        for name in ["ready.tmp", "replaced.tmp", "changed.tmp", "missing.tmp", "locked.tmp", "unlocks.tmp"] {
+            fs::write(root.join(name), b"old").unwrap();
+        }
+        let ready = root.join("ready.tmp");
+        let mut permissions = fs::metadata(&ready).unwrap().permissions();
+        permissions.set_readonly(true);
+        fs::set_permissions(&ready, permissions).unwrap();
+        let unlocks = fs::OpenOptions::new().read(true).share_mode(0).open(root.join("unlocks.tmp")).unwrap();
+
+        let rules = [test_rule("test", &root, &[])];
+        let (plan, review) = ReviewedCleanup::prepare(&rules, &["test".into()], &SystemInfo::collect());
+        assert!(review.dry_run);
+        assert_eq!(review.total_deleted_files, 5);
+        assert_eq!(review.outcomes[0].review.as_ref().unwrap().directories, 3);
+        assert_eq!(review.outcomes[0].skipped_locked_files, 1);
+        assert!(ready.exists());
+        drop(unlocks);
+
+        let replacement = root.join("new.tmp");
+        let replaced = root.join("replaced.tmp");
+        let original_time = fs::metadata(&replaced).unwrap().modified().unwrap();
+        fs::rename(&replaced, root.join("moved.tmp")).unwrap();
+        fs::write(&replaced, b"new").unwrap();
+        File::options().write(true).open(&replaced).unwrap().set_modified(original_time).unwrap();
+        fs::write(&replacement, b"new").unwrap();
+        let changed = root.join("changed.tmp");
+        let changed_time = fs::metadata(&changed).unwrap().modified().unwrap();
+        fs::write(&changed, b"new").unwrap();
+        File::options().write(true).open(&changed).unwrap().set_modified(changed_time).unwrap();
+        fs::remove_file(root.join("missing.tmp")).unwrap();
+        fs::write(root.join("will_fill/new.tmp"), b"new").unwrap();
+        fs::rename(root.join("will_replace"), root.join("moved_dir")).unwrap();
+        fs::create_dir(root.join("will_replace")).unwrap();
+        let locked = fs::OpenOptions::new().read(true).share_mode(0).open(root.join("locked.tmp")).unwrap();
+
+        let result = plan.execute();
+        drop(locked);
+        let outcome = &result.outcomes[0];
+        let counts = outcome.review.as_ref().unwrap();
+        assert!(!result.dry_run);
+        assert_eq!(result.total_deleted_files, 1, "{outcome:?}");
+        assert_eq!(result.total_skipped_files, 6, "{outcome:?}");
+        assert_eq!(outcome.skipped_locked_files, 2);
+        assert_eq!(counts.skipped_missing, 1);
+        assert_eq!(counts.skipped_changed, 3);
+        assert_eq!(counts.directories, 1);
+        assert_eq!(outcome.failed_files, 0, "{outcome:?}");
+        assert!(!ready.exists());
+        assert!(!root.join("old_empty").exists());
+        for name in ["new.tmp", "moved.tmp", "replaced.tmp", "changed.tmp", "locked.tmp", "unlocks.tmp", "will_fill/new.tmp", "will_replace", "moved_dir"] {
+            assert!(root.join(name).exists(), "Target should have survived: {name}");
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn versioned_cleanup_requires_local_version_and_rechecks_it_on_confirmation() {
+        let root = std::env::temp_dir().join(format!("dismnext_browser_{}", std::process::id()));
+        let installed = root.join("installed");
+        let unverified = root.join("unverified");
+        let old = "0.0.0.1";
+        let executable = installed.join("browser.exe");
+        let windows = PathBuf::from(std::env::var_os("SystemRoot").unwrap());
+        let source = windows.join("System32/kernel32.dll");
+        fs::create_dir_all(&installed).unwrap();
+        fs::copy(source, &executable).unwrap();
+        let current = crate::evaluator::read_file_version_uncached(&executable).unwrap();
+        for (dir, version) in [
+            (&installed, old),
+            (&installed, &current),
+            (&installed, "65535.65535.65535.65535"),
+            (&installed, "1.2.notes.4"),
+            (&unverified, old),
+        ] {
+            fs::create_dir_all(dir.join(version)).unwrap();
+            fs::write(dir.join(version).join("data.tmp"), b"data").unwrap();
+        }
+        let mut rule = test_rule("browser", &root, &[]);
+        rule.scans[0].actions = [&installed, &unverified].into_iter().map(|dir| {
+            Action::VersionedDirectory {
+                root_path: dir.to_string_lossy().into_owned(),
+                version_file: "browser.exe".into(),
+            }
+        }).collect();
+        let ids = [rule.id.clone()];
+        let sys = SystemInfo::collect();
+        let scan = scan_rule(&rule, &sys);
+        assert_eq!(scan.cleanable_count, 1);
+        assert_eq!(Path::new(&scan.preview_files[0].path), installed.join(old).join("data.tmp"));
+        fs::write(unverified.join("browser.exe"), b"no version resource").unwrap();
+        assert_eq!(scan_rule(&rule, &sys).cleanable_count, 1);
+        fs::copy(&executable, unverified.join("browser.exe")).unwrap();
+        assert_eq!(scan_rule(&rule, &sys).cleanable_count, 1);
+
+        let (plan, preview) = ReviewedCleanup::prepare(std::slice::from_ref(&rule), &ids, &sys);
+        assert_eq!(preview.total_deleted_files, 1);
+        let moved = installed.join("old-browser.exe");
+        fs::rename(&executable, &moved).unwrap();
+        fs::copy(&moved, &executable).unwrap();
+        let result = plan.execute();
+        assert_eq!(result.total_deleted_files, 0);
+        assert_eq!(result.outcomes[0].review.as_ref().unwrap().skipped_changed, 2);
+        assert!(installed.join(old).join("data.tmp").exists());
+
+        let result = execute_cleanup(&[rule], &ids, &sys, false);
+        assert_eq!(result.total_deleted_files, 1);
+        assert!(!installed.join(old).exists());
+        assert!(installed.join(current).join("data.tmp").exists());
+        assert!(installed.join("65535.65535.65535.65535/data.tmp").exists());
+        assert!(installed.join("1.2.notes.4/data.tmp").exists());
+        assert!(unverified.join(old).join("data.tmp").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn rule_filters_keep_recent_files_and_unrecognized_driver_directories() {
+        let root = std::env::temp_dir().join(format!("dismnext_rule_filters_{}", std::process::id()));
+        let temp = root.join("temp");
+        let drivers = root.join("drivers");
+        fs::create_dir_all(&temp).unwrap();
+        let aged = temp.join("old.tmp");
+        fs::write(&aged, b"old").unwrap();
+        fs::write(temp.join("recent.tmp"), b"recent").unwrap();
+        File::options().write(true).open(&aged).unwrap()
+            .set_modified(SystemTime::now() - Duration::from_secs(8 * 86_400)).unwrap();
+        let marked = drivers.join("extracted");
+        let unmarked = drivers.join("personal");
+        fs::create_dir_all(marked.join("Display.Driver")).unwrap();
+        fs::create_dir_all(&unmarked).unwrap();
+        fs::write(marked.join("setup.exe"), b"test").unwrap();
+        fs::write(unmarked.join("setup.exe"), b"test").unwrap();
+        fs::write(unmarked.join("document.txt"), b"keep").unwrap();
+
+        let mut temp_rule = test_rule("temp", &temp, &[]);
+        let Action::General { min_age_days, .. } = &mut temp_rule.scans[0].actions[0] else { unreachable!() };
+        *min_age_days = Some(7);
+        let mut driver_rule = test_rule("drivers", &drivers, &[]);
+        let Action::General { queries, directory_markers, .. } = &mut driver_rule.scans[0].actions[0] else { unreachable!() };
+        queries.push("*".into());
+        directory_markers.extend(["setup.exe".into(), "Display.Driver\\".into()]);
+
+        let ids = [temp_rule.id.clone(), driver_rule.id.clone()];
+        let (plan, preview) = ReviewedCleanup::prepare(&[temp_rule, driver_rule], &ids, &SystemInfo::collect());
+        assert_eq!(preview.total_deleted_files, 2);
+        assert_eq!(plan.execute().total_deleted_files, 2);
+        assert!(!aged.exists());
+        assert!(temp.join("recent.tmp").exists());
+        assert!(!marked.exists());
+        assert!(unmarked.join("document.txt").exists());
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
