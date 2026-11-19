@@ -27,7 +27,7 @@ use dism_core::startup::{
 use dism_core::sysinfo::relaunch_as_admin;
 use dism_core::systasks::{get_system_task_status, run_system_task};
 use dism_core::uninstaller::{
-    launch_win32_uninstaller, list_win32_apps, scan_app_leftovers,
+    launch_win32_uninstaller, list_win32_apps, scan_app_leftovers, UninstallState, Win32Uninstall,
 };
 use dism_core::{Catalog, CustomRuleInput, SnapshotManager, SystemInfo};
 use serde::{Deserialize, Serialize};
@@ -67,6 +67,7 @@ struct AppState {
     scan_cache: RwLock<CleanupScanCache>,
     cleanup_operation: Mutex<()>,
     scan_jobs: Arc<ScanJobs>,
+    uninstall: Mutex<Option<Win32Uninstall>>,
     ui_dir: Option<PathBuf>,
 }
 
@@ -245,6 +246,11 @@ struct UninstallWin32Req {
 }
 
 #[derive(Deserialize)]
+struct UninstallTargetReq {
+    app_id: String,
+}
+
+#[derive(Deserialize)]
 struct DeleteCustomRuleReq {
     rule_id: String,
 }
@@ -267,6 +273,7 @@ fn main() -> Result<()> {
         scan_cache: RwLock::new(CleanupScanCache::default()),
         cleanup_operation: Mutex::new(()),
         scan_jobs: Arc::new(ScanJobs::default()),
+        uninstall: Mutex::new(None),
         ui_dir,
     });
 
@@ -916,12 +923,54 @@ fn dispatch_api(
         }
         (&Method::Post, "/api/uninstaller/uninstall") => {
             let payload: UninstallWin32Req = read_json_body(req)?;
+            let mut current = state.uninstall.lock().unwrap();
+            if let Some(job) = current.as_mut() {
+                anyhow::ensure!(
+                    !matches!(
+                        job.status()?.state,
+                        UninstallState::Running | UninstallState::AwaitingVerification
+                    ),
+                    "An uninstallation is still in progress or awaiting verification"
+                );
+            }
             let _operation = state.begin_cleanup_mutation();
-            let outcome = launch_win32_uninstaller(
+            let job = current.insert(launch_win32_uninstaller(
                 payload.app_id.trim(),
                 payload.use_quiet.unwrap_or(false),
-            )?;
-            Ok(serde_json::to_value(outcome)?)
+            )?);
+            Ok(serde_json::to_value(job.status()?)?)
+        }
+        (&Method::Get, "/api/uninstaller/uninstall/status") => {
+            let mut current = state.uninstall.lock().unwrap();
+            let status = current.as_mut().map(Win32Uninstall::status).transpose()?;
+            Ok(serde_json::json!({ "uninstall": status }))
+        }
+        (&Method::Post, "/api/uninstaller/uninstall/leftovers") => {
+            let payload: UninstallTargetReq = read_json_body(req)?;
+            let app = state
+                .uninstall
+                .lock()
+                .unwrap()
+                .as_mut()
+                .ok_or_else(|| anyhow::anyhow!("No uninstallation is being tracked"))?
+                .completed_app(&payload.app_id)?;
+            let leftovers = scan_app_leftovers(
+                &app.display_name,
+                &app.publisher,
+                &app.install_location,
+            );
+            Ok(serde_json::json!({ "leftovers": leftovers }))
+        }
+        (&Method::Post, "/api/uninstaller/uninstall/dismiss") => {
+            let payload: UninstallTargetReq = read_json_body(req)?;
+            let mut current = state.uninstall.lock().unwrap();
+            if let Some(job) = current.as_mut() {
+                let status = job.status()?;
+                if status.app_id == payload.app_id && status.state != UninstallState::Running {
+                    *current = None;
+                }
+            }
+            Ok(serde_json::json!({}))
         }
         (&Method::Get, "/api/report/export") => {
             let (cat, scans) = {

@@ -2,11 +2,10 @@ use crate::diskmap::{invalidate_orphans_cache, is_protected_recycle_target, meas
 use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
-use std::os::windows::ffi::OsStrExt;
 use std::os::windows::fs::MetadataExt;
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Child, Command, ExitStatus};
 use std::sync::{OnceLock, RwLock};
 use std::time::{Duration, Instant};
 use winreg::enums::{
@@ -16,6 +15,7 @@ use winreg::RegKey;
 
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
+const UNINSTALL_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Uninstall";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Win32AppInfo {
@@ -37,16 +37,47 @@ pub struct Win32AppInfo {
 pub struct AppLeftoverItem {
     pub path: String,
     pub kind: String,
+    pub match_basis: LeftoverMatch,
     pub size_bytes: u64,
     pub file_count: usize,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct UninstallLaunchOutcome {
-    pub app_id: String,
-    pub display_name: String,
-    pub command_launched: String,
-    pub leftovers: Vec<AppLeftoverItem>,
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LeftoverMatch {
+    RegisteredInstallLocation,
+    ApplicationName,
+    PublisherAndApplicationName,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UninstallState {
+    Running,
+    AwaitingVerification,
+    Completed,
+    Cancelled,
+    RestartRequired,
+    Failed,
+}
+
+#[derive(Debug, Serialize)]
+pub struct UninstallStatus<'a> {
+    pub app_id: &'a str,
+    pub display_name: &'a str,
+    pub state: UninstallState,
+    pub exit_code: Option<i32>,
+}
+
+pub struct Win32Uninstall {
+    app: Win32AppInfo,
+    process: UninstallProcess,
+    last_state: UninstallState,
+}
+
+enum UninstallProcess {
+    Running(Child),
+    Exited(ExitStatus),
 }
 
 static WIN32_APPS_CACHE: OnceLock<RwLock<Option<(Instant, Vec<Win32AppInfo>)>>> = OnceLock::new();
@@ -78,39 +109,35 @@ pub fn list_win32_apps() -> Vec<Win32AppInfo> {
     computed
 }
 
-fn collect_win32_apps() -> Vec<Win32AppInfo> {
-    let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
-    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
-
-    let sources: [(&RegKey, &str, u32, &str, &str); 3] = [
+fn uninstall_sources() -> [(RegKey, u32, &'static str, &'static str); 3] {
+    [
         (
-            &hklm,
-            r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall",
+            RegKey::predef(HKEY_LOCAL_MACHINE),
             KEY_READ | KEY_WOW64_64KEY,
             "hklm64",
             "system_x64",
         ),
         (
-            &hklm,
-            r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall",
+            RegKey::predef(HKEY_LOCAL_MACHINE),
             KEY_READ | KEY_WOW64_32KEY,
             "hklm32",
             "system_x86",
         ),
         (
-            &hkcu,
-            r"Software\Microsoft\Windows\CurrentVersion\Uninstall",
+            RegKey::predef(HKEY_CURRENT_USER),
             KEY_READ,
             "hkcu",
             "user",
         ),
-    ];
+    ]
+}
 
+fn collect_win32_apps() -> Vec<Win32AppInfo> {
     let mut items = Vec::new();
     let mut seen_dedup: HashSet<(String, String)> = HashSet::new();
 
-    for (root, subkey_path, sam, prefix, scope) in sources {
-        let Ok(uninst) = root.open_subkey_with_flags(subkey_path, sam) else {
+    for (root, sam, prefix, scope) in uninstall_sources() {
+        let Ok(uninst) = root.open_subkey_with_flags(UNINSTALL_KEY, sam) else {
             continue;
         };
         for key_name in uninst.enum_keys().flatten() {
@@ -256,6 +283,7 @@ pub fn scan_app_leftovers(
                 results.push(AppLeftoverItem {
                     path: p.to_string_lossy().into_owned(),
                     kind: "install_dir".to_string(),
+                    match_basis: LeftoverMatch::RegisteredInstallLocation,
                     size_bytes,
                     file_count,
                 });
@@ -305,6 +333,7 @@ pub fn scan_app_leftovers(
                         results.push(AppLeftoverItem {
                             path: p.to_string_lossy().into_owned(),
                             kind: kind.to_string(),
+                            match_basis: LeftoverMatch::ApplicationName,
                             size_bytes,
                             file_count,
                         });
@@ -340,6 +369,7 @@ pub fn scan_app_leftovers(
                                 results.push(AppLeftoverItem {
                                     path: sp.to_string_lossy().into_owned(),
                                     kind: kind.to_string(),
+                                    match_basis: LeftoverMatch::PublisherAndApplicationName,
                                     size_bytes,
                                     file_count,
                                 });
@@ -509,22 +539,19 @@ fn normalize_lower_path(p: &Path) -> String {
     s
 }
 
-/// Launches the registered Win32 or MSI uninstaller process for `app_id`, returning candidate
-/// leftover folders so the user can review and recycle them once uninstallation finishes.
-pub fn launch_win32_uninstaller(app_id: &str, use_quiet: bool) -> Result<UninstallLaunchOutcome> {
-    let apps = list_win32_apps();
-    let app = apps
+/// Starts the registered uninstaller and retains its process and application identity.
+pub fn launch_win32_uninstaller(app_id: &str, use_quiet: bool) -> Result<Win32Uninstall> {
+    let app = collect_win32_apps()
         .into_iter()
         .find(|a| a.id == app_id)
         .ok_or_else(|| anyhow!("Installed application '{}' not found in registry", app_id))?;
 
-    let leftovers = scan_app_leftovers(&app.display_name, &app.publisher, &app.install_location);
     let raw_cmd = if use_quiet && !app.quiet_uninstall_string.is_empty() {
-        app.quiet_uninstall_string.clone()
+        &app.quiet_uninstall_string
     } else if !app.uninstall_string.is_empty() {
-        app.uninstall_string.clone()
+        &app.uninstall_string
     } else {
-        app.quiet_uninstall_string.clone()
+        &app.quiet_uninstall_string
     };
 
     if raw_cmd.trim().is_empty() {
@@ -534,30 +561,127 @@ pub fn launch_win32_uninstaller(app_id: &str, use_quiet: bool) -> Result<Uninsta
         ));
     }
 
-    let _wide_hint: Vec<u16> = std::ffi::OsStr::new(&raw_cmd)
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect();
-
-    Command::new("cmd.exe")
-        .args(["/C", &raw_cmd])
+    let child = Command::new("cmd.exe")
+        .args(["/D", "/S", "/C"])
+        .raw_arg(format!("\"{raw_cmd}\""))
         .creation_flags(CREATE_NO_WINDOW)
         .spawn()
         .with_context(|| format!("Failed to launch uninstaller command: {}", raw_cmd))?;
 
-    invalidate_win32_apps_cache();
-
-    Ok(UninstallLaunchOutcome {
-        app_id: app.id,
-        display_name: app.display_name,
-        command_launched: raw_cmd,
-        leftovers,
+    Ok(Win32Uninstall {
+        app,
+        process: UninstallProcess::Running(child),
+        last_state: UninstallState::Running,
     })
+}
+
+impl Win32Uninstall {
+    pub fn status(&mut self) -> Result<UninstallStatus<'_>> {
+        if let UninstallProcess::Running(child) = &mut self.process {
+            if let Some(exit) = child.try_wait().context("Checking the uninstaller process")? {
+                self.process = UninstallProcess::Exited(exit);
+            }
+        }
+
+        let (state, exit_code) = match self.process {
+            UninstallProcess::Running(_) => (UninstallState::Running, None),
+            UninstallProcess::Exited(exit) => {
+                let code = exit.code();
+                let state = classify_uninstall_exit(self.app.is_msi, code, || {
+                    is_app_registered(&self.app)
+                })?;
+                (state, code)
+            }
+        };
+
+        if state != self.last_state {
+            invalidate_win32_apps_cache();
+            self.last_state = state;
+        }
+
+        Ok(UninstallStatus {
+            app_id: &self.app.id,
+            display_name: &self.app.display_name,
+            state,
+            exit_code,
+        })
+    }
+
+    /// Uses current status to gate the scan and retains metadata after the registry entry is gone.
+    pub fn completed_app(&mut self, app_id: &str) -> Result<Win32AppInfo> {
+        let status = self.status()?;
+        anyhow::ensure!(
+            status.app_id == app_id && status.state == UninstallState::Completed,
+            "The application's uninstallation has not been verified"
+        );
+        Ok(self.app.clone())
+    }
+}
+
+fn classify_uninstall_exit(
+    is_msi: bool,
+    code: Option<i32>,
+    is_registered: impl FnOnce() -> Result<bool>,
+) -> Result<UninstallState> {
+    Ok(match code {
+        Some(0) if is_registered()? => UninstallState::AwaitingVerification,
+        Some(0) => UninstallState::Completed,
+        Some(1602) if is_msi => UninstallState::Cancelled,
+        Some(1641 | 3010) if is_msi => UninstallState::RestartRequired,
+        _ => UninstallState::Failed,
+    })
+}
+
+fn is_app_registered(app: &Win32AppInfo) -> Result<bool> {
+    let (prefix, _) = app
+        .id
+        .split_once("::")
+        .context("Invalid application registry source")?;
+    let (root, access, _, _) = uninstall_sources()
+        .into_iter()
+        .find(|(_, _, source, _)| *source == prefix)
+        .context("Unknown application registry source")?;
+    match root.open_subkey_with_flags(format!("{UNINSTALL_KEY}\\{}", app.key_name), access) {
+        Ok(_) => Ok(true),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(err) => Err(err).context("Checking the application's uninstall registration"),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn uninstall_scan_requires_success_and_removal_of_registration() {
+        assert_eq!(
+            classify_uninstall_exit(false, Some(0), || Ok(false)).unwrap(),
+            UninstallState::Completed
+        );
+        assert_eq!(
+            classify_uninstall_exit(true, Some(0), || Ok(true)).unwrap(),
+            UninstallState::AwaitingVerification
+        );
+        assert!(classify_uninstall_exit(true, Some(0), || {
+            anyhow::bail!("registry unavailable")
+        })
+        .is_err());
+
+        for (is_msi, code, expected) in [
+            (true, Some(1602), UninstallState::Cancelled),
+            (true, Some(1603), UninstallState::Failed),
+            (true, Some(1641), UninstallState::RestartRequired),
+            (true, Some(3010), UninstallState::RestartRequired),
+            (false, Some(3010), UninstallState::Failed),
+            (false, None, UninstallState::Failed),
+        ] {
+            assert_eq!(
+                classify_uninstall_exit(is_msi, code, || panic!("unexpected registry lookup"))
+                    .unwrap(),
+                expected
+            );
+        }
+    }
 
     #[test]
     fn test_win32_apps_enumeration_and_leftover_token_safety() {

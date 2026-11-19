@@ -65,5 +65,5 @@ pub use systasks::{
 };
 pub use uninstaller::{
     invalidate_win32_apps_cache, launch_win32_uninstaller, list_win32_apps, scan_app_leftovers,
-    AppLeftoverItem, UninstallLaunchOutcome, Win32AppInfo,
+    AppLeftoverItem, LeftoverMatch, UninstallState, UninstallStatus, Win32AppInfo, Win32Uninstall,
 };

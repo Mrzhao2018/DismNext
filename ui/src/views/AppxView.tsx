@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   Badge,
   Button,
@@ -34,6 +34,7 @@ import {
   AppxPackageInfo,
   Lang,
   Win32AppInfo,
+  Win32UninstallStatus,
   api,
   formatBytes,
   pickText,
@@ -107,10 +108,13 @@ export const AppxView: React.FC<Props> = ({ lang }) => {
   const deferredWin32Search = React.useDeferredValue(win32Search);
   const [confirmWin32, setConfirmWin32] = useState<Win32AppInfo | null>(null);
   const [launchingUninstall, setLaunchingUninstall] = useState(false);
+  const [uninstall, setUninstall] = useState<Win32UninstallStatus | null | undefined>(undefined);
+  const [checkingUninstall, setCheckingUninstall] = useState(false);
 
   // Leftover scanner modal state
   const [leftoverTitle, setLeftoverTitle] = useState('');
   const [leftoverLoading, setLeftoverLoading] = useState(false);
+  const [leftoverError, setLeftoverError] = useState<string | null>(null);
   const [leftoverDialogOpen, setLeftoverDialogOpen] = useState(false);
   const [leftovers, setLeftovers] = useState<AppLeftoverItem[]>([]);
   const [selectedLeftovers, setSelectedLeftovers] = useState<Set<string>>(new Set());
@@ -128,7 +132,7 @@ export const AppxView: React.FC<Props> = ({ lang }) => {
   const [notice, setNotice] = useState<string | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
-  const loadWin32 = async () => {
+  const loadWin32 = useCallback(async () => {
     setLoadingWin32(true);
     setErrorMsg(null);
     try {
@@ -139,7 +143,7 @@ export const AppxView: React.FC<Props> = ({ lang }) => {
     } finally {
       setLoadingWin32(false);
     }
-  };
+  }, []);
 
   const loadAppx = async () => {
     setLoadingAppx(true);
@@ -157,7 +161,43 @@ export const AppxView: React.FC<Props> = ({ lang }) => {
   useEffect(() => {
     void loadWin32();
     void loadAppx();
-  }, []);
+  }, [loadWin32]);
+
+  const pollUninstall = uninstall === undefined || uninstall?.state === 'running';
+  useEffect(() => {
+    if (!pollUninstall) return;
+    let disposed = false;
+    let timer: number | undefined;
+    let pollError: string | null = null;
+
+    const check = async () => {
+      try {
+        const { uninstall: status } = await api.getWin32UninstallStatus();
+        if (disposed) return;
+        if (pollError !== null) {
+          const resolvedError = pollError;
+          setErrorMsg((message) => message === resolvedError ? null : message);
+          pollError = null;
+        }
+        setUninstall(status);
+        if (status?.state !== 'running') {
+          if (status?.state === 'completed') void loadWin32();
+          return;
+        }
+      } catch (e) {
+        if (disposed) return;
+        pollError = String(e);
+        setErrorMsg(pollError);
+      }
+      timer = window.setTimeout(check, 1000);
+    };
+
+    void check();
+    return () => {
+      disposed = true;
+      window.clearTimeout(timer);
+    };
+  }, [pollUninstall, loadWin32]);
 
   const filteredWin32 = useMemo(() => {
     const q = deferredWin32Search.trim().toLowerCase();
@@ -197,25 +237,20 @@ export const AppxView: React.FC<Props> = ({ lang }) => {
     });
   }, [packages, cat, deferredAppxSearch]);
 
-  const handleScanLeftovers = async (app: Win32AppInfo) => {
-    setLeftoverTitle(app.display_name);
+  const reviewLeftovers = async (
+    title: string,
+    scan: () => Promise<{ leftovers: AppLeftoverItem[] }>,
+  ) => {
+    setLeftoverTitle(title);
     setLeftoverDialogOpen(true);
     setLeftoverLoading(true);
+    setLeftoverError(null);
     setLeftovers([]);
     setSelectedLeftovers(new Set());
     try {
-      const res = await api.scanAppLeftovers(
-        app.display_name,
-        app.publisher,
-        app.install_location
-      );
-      setLeftovers(res.leftovers);
-      // Pre-select AppData/ProgramData leftovers; keep install_dir unchecked by default if large
-      setSelectedLeftovers(
-        new Set(res.leftovers.filter((l) => l.kind !== 'install_dir').map((l) => l.path))
-      );
+      setLeftovers((await scan()).leftovers);
     } catch (e) {
-      setErrorMsg(String(e));
+      setLeftoverError(String(e));
     } finally {
       setLeftoverLoading(false);
     }
@@ -227,23 +262,34 @@ export const AppxView: React.FC<Props> = ({ lang }) => {
     setErrorMsg(null);
     setNotice(null);
     try {
-      const res = await api.uninstallWin32App(confirmWin32.id, useQuiet);
+      const status = await api.uninstallWin32App(confirmWin32.id, useQuiet);
       setConfirmWin32(null);
-      setNotice(
-        lang === 'zh'
-          ? `已启动「${res.display_name}」卸载程序：${res.command_launched}`
-          : `Launched uninstaller for "${res.display_name}": ${res.command_launched}`
-      );
-      setLeftoverTitle(res.display_name);
-      setLeftovers(res.leftovers);
-      setSelectedLeftovers(
-        new Set(res.leftovers.filter((l) => l.kind !== 'install_dir').map((l) => l.path))
-      );
-      setLeftoverDialogOpen(true);
+      setUninstall(status);
+      if (status.state === 'completed') void loadWin32();
     } catch (e) {
       setErrorMsg(String(e));
     } finally {
       setLaunchingUninstall(false);
+    }
+  };
+
+  const handleUninstallStatus = async (dismiss: boolean) => {
+    if (!uninstall) return;
+    setCheckingUninstall(true);
+    setErrorMsg(null);
+    try {
+      if (dismiss) {
+        await api.dismissWin32Uninstall(uninstall.app_id);
+        setUninstall(null);
+      } else {
+        const { uninstall: status } = await api.getWin32UninstallStatus();
+        setUninstall(status);
+        if (status?.state === 'completed') void loadWin32();
+      }
+    } catch (e) {
+      setErrorMsg(String(e));
+    } finally {
+      setCheckingUninstall(false);
     }
   };
 
@@ -264,7 +310,7 @@ export const AppxView: React.FC<Props> = ({ lang }) => {
       setSelectedLeftovers(new Set());
       setNotice(
         lang === 'zh'
-          ? `已将 ${recycledCount} 个残留目录移入回收站（释放 ${formatBytes(freedTotal)}）。`
+          ? `已将 ${recycledCount} 个残留目录移入回收站（文件大小合计 ${formatBytes(freedTotal)}）。`
           : `Moved ${recycledCount} leftover folder(s) to Recycle Bin (${formatBytes(freedTotal)}).`
       );
       if (recycledCount === targets.length) {
@@ -336,6 +382,25 @@ export const AppxView: React.FC<Props> = ({ lang }) => {
     return 'ProgramData';
   };
 
+  const matchLabel = {
+    registered_install_location: lang === 'zh' ? '登记的安装路径' : 'Registered install path',
+    application_name: lang === 'zh' ? '仅匹配应用名称' : 'Application name only',
+    publisher_and_application_name: lang === 'zh' ? '匹配发布商及应用名称' : 'Publisher and application name',
+  };
+  const uninstallLabel = {
+    running: lang === 'zh' ? '正在等待卸载程序退出。' : 'Waiting for the uninstaller to exit.',
+    awaiting_verification: lang === 'zh'
+      ? '卸载程序已退出，Windows 仍有安装记录。如果卸载窗口还开着，请完成操作后重新检查。'
+      : 'The launcher exited and Windows still lists the app. If an uninstall window is open, finish it before checking again.',
+    completed: lang === 'zh'
+      ? '已确认卸载完成，可以扫描残留目录。'
+      : 'Uninstallation verified. You can now scan for leftovers.',
+    cancelled: lang === 'zh' ? '卸载已取消。' : 'Uninstallation was cancelled.',
+    restart_required: lang === 'zh' ? 'Windows Installer 需要重启才能完成卸载。' : 'Windows Installer requires a restart to finish.',
+    failed: lang === 'zh' ? '卸载程序返回错误。' : 'The uninstaller returned an error.',
+  };
+  const uninstallBusy = pollUninstall || uninstall?.state === 'awaiting_verification';
+
   return (
     <div className={styles.root}>
       {errorMsg && (
@@ -346,6 +411,49 @@ export const AppxView: React.FC<Props> = ({ lang }) => {
       {notice && (
         <MessageBar intent="success">
           <MessageBarBody>{notice}</MessageBarBody>
+        </MessageBar>
+      )}
+      {mode === 'win32' && uninstall && (
+        <MessageBar intent={
+          uninstall.state === 'completed' ? 'success'
+            : uninstall.state === 'failed' ? 'error'
+              : uninstall.state === 'restart_required' ? 'warning' : 'info'
+        }>
+          <MessageBarBody>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+              <Text>
+                <strong>{uninstall.display_name}</strong> · {uninstallLabel[uninstall.state]}
+                {uninstall.state === 'failed' && uninstall.exit_code !== null && ` (${uninstall.exit_code})`}
+              </Text>
+              {uninstall.state === 'completed' && (
+                <Button
+                  size="small"
+                  disabled={leftoverLoading || checkingUninstall || launchingUninstall}
+                  onClick={() => void reviewLeftovers(
+                    uninstall.display_name,
+                    () => api.scanWin32UninstallLeftovers(uninstall.app_id),
+                  )}
+                >
+                  {lang === 'zh' ? '扫描残留' : 'Scan Leftovers'}
+                </Button>
+              )}
+              {uninstall.state === 'awaiting_verification' && (
+                <Button size="small" disabled={checkingUninstall} onClick={() => void handleUninstallStatus(false)}>
+                  {lang === 'zh' ? '重新检查' : 'Check Again'}
+                </Button>
+              )}
+              {uninstall.state !== 'running' && (
+                <Button
+                  size="small"
+                  appearance="subtle"
+                  disabled={checkingUninstall || launchingUninstall}
+                  onClick={() => void handleUninstallStatus(true)}
+                >
+                  {lang === 'zh' ? '关闭状态' : 'Dismiss'}
+                </Button>
+              )}
+            </div>
+          </MessageBarBody>
         </MessageBar>
       )}
 
@@ -495,7 +603,11 @@ export const AppxView: React.FC<Props> = ({ lang }) => {
                   <Button
                     size="small"
                     appearance="outline"
-                    onClick={() => void handleScanLeftovers(app)}
+                    disabled={leftoverLoading || uninstall?.app_id === app.id}
+                    onClick={() => void reviewLeftovers(
+                      app.display_name,
+                      () => api.scanAppLeftovers(app.display_name, app.publisher, app.install_location),
+                    )}
                   >
                     {lang === 'zh' ? '扫描残留' : 'Leftovers'}
                   </Button>
@@ -503,6 +615,7 @@ export const AppxView: React.FC<Props> = ({ lang }) => {
                     size="small"
                     appearance="primary"
                     icon={<Delete16Regular />}
+                    disabled={uninstallBusy || checkingUninstall || launchingUninstall}
                     onClick={() => setConfirmWin32(app)}
                   >
                     {lang === 'zh' ? '卸载' : 'Uninstall'}
@@ -585,15 +698,15 @@ export const AppxView: React.FC<Props> = ({ lang }) => {
         <DialogSurface>
           <DialogBody>
             <DialogTitle>
-              {lang === 'zh' ? '启动桌面软件卸载并联动排查残留' : 'Uninstall Software & Scan Leftovers'}
+              {lang === 'zh' ? '卸载桌面软件' : 'Uninstall Desktop Software'}
             </DialogTitle>
             <DialogContent>
               {confirmWin32 && (
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
                   <Text>
                     {lang === 'zh'
-                      ? `即将启动「${confirmWin32.display_name}」官方卸载程序，并在之后展示疑似关联的 AppData / ProgramData 残留目录供您勾选清理。`
-                      : `Launch the registered uninstaller for "${confirmWin32.display_name}" and inspect candidate leftover folders afterwards.`}
+                      ? `将运行「${confirmWin32.display_name}」登记的卸载程序。确认卸载完成后，可以扫描残留目录。`
+                      : `Run the registered uninstaller for "${confirmWin32.display_name}". You can scan for leftovers once removal is verified.`}
                   </Text>
                   <Text
                     size={100}
@@ -654,7 +767,7 @@ export const AppxView: React.FC<Props> = ({ lang }) => {
           <DialogBody>
             <DialogTitle>
               {lang === 'zh'
-                ? `残留联动扫描：${leftoverTitle}`
+                ? `残留扫描 · ${leftoverTitle}`
                 : `Leftover Scan: ${leftoverTitle}`}
             </DialogTitle>
             <DialogContent>
@@ -662,6 +775,10 @@ export const AppxView: React.FC<Props> = ({ lang }) => {
                 <div style={{ padding: 24, display: 'flex', justifyContent: 'center' }}>
                   <Spinner label={lang === 'zh' ? '正在扫描 AppData / ProgramData / 安装目录...' : 'Scanning leftovers...'} />
                 </div>
+              ) : leftoverError ? (
+                <MessageBar intent="error">
+                  <MessageBarBody>{leftoverError}</MessageBarBody>
+                </MessageBar>
               ) : leftovers.length === 0 ? (
                 <Text style={{ color: tokens.colorNeutralForeground3 }}>
                   {lang === 'zh'
@@ -672,8 +789,8 @@ export const AppxView: React.FC<Props> = ({ lang }) => {
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 8, maxHeight: 360, overflowY: 'auto' }}>
                   <Text size={200} style={{ color: tokens.colorNeutralForeground3 }}>
                     {lang === 'zh'
-                      ? '请等待软件卸载向导完全退出后，再勾选需要移入回收站的残留目录：'
-                      : 'Wait until the software uninstaller finishes, then select leftover directories to move to the Recycle Bin:'}
+                      ? '根据匹配依据核对目录，再勾选需要移入回收站的项目。'
+                      : 'Review why each directory matched, then select what to move to the Recycle Bin.'}
                   </Text>
                   {leftovers.map((item) => {
                     const checked = selectedLeftovers.has(item.path);
@@ -701,6 +818,9 @@ export const AppxView: React.FC<Props> = ({ lang }) => {
                                 {lang === 'zh' ? '个文件' : 'files'}
                               </Text>
                             </div>
+                            <Text size={100} style={{ color: tokens.colorNeutralForeground3 }}>
+                              {matchLabel[item.match_basis]}
+                            </Text>
                             <Text
                               size={100}
                               truncate

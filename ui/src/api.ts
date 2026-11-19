@@ -491,15 +491,16 @@ export interface Win32AppInfo {
 export interface AppLeftoverItem {
   path: string;
   kind: string;
+  match_basis: 'registered_install_location' | 'application_name' | 'publisher_and_application_name';
   size_bytes: number;
   file_count: number;
 }
 
-export interface UninstallLaunchOutcome {
+export interface Win32UninstallStatus {
   app_id: string;
   display_name: string;
-  command_launched: string;
-  leftovers: AppLeftoverItem[];
+  state: 'running' | 'awaiting_verification' | 'completed' | 'cancelled' | 'restart_required' | 'failed';
+  exit_code: number | null;
 }
 
 export interface CustomRuleInput {
@@ -701,9 +702,21 @@ export const api = {
       body: JSON.stringify({ display_name, publisher, install_location }),
     }),
   uninstallWin32App: (app_id: string, use_quiet: boolean) =>
-    reqJson<UninstallLaunchOutcome>('/api/uninstaller/uninstall', {
+    reqJson<Win32UninstallStatus>('/api/uninstaller/uninstall', {
       method: 'POST',
       body: JSON.stringify({ app_id, use_quiet }),
+    }),
+  getWin32UninstallStatus: () =>
+    reqJson<{ uninstall: Win32UninstallStatus | null }>('/api/uninstaller/uninstall/status'),
+  scanWin32UninstallLeftovers: (app_id: string) =>
+    reqJson<{ leftovers: AppLeftoverItem[] }>('/api/uninstaller/uninstall/leftovers', {
+      method: 'POST',
+      body: JSON.stringify({ app_id }),
+    }),
+  dismissWin32Uninstall: (app_id: string) =>
+    reqJson<Record<string, never>>('/api/uninstaller/uninstall/dismiss', {
+      method: 'POST',
+      body: JSON.stringify({ app_id }),
     }),
   testCustomRule: (input: CustomRuleInput) =>
     reqJson<CleanupScanResult>('/api/cleanup/custom/test', {
