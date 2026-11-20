@@ -1,3 +1,4 @@
+import { useMaintenance } from '../MaintenanceJobs';
 import React, { useEffect, useMemo, useState } from 'react';
 import {
   Badge,
@@ -77,6 +78,7 @@ const useStyles = makeStyles({
 });
 
 export const FeaturesView: React.FC<Props> = ({ lang, isAdmin }) => {
+  const { active: activeMaintenance, run: runMaintenance } = useMaintenance();
   const styles = useStyles();
   const [features, setFeatures] = useState<WindowsFeatureInfo[]>([]);
   const [loading, setLoading] = useState(true);
@@ -146,7 +148,8 @@ export const FeaturesView: React.FC<Props> = ({ lang, isAdmin }) => {
     setErrorMsg(null);
     setNotice(null);
     try {
-      const res = await api.toggleFeature(feat.name, nextEnabled);
+      const res = await runMaintenance({ kind: 'feature', name: feat.name, enabled: nextEnabled }, pickText(feat.display_name, lang));
+      if (!res) return;
       setFeatures(res.features);
       setNotice(
         lang === 'zh'
@@ -298,7 +301,7 @@ export const FeaturesView: React.FC<Props> = ({ lang, isAdmin }) => {
                 {busyName === feat.name && <Spinner size="tiny" />}
                 <Switch
                   checked={feat.enabled}
-                  disabled={busyName !== null}
+                  disabled={busyName !== null || Boolean(activeMaintenance)}
                   onChange={(_, d) => requestToggle(feat, d.checked)}
                 />
               </div>

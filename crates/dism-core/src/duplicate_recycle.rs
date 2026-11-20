@@ -72,7 +72,22 @@ impl FileIdentity {
             )
         };
         if ok == 0 {
-            return Err(io::Error::last_os_error());
+            let error = io::Error::last_os_error();
+            if !crate::file_stamp::unsupported_file_info(&error) {
+                return Err(error);
+            }
+            use windows_sys::Win32::Storage::FileSystem::{
+                GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION,
+            };
+            let mut legacy: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+            if unsafe { GetFileInformationByHandle(file.as_raw_handle(), &mut legacy) } == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            let index = (u64::from(legacy.nFileIndexHigh) << 32) | u64::from(legacy.nFileIndexLow);
+            return Ok(Self {
+                volume: u64::from(legacy.dwVolumeSerialNumber),
+                index: u128::from(index),
+            });
         }
         Ok(Self {
             volume: info.VolumeSerialNumber,

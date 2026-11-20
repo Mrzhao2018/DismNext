@@ -530,27 +530,16 @@ pub fn execute_cleanup(
     sys: &SystemInfo,
     dry_run: bool,
 ) -> CleanupExecutionReport {
-    let wanted: HashSet<&str> = rule_ids.iter().map(|s| s.as_str()).collect();
-    let (mut outcomes, targets, mut dirs) = plan_cleanup(rules, &wanted, sys, !dry_run);
-    for target in targets {
-        outcomes[target.owner].record_target(&target, target.apply(dry_run));
-    }
-
     if !dry_run {
-        dirs.sort_by_key(|(_, dir)| Reverse(dir.path.components().count()));
-        for (_, dir) in dirs {
-            let Ok(_version_lock) = dir.lock_version() else {
-                continue;
-            };
-            if std::fs::symlink_metadata(&dir.path).is_ok_and(|meta| {
-                meta.is_dir() && meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT == 0
-            }) {
-                let _ = std::fs::remove_dir(dir.path);
-            }
-        }
+        return ReviewedCleanup::prepare(rules, rule_ids, sys).0.execute();
     }
 
-    cleanup_report(outcomes, dry_run)
+    let wanted = rule_ids.iter().map(String::as_str).collect();
+    let (mut outcomes, targets, _) = plan_cleanup(rules, &wanted, sys, false);
+    for target in targets {
+        outcomes[target.owner].record_target(&target, Ok((target.status, target.size)));
+    }
+    cleanup_report(outcomes, true)
 }
 
 impl RuleCleanOutcome {
@@ -634,39 +623,6 @@ enum CleanupAction {
     Delete,
     Recycle,
     RemoveDriver(String),
-}
-
-impl PlannedTarget {
-    fn apply(&self, dry_run: bool) -> anyhow::Result<(FileStatus, u64)> {
-        if dry_run || self.status != FileStatus::Ready {
-            return Ok((self.status, self.size));
-        }
-        if let CleanupAction::RemoveDriver(name) = &self.action {
-            crate::drivers::delete_driver(name)?;
-            return Ok((FileStatus::Ready, self.size));
-        }
-
-        let Ok(_version_lock) = self.target.lock_version() else {
-            return Ok((FileStatus::Protected, 0));
-        };
-        let path = &self.target.path;
-        let meta = std::fs::symlink_metadata(path)?;
-        if !meta.is_file() || meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
-            || !old_enough(&meta, self.target.modified_before)
-        {
-            return Ok((FileStatus::Protected, 0));
-        }
-        let (status, _) = diagnose_file(path, &self.path);
-        if status != FileStatus::Ready {
-            return Ok((status, 0));
-        }
-        if matches!(self.action, CleanupAction::Recycle) {
-            crate::duplicate_recycle::move_to_recycle_bin(path)?;
-        } else {
-            remove_file_safe(path, meta.permissions())?;
-        }
-        Ok((FileStatus::Ready, meta.len()))
-    }
 }
 
 fn plan_cleanup(
@@ -762,14 +718,6 @@ fn plan_cleanup(
         }
     }
     (outcomes, targets, dirs)
-}
-
-fn remove_file_safe(path: &Path, mut perms: std::fs::Permissions) -> std::io::Result<()> {
-    if perms.readonly() {
-        perms.set_readonly(false);
-        let _ = std::fs::set_permissions(path, perms);
-    }
-    std::fs::remove_file(path)
 }
 
 fn empty_result(rule: &CleanupRule, applicable: bool) -> CleanupScanResult {
@@ -1738,23 +1686,18 @@ mod tests {
             std::env::temp_dir().join(format!("dismnext_recheck_{}.tmp", std::process::id()));
         fs::write(&path, b"keep").unwrap();
         let rules = [test_rule("test", &path, &[])];
-        let (_, targets, _) = plan_cleanup(
-            &rules,
-            &HashSet::from(["test"]),
-            &SystemInfo::collect(),
-            true,
-        );
-        assert_eq!(targets.len(), 1);
-        assert_eq!(targets[0].status, FileStatus::Ready);
+        let (plan, preview) =
+            ReviewedCleanup::prepare(&rules, &["test".to_string()], &SystemInfo::collect());
+        assert_eq!(preview.total_deleted_files, 1);
 
         let handle = fs::OpenOptions::new()
             .read(true)
             .share_mode(0)
             .open(&path)
             .unwrap();
-        let result = targets[0].apply(false).unwrap();
+        let result = plan.execute();
         drop(handle);
-        assert_eq!(result.0, FileStatus::Locked);
+        assert_eq!(result.outcomes[0].skipped_locked_files, 1);
         assert!(path.exists());
         fs::remove_file(&path).unwrap();
     }

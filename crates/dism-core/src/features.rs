@@ -1,11 +1,10 @@
 use crate::catalog::LocalizedText;
-use anyhow::{anyhow, Context, Result};
+use crate::maintenance::{run_system_command, MaintenanceProgress};
+use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
-use std::os::windows::process::CommandExt;
 use winreg::enums::{HKEY_LOCAL_MACHINE, KEY_READ};
 use winreg::RegKey;
 
-const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 const CBS_FEATURES_KEY: &str =
     r"SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\Notifications\OptionalFeatures";
 
@@ -79,6 +78,22 @@ pub fn list_optional_features() -> Vec<WindowsFeatureInfo> {
 /// Enables or disables a Windows Optional Feature via DISM (`dism.exe /Online`).
 /// Requires Administrator privileges.
 pub fn set_feature_enabled(feature_name: &str, enabled: bool) -> Result<FeatureToggleOutcome> {
+    set_feature_enabled_impl(feature_name, enabled, None)
+}
+
+pub fn set_feature_enabled_with_progress(
+    feature_name: &str,
+    enabled: bool,
+    progress: &MaintenanceProgress,
+) -> Result<FeatureToggleOutcome> {
+    set_feature_enabled_impl(feature_name, enabled, Some(progress))
+}
+
+fn set_feature_enabled_impl(
+    feature_name: &str,
+    enabled: bool,
+    progress: Option<&MaintenanceProgress>,
+) -> Result<FeatureToggleOutcome> {
     let trimmed = feature_name.trim();
     if trimmed.is_empty()
         || !trimmed
@@ -105,31 +120,13 @@ pub fn set_feature_enabled(feature_name: &str, enabled: bool) -> Result<FeatureT
         args.push(&feature_arg);
     }
 
-    let output = crate::system_tools::system32_command("dism.exe")?
-        .creation_flags(CREATE_NO_WINDOW)
-        .args(&args)
-        .output()
-        .context("Failed to execute dism.exe")?;
-
-    let stdout = crate::systasks::decode_cmd_output(&output.stdout);
-    let stderr = crate::systasks::decode_cmd_output(&output.stderr);
-    let combined = format!("{}\n{}", stdout.trim(), stderr.trim()).trim().to_string();
-    let code = output.status.code().unwrap_or(-1);
-
-    // DISM returns 0 (success) or 3010 (ERROR_SUCCESS_REBOOT_REQUIRED)
-    if code != 0 && code != 3010 {
-        return Err(anyhow!(
-            "dism.exe exited with code {}: {}",
-            code,
-            combined
-        ));
-    }
+    let result = run_system_command("dism.exe", &args, progress)?;
 
     Ok(FeatureToggleOutcome {
         name: trimmed.to_string(),
         enabled,
-        restart_required: code == 3010,
-        output: combined,
+        restart_required: result.code == 3010,
+        output: result.output,
     })
 }
 

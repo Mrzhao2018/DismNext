@@ -13,13 +13,13 @@ use winreg::enums::{
 };
 use winreg::{RegKey, RegValue};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SavedRegValue {
     pub vtype: String,
     pub bytes: Vec<u8>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SavedRegTree {
     pub values: BTreeMap<String, SavedRegValue>,
     pub subkeys: BTreeMap<String, SavedRegTree>,
@@ -39,6 +39,61 @@ pub enum SnapshotRecord {
         sam: u32,
         previous: Option<SavedRegTree>,
     },
+    MissingKey {
+        key: String,
+        sam: u32,
+    },
+    ShellRefresh(ShellRefresh),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "refresh", rename_all = "snake_case")]
+pub enum ShellRefresh {
+    Associations,
+    TraySettings,
+    TrayCommand,
+    StartMenu,
+}
+
+impl ShellRefresh {
+    pub(crate) fn from_action(action: &Action) -> Option<Self> {
+        let Action::ExplorerNotify {
+            notify_type,
+            msg,
+            w_param,
+            l_param,
+            cmd,
+            ..
+        } = action
+        else {
+            return None;
+        };
+        match notify_type.trim() {
+            "AssocChanged" => Some(Self::Associations),
+            "Custom"
+                if msg.as_deref() == Some("1A")
+                    && w_param.is_none()
+                    && l_param.as_deref() == Some("TraySettings") =>
+            {
+                Some(Self::TraySettings)
+            }
+            "Custom"
+                if msg.as_deref() == Some("111")
+                    && w_param.as_deref() == Some("#A220")
+                    && l_param.is_none() =>
+            {
+                Some(Self::TrayCommand)
+            }
+            "Cmd"
+                if cmd
+                    .as_deref()
+                    .is_some_and(crate::optimizer::is_start_menu_refresh) =>
+            {
+                Some(Self::StartMenu)
+            }
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -98,6 +153,7 @@ impl SnapshotManager {
         actions: &[Action],
     ) -> Result<Option<RegistrySnapshot>> {
         let mut records = Vec::new();
+        let mut refresh = Vec::new();
         for act in actions {
             match act {
                 Action::RegWrite {
@@ -105,8 +161,15 @@ impl SnapshotManager {
                     value,
                     wow64,
                     ..
+                } => {
+                    for sam in wow64_sam_list(wow64.as_deref()) {
+                        capture_missing_keys(&mut records, key, sam)?;
+                        if let Some(value) = value {
+                            records.push(capture_value_record(key, value, sam)?);
+                        }
+                    }
                 }
-                | Action::RegDelete {
+                Action::RegDelete {
                     key,
                     value,
                     wow64,
@@ -132,6 +195,7 @@ impl SnapshotManager {
                     ..
                 } => {
                     for sam in wow64_sam_list(wow64.as_deref()) {
+                        capture_missing_keys(&mut records, new_key, sam)?;
                         match value {
                             Some(vname) => {
                                 let dst_vname = new_value.as_deref().unwrap_or(vname);
@@ -148,7 +212,15 @@ impl SnapshotManager {
                 Action::SetServiceStart { name, .. } => {
                     let svc_key = format!(r"HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Services\{}", name);
                     for sam in wow64_sam_list(None) {
+                        capture_missing_keys(&mut records, &svc_key, sam)?;
                         records.push(capture_value_record(&svc_key, "Start", sam)?);
+                    }
+                }
+                Action::ExplorerNotify { .. } => {
+                    if let Some(notification) = ShellRefresh::from_action(act) {
+                        if !refresh.contains(&notification) {
+                            refresh.push(notification);
+                        }
                     }
                 }
                 _ => {}
@@ -158,6 +230,7 @@ impl SnapshotManager {
         if records.is_empty() {
             return Ok(None);
         }
+        records.extend(refresh.into_iter().map(SnapshotRecord::ShellRefresh));
 
         std::fs::create_dir_all(&self.dir)
             .with_context(|| format!("Failed to create snapshot directory {}", self.dir.display()))?;
@@ -220,23 +293,45 @@ impl SnapshotManager {
                 "该快照包含系统级注册表项 (HKLM/HKU)，回滚需要管理员权限。请先点击顶部“一键提权为管理员”后再执行回滚。 / Restoring system-level registry snapshots requires Administrator privileges."
             ));
         }
-        // Apply records in reverse order to accurately undo sequences like RegMove
-        for rec in snap.records.iter().rev() {
-            restore_record(rec).with_context(|| match rec {
-                SnapshotRecord::ValueState {
-                    key, value_name, ..
-                } => {
-                    format!("Failed to restore registry value {key}\\{value_name}")
-                }
-                SnapshotRecord::KeyTreeState { key, .. } => {
-                    format!("Failed to restore registry tree {key}")
-                }
-            })?;
+        self.restore_records(&snap)?;
+        for record in &snap.records {
+            if let SnapshotRecord::ShellRefresh(notification) = record {
+                crate::optimizer::restore_shell_refresh(notification)?;
+            }
         }
         snap.restored = true;
         let path = self.snapshot_path(id);
         write_snapshot(&path, &snap)?;
         Ok(snap)
+    }
+
+    pub(crate) fn restore_records(&self, snap: &RegistrySnapshot) -> Result<()> {
+        for record in snap
+            .records
+            .iter()
+            .rev()
+            .filter(|record| !matches!(record, SnapshotRecord::ShellRefresh(_)))
+        {
+            if record_changed(record)? {
+                restore_record(record)
+                    .with_context(|| format!("Failed to restore snapshot {}", snap.id))?;
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn has_changes(&self, snap: &RegistrySnapshot) -> Result<bool> {
+        for record in &snap.records {
+            if record_changed(record)? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    pub(crate) fn discard(&self, snap: &RegistrySnapshot) -> Result<()> {
+        missing_is_none(std::fs::remove_file(self.snapshot_path(&snap.id)))?;
+        Ok(())
     }
 
     fn snapshot_path(&self, id: &str) -> PathBuf {
@@ -289,6 +384,48 @@ fn capture_value_record(key: &str, value_name: &str, sam: u32) -> Result<Snapsho
         value_name: value_name.to_string(),
         sam,
         previous: prev,
+    })
+}
+
+fn capture_missing_keys(records: &mut Vec<SnapshotRecord>, key: &str, sam: u32) -> Result<()> {
+    let mut missing = Vec::new();
+    let mut candidate = key.trim().trim_end_matches('\\');
+    while let Some((parent, _)) = candidate.rsplit_once('\\') {
+        let (hive, sub) = parse_reg_path(candidate)
+            .ok_or_else(|| anyhow!("Invalid registry key: {candidate}"))?;
+        if missing_is_none(RegKey::predef(hive).open_subkey_with_flags(sub, KEY_READ | sam))?
+            .is_some()
+        {
+            break;
+        }
+        missing.push(SnapshotRecord::MissingKey {
+            key: candidate.to_string(),
+            sam,
+        });
+        candidate = parent;
+    }
+    records.extend(missing.into_iter().rev());
+    Ok(())
+}
+
+fn record_changed(record: &SnapshotRecord) -> Result<bool> {
+    Ok(match record {
+        SnapshotRecord::ValueState {
+            key,
+            value_name,
+            sam,
+            previous,
+        } => read_saved_value(key, value_name, *sam)? != *previous,
+        SnapshotRecord::KeyTreeState { key, sam, previous } => {
+            read_saved_tree(key, *sam)? != *previous
+        }
+        SnapshotRecord::MissingKey { key, sam } => {
+            let (hive, sub) =
+                parse_reg_path(key).ok_or_else(|| anyhow!("Invalid registry key: {key}"))?;
+            missing_is_none(RegKey::predef(hive).open_subkey_with_flags(sub, KEY_READ | *sam))?
+                .is_some()
+        }
+        SnapshotRecord::ShellRefresh(_) => false,
     })
 }
 
@@ -419,6 +556,20 @@ fn restore_record(rec: &SnapshotRecord) -> Result<()> {
                 write_tree_recursive(&k, tree, *sam)?;
             }
         }
+        SnapshotRecord::MissingKey { key, sam } => {
+            let (hive, sub) = parse_reg_path(key)
+                .filter(|(_, sub)| !sub.is_empty())
+                .ok_or_else(|| anyhow!("Invalid registry key: {key}"))?;
+            let root = RegKey::predef(hive);
+            if let Some(open) = missing_is_none(root.open_subkey_with_flags(&sub, KEY_READ | *sam))?
+            {
+                let info = open.query_info()?;
+                if info.values == 0 && info.sub_keys == 0 {
+                    missing_is_none(root.delete_subkey_with_flags(&sub, *sam))?;
+                }
+            }
+        }
+        SnapshotRecord::ShellRefresh(_) => {}
     }
     Ok(())
 }
@@ -481,7 +632,10 @@ pub fn snapshot_requires_admin(snap: &RegistrySnapshot) -> bool {
     snap.records.iter().any(|rec| {
         let key = match rec {
             SnapshotRecord::ValueState { key, .. } => key,
-            SnapshotRecord::KeyTreeState { key, .. } => key,
+            SnapshotRecord::KeyTreeState { key, .. } | SnapshotRecord::MissingKey { key, .. } => {
+                key
+            }
+            SnapshotRecord::ShellRefresh(_) => return false,
         };
         matches!(
             parse_reg_path(key),

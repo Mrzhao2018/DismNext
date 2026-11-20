@@ -120,54 +120,60 @@ pub fn reg_value_to_u64(val: &RegValue) -> Option<u64> {
 /// Returns `None` if an inline lookup (`?GetRegSz`, `?GetFileVersion`, `?GetIniData`) fails/is empty,
 /// preventing dangerous fallback paths like `\..\` or `DwnlData\`.
 pub fn expand_expression(input: &str, root_ctx: Option<&str>) -> Option<String> {
-    let mut s = expand_env_vars(input, root_ctx);
-
-    // Evaluate inline ?Func(...) expressions from left to right.
-    loop {
-        let Some(q_idx) = find_inline_func_start(&s) else {
-            break;
-        };
-        let rest = &s[q_idx + 1..];
-        let Some(open_paren) = rest.find('(') else {
-            break;
-        };
-        let fn_name = &rest[..open_paren];
-        let after_open = &rest[open_paren + 1..];
-        let Some(close_paren) = after_open.find(')') else {
-            break;
-        };
-        let args_str = &after_open[..close_paren];
-        let args: Vec<&str> = if args_str.trim().is_empty() {
-            Vec::new()
-        } else {
-            args_str.split(',').map(|a| a.trim()).collect()
-        };
-
-        let val = eval_inline_func(fn_name, &args)?;
-        if val.is_empty() {
+    let mut rest = input;
+    let mut expanded = String::with_capacity(input.len());
+    while let Some(start) = find_inline_func_start(rest) {
+        let prefix = &rest[..start];
+        expanded.push_str(&expand_env_vars(prefix, root_ctx));
+        if prefix.to_ascii_lowercase().ends_with("%root%")
+            && root_ctx.is_some()
+            && !expanded.ends_with(['\\', '/'])
+        {
+            expanded.push('\\');
+        }
+        let call = &rest[start + 1..];
+        let (name, body) = call.split_once('(')?;
+        let mut depth = 0;
+        let close = body.char_indices().find_map(|(index, ch)| match ch {
+            '(' => {
+                depth += 1;
+                None
+            }
+            ')' if depth == 0 => Some(index),
+            ')' => {
+                depth -= 1;
+                None
+            }
+            _ => None,
+        })?;
+        let args: Vec<_> = body[..close]
+            .split(',')
+            .map(|arg| expand_env_vars(arg.trim(), root_ctx))
+            .collect();
+        let args: Vec<_> = args.iter().map(String::as_str).collect();
+        let value = eval_inline_func(name, &args)?;
+        if value.is_empty() {
             return None;
         }
-        let end_idx = q_idx + 1 + open_paren + 1 + close_paren + 1;
-        s = format!("{}{}{}", &s[..q_idx], val, &s[end_idx..]);
+        expanded.push_str(&value);
+        rest = &body[close + 1..];
     }
-
-    Some(s)
+    expanded.push_str(&expand_env_vars(rest, root_ctx));
+    Some(expanded)
 }
 
 fn find_inline_func_start(s: &str) -> Option<usize> {
-    for fn_prefix in [
+    [
         "?GetRegSz(",
         "?GetFileVersion(",
         "?GetIniData(",
         "?GetNewestChild(",
         "?GetLocaleName(",
         "?ColorDialog(",
-    ] {
-        if let Some(idx) = s.find(fn_prefix) {
-            return Some(idx);
-        }
-    }
-    None
+    ]
+    .iter()
+    .filter_map(|prefix| s.find(prefix))
+    .min()
 }
 
 fn eval_inline_func(name: &str, args: &[&str]) -> Option<String> {
@@ -835,6 +841,32 @@ mod tests {
         }
         assert!(wildcard_match_ci("*.dmp", "Crash123.DMP"));
         assert!(!wildcard_match_ci("*.dmp", "Crash123.log"));
+    }
+
+    #[test]
+    fn inline_lookup_accepts_parentheses_and_commas_in_paths() {
+        let root = std::env::temp_dir().join(format!(
+            "dismnext-inline-{} (x86), test)",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(root.join("4.2")).unwrap();
+        std::fs::write(root.join("config.ini"), "[Common]\nVersion=4.2\n").unwrap();
+        let context = root.to_str().unwrap();
+        assert_eq!(
+            expand_expression("?GetNewestChild(%Root%)", Some(context)).as_deref(),
+            Some("4.2")
+        );
+        assert_eq!(
+            expand_expression(
+                "?GetIniData(%Root%config.ini,Common,Version)",
+                Some(context)
+            )
+            .as_deref(),
+            Some("4.2")
+        );
+        std::fs::remove_dir(root.join("4.2")).unwrap();
+        std::fs::remove_file(root.join("config.ini")).unwrap();
+        std::fs::remove_dir(root).unwrap();
     }
 
     #[test]

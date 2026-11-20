@@ -1,4 +1,5 @@
 use crate::file_stamp::{delete_open_target, open_for_verification};
+use crate::maintenance::{run_system_command, MaintenanceProgress};
 use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -133,6 +134,23 @@ pub fn create_restore_point(description: &str) -> Result<String> {
 
 /// Executes a targeted Windows rescue / repair operation cleanly without hidden global side effects.
 pub fn run_rescue_action(action_id: &str) -> Result<RescueActionOutcome> {
+    run_rescue_action_impl(action_id, None)
+}
+
+pub fn run_rescue_action_with_progress(
+    action_id: &str,
+    progress: &MaintenanceProgress,
+) -> Result<RescueActionOutcome> {
+    run_rescue_action_impl(action_id, Some(progress))
+}
+
+fn run_rescue_action_impl(
+    action_id: &str,
+    progress: Option<&MaintenanceProgress>,
+) -> Result<RescueActionOutcome> {
+    if let Some(progress) = progress {
+        progress.check()?;
+    }
     let sys = crate::sysinfo::SystemInfo::collect();
 
     match action_id.trim() {
@@ -177,11 +195,9 @@ pub fn run_rescue_action(action_id: &str) -> Result<RescueActionOutcome> {
         }
         "flush_dns_network" => {
             let mut logs = Vec::new();
-            logs.push(exec_simple("ipconfig.exe", &["/flushdns"])?);
+            logs.push(exec_simple("ipconfig.exe", &["/flushdns"], progress)?);
             if sys.is_admin {
-                if let Ok(ws) = exec_simple("netsh.exe", &["winsock", "reset"]) {
-                    logs.push(ws);
-                }
+                logs.push(exec_simple("netsh.exe", &["winsock", "reset"], progress)?);
             } else {
                 logs.push("Skipped `netsh winsock reset` (standard user mode; DNS cache flushed).".to_string());
             }
@@ -195,13 +211,13 @@ pub fn run_rescue_action(action_id: &str) -> Result<RescueActionOutcome> {
         "reset_windows_update" => {
             require_admin(&sys, "Resetting Windows Update cache")?;
             let dl_dir = crate::system_tools::windows_dir()?.join(r"SoftwareDistribution\Download");
-            let _ = exec_simple("net.exe", &["stop", "wuauserv"]);
-            let _ = exec_simple("net.exe", &["stop", "bits"]);
+            let _ = exec_simple("net.exe", &["stop", "wuauserv"], None);
+            let _ = exec_simple("net.exe", &["stop", "bits"], None);
 
             let deleted = purge_unlocked_contents(&dl_dir);
 
-            let _ = exec_simple("net.exe", &["start", "bits"]);
-            let _ = exec_simple("net.exe", &["start", "wuauserv"]);
+            let _ = exec_simple("net.exe", &["start", "bits"], None);
+            let _ = exec_simple("net.exe", &["start", "wuauserv"], None);
             let deleted = deleted?;
 
             Ok(RescueActionOutcome {
@@ -218,9 +234,9 @@ pub fn run_rescue_action(action_id: &str) -> Result<RescueActionOutcome> {
         "clear_print_spooler" => {
             require_admin(&sys, "Clearing Print Spooler queue")?;
             let spool_dir = crate::system_tools::system32_dir()?.join(r"spool\PRINTERS");
-            let _ = exec_simple("net.exe", &["stop", "Spooler"]);
+            let _ = exec_simple("net.exe", &["stop", "Spooler"], None);
             let deleted = purge_unlocked_contents(&spool_dir);
-            let _ = exec_simple("net.exe", &["start", "Spooler"]);
+            let _ = exec_simple("net.exe", &["start", "Spooler"], None);
             let deleted = deleted?;
             Ok(RescueActionOutcome {
                 action_id: action_id.to_string(),
@@ -234,7 +250,11 @@ pub fn run_rescue_action(action_id: &str) -> Result<RescueActionOutcome> {
         }
         "dism_check_health" => {
             require_admin(&sys, "DISM /CheckHealth")?;
-            let out = exec_simple("dism.exe", &["/Online", "/Cleanup-Image", "/CheckHealth"])?;
+            let out = exec_simple(
+                "dism.exe",
+                &["/Online", "/Cleanup-Image", "/CheckHealth"],
+                progress,
+            )?;
             Ok(RescueActionOutcome {
                 action_id: action_id.to_string(),
                 success: true,
@@ -244,7 +264,11 @@ pub fn run_rescue_action(action_id: &str) -> Result<RescueActionOutcome> {
         }
         "dism_restore_health" => {
             require_admin(&sys, "DISM /RestoreHealth")?;
-            let out = exec_simple("dism.exe", &["/Online", "/Cleanup-Image", "/RestoreHealth"])?;
+            let out = exec_simple(
+                "dism.exe",
+                &["/Online", "/Cleanup-Image", "/RestoreHealth"],
+                progress,
+            )?;
             Ok(RescueActionOutcome {
                 action_id: action_id.to_string(),
                 success: true,
@@ -254,7 +278,7 @@ pub fn run_rescue_action(action_id: &str) -> Result<RescueActionOutcome> {
         }
         "sfc_scannow" => {
             require_admin(&sys, "SFC /scannow")?;
-            let out = exec_simple("sfc.exe", &["/scannow"])?;
+            let out = exec_simple("sfc.exe", &["/scannow"], progress)?;
             Ok(RescueActionOutcome {
                 action_id: action_id.to_string(),
                 success: true,
@@ -276,25 +300,20 @@ fn require_admin(sys: &crate::sysinfo::SystemInfo, label: &str) -> Result<()> {
     Ok(())
 }
 
-fn exec_simple(program: &str, args: &[&str]) -> Result<String> {
-    let output = crate::system_tools::system32_command(program)?
-        .creation_flags(CREATE_NO_WINDOW)
-        .args(args)
-        .output()
-        .with_context(|| format!("Failed to launch {}", program))?;
-
-    let stdout = crate::systasks::decode_cmd_output(&output.stdout);
-    let stderr = crate::systasks::decode_cmd_output(&output.stderr);
-    let combined = format!("{}\n{}", stdout.trim(), stderr.trim()).trim().to_string();
-    let code = output.status.code().unwrap_or(-1);
-    if !output.status.success() && code != 3010 {
-        return Err(anyhow!("{} exited with code {}: {}", program, code, combined));
-    }
-    Ok(if combined.is_empty() {
-        format!("{} completed cleanly (code {}).", program, code)
+fn exec_simple(
+    program: &str,
+    args: &[&str],
+    progress: Option<&MaintenanceProgress>,
+) -> Result<String> {
+    let result = run_system_command(program, args, progress)?;
+    if result.output.is_empty() {
+        Ok(format!(
+            "{program} completed cleanly (code {}).",
+            result.code
+        ))
     } else {
-        combined
-    })
+        Ok(result.output)
+    }
 }
 
 fn purge_unlocked_contents(dir: &Path) -> Result<usize> {

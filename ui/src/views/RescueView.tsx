@@ -1,3 +1,4 @@
+import { useMaintenance } from '../MaintenanceJobs';
 import React, { useEffect, useState } from 'react';
 import {
   Badge,
@@ -284,6 +285,7 @@ const WimInspectionCard: React.FC<{ lang: Lang }> = ({ lang }) => {
 };
 
 export const RescueView: React.FC<Props> = ({ lang, isAdmin }) => {
+  const { active: activeMaintenance, run: runMaintenance } = useMaintenance();
   const styles = useStyles();
   const [points, setPoints] = useState<RestorePointInfo[]>([]);
   const [loadingPoints, setLoadingPoints] = useState(true);
@@ -333,7 +335,8 @@ export const RescueView: React.FC<Props> = ({ lang, isAdmin }) => {
     setErrorMsg(null);
     setOutputLog(null);
     try {
-      const res = await api.runRescueAction(card.id);
+      const res = await runMaintenance({ kind: 'rescue', action_id: card.id }, lang === 'zh' ? card.zhTitle : card.enTitle);
+      if (!res) return;
       setOutputLog(
         `${res.output}${res.requires_restart ? (lang === 'zh' ? '\n（建议稍后重启电脑以完全生效）' : '\n(Restart recommended)') : ''}`
       );
@@ -480,7 +483,7 @@ export const RescueView: React.FC<Props> = ({ lang, isAdmin }) => {
             <Button
               appearance="outline"
               icon={runningId === card.id ? <Spinner size="tiny" /> : <PlayRegular />}
-              disabled={Boolean(runningId) || creatingPoint}
+              disabled={Boolean(activeMaintenance) || creatingPoint}
               onClick={() => {
                 if (card.heavyConfirm) setPendingCard(card);
                 else void handleRunAction(card);

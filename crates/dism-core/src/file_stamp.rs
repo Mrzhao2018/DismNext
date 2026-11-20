@@ -4,14 +4,24 @@ use std::io;
 use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
 use std::os::windows::io::AsRawHandle;
 use std::path::Path;
-use windows_sys::Win32::Storage::FileSystem::{
-    FileBasicInfo, FileDispositionInfoEx, GetFileInformationByHandleEx, SetFileInformationByHandle,
-    FILE_ATTRIBUTE_REPARSE_POINT, FILE_BASIC_INFO, FILE_DISPOSITION_FLAG_DELETE,
-    FILE_DISPOSITION_FLAG_FORCE_IMAGE_SECTION_CHECK,
-    FILE_DISPOSITION_FLAG_IGNORE_READONLY_ATTRIBUTE, FILE_DISPOSITION_FLAG_POSIX_SEMANTICS,
-    FILE_DISPOSITION_INFO_EX, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
-    FILE_READ_ATTRIBUTES,
+use windows_sys::Win32::Foundation::{
+    ERROR_INVALID_FUNCTION, ERROR_INVALID_PARAMETER, ERROR_NOT_SUPPORTED,
 };
+use windows_sys::Win32::Storage::FileSystem::{
+    FileBasicInfo, FileDispositionInfo, FileDispositionInfoEx, GetFileInformationByHandleEx,
+    SetFileInformationByHandle, FILE_ATTRIBUTE_REPARSE_POINT, FILE_BASIC_INFO,
+    FILE_DISPOSITION_FLAG_DELETE, FILE_DISPOSITION_FLAG_FORCE_IMAGE_SECTION_CHECK,
+    FILE_DISPOSITION_FLAG_IGNORE_READONLY_ATTRIBUTE, FILE_DISPOSITION_FLAG_POSIX_SEMANTICS,
+    FILE_DISPOSITION_INFO, FILE_DISPOSITION_INFO_EX, FILE_FLAG_BACKUP_SEMANTICS,
+    FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES,
+};
+
+pub(crate) fn unsupported_file_info(error: &io::Error) -> bool {
+    matches!(
+        error.raw_os_error().map(|code| code as u32),
+        Some(ERROR_INVALID_FUNCTION | ERROR_INVALID_PARAMETER | ERROR_NOT_SUPPORTED)
+    )
+}
 
 pub(crate) fn open_for_verification(
     path: &Path,
@@ -61,11 +71,18 @@ impl TargetStamp {
         let contents = if directory {
             None
         } else {
-            let info = read_basic_info(file)?;
+            let (written, changed) = match read_basic_info(file) {
+                Ok(info) => (info.LastWriteTime, info.ChangeTime),
+                Err(error) if unsupported_file_info(&error) => {
+                    let written = metadata.last_write_time() as i64;
+                    (written, written)
+                }
+                Err(error) => return Err(error),
+            };
             Some(FileRevision {
                 size: metadata.len(),
-                written: info.LastWriteTime,
-                changed: info.ChangeTime,
+                written,
+                changed,
             })
         };
         Ok(Self {
@@ -122,9 +139,46 @@ pub(crate) fn delete_open_target(file: &File, directory: bool) -> io::Result<()>
             std::mem::size_of_val(&disposition) as u32,
         )
     };
+    if ok != 0 {
+        return Ok(());
+    }
+    let error = io::Error::last_os_error();
+    if !unsupported_file_info(&error) {
+        return Err(error);
+    }
+    delete_open_target_legacy(file)
+}
+
+fn delete_open_target_legacy(file: &File) -> io::Result<()> {
+    let disposition = FILE_DISPOSITION_INFO { DeleteFile: 1 };
+    let ok = unsafe {
+        SetFileInformationByHandle(
+            file.as_raw_handle(),
+            FileDispositionInfo,
+            (&disposition as *const FILE_DISPOSITION_INFO).cast(),
+            std::mem::size_of_val(&disposition) as u32,
+        )
+    };
     if ok == 0 {
         Err(io::Error::last_os_error())
     } else {
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use windows_sys::Win32::Storage::FileSystem::DELETE;
+
+    #[test]
+    fn legacy_disposition_deletes_the_open_file_on_close() {
+        let path =
+            std::env::temp_dir().join(format!("dismnext-legacy-delete-{}", std::process::id()));
+        std::fs::write(&path, b"fixture").unwrap();
+        let file = open_for_verification(&path, false, DELETE, 0).unwrap();
+        delete_open_target_legacy(&file).unwrap();
+        drop(file);
+        assert!(!path.exists());
     }
 }

@@ -1,3 +1,4 @@
+import { useMaintenance } from '../MaintenanceJobs';
 import React, { useEffect, useState } from 'react';
 import {
   Badge,
@@ -156,6 +157,7 @@ export const DashboardView: React.FC<Props> = ({
   onNavigate,
   onSystemUpdated,
 }) => {
+  const { active: activeMaintenance, run: runMaintenance } = useMaintenance();
   const styles = useStyles();
   const [loadingStats, setLoadingStats] = useState(true);
   const [driverPayload, setDriverPayload] = useState<DriverListPayload | null>(null);
@@ -222,7 +224,10 @@ export const DashboardView: React.FC<Props> = ({
     setTaskRunning(true);
     setTaskFeedback(null);
     try {
-      const { outcome, system } = await api.runSysTask('component_cleanup');
+      const result = await runMaintenance({ kind: 'system_task', task_id: 'component_cleanup' },
+        lang === 'zh' ? '组件存储清理' : 'Component Store Cleanup');
+      if (!result) return;
+      const { outcome, system } = result;
       setSysTaskStatus(outcome.status);
       onSystemUpdated(system);
       setTaskFeedback(outcome.output);
@@ -554,7 +559,7 @@ export const DashboardView: React.FC<Props> = ({
               style={{ flex: 1 }}
               appearance="outline"
               icon={taskRunning ? <Spinner size="tiny" /> : <PlayRegular />}
-              disabled={taskRunning}
+              disabled={taskRunning || Boolean(activeMaintenance)}
               onClick={() => setConfirmCleanupOpen(true)}
             >
               {lang === 'zh' ? 'WinSxS 清理' : 'WinSxS Cleanup'}

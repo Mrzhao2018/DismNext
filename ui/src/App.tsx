@@ -32,6 +32,7 @@ import {
 } from './api';
 import { DashboardTargetTab, DashboardView } from './views/DashboardView';
 import { ScanStatusBar } from './ScanStatusBar';
+import { MaintenanceProvider, MaintenanceStatusBar } from './MaintenanceJobs';
 import { useScanJob } from './useScanJob';
 
 const SpaceRecycleView = lazy(() =>
@@ -449,6 +450,7 @@ const AppShell: React.FC<{
         </header>
 
         <section className={styles.contentArea}>
+          <MaintenanceStatusBar lang={lang} />
           {(scanning || tab === 'dashboard' || tab === 'cleanup') && (
             <ScanStatusBar active={cleanupScan.active} cancelled={cleanupScan.cancelled} cancel={cleanupScan.cancel} lang={lang} />
           )}
@@ -549,7 +551,9 @@ export default function App() {
   const [dark, setDark] = useState(false);
   return (
     <FluentProvider theme={dark ? webDarkTheme : webLightTheme}>
-      <AppShell dark={dark} onToggleTheme={() => setDark((d) => !d)} />
+      <MaintenanceProvider>
+        <AppShell dark={dark} onToggleTheme={() => setDark((d) => !d)} />
+      </MaintenanceProvider>
     </FluentProvider>
   );
 }

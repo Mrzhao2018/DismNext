@@ -1,3 +1,4 @@
+import { useMaintenance } from '../MaintenanceJobs';
 import React, { useMemo, useState } from 'react';
 import {
   Badge,
@@ -328,6 +329,7 @@ export const SpaceRecycleView: React.FC<Props> = ({
   onExecuted,
   onSystemTaskDone,
 }) => {
+  const { active: activeMaintenance, run: runMaintenance } = useMaintenance();
   const styles = useStyles();
   const [search, setSearch] = useState('');
   const deferredSearch = React.useDeferredValue(search);
@@ -499,7 +501,9 @@ export const SpaceRecycleView: React.FC<Props> = ({
     setErrorMsg(null);
     setTaskNotice(null);
     try {
-      const { outcome, system } = await api.runSysTask(taskId);
+      const result = await runMaintenance({ kind: 'system_task', task_id: taskId }, sysTaskDescription(taskId).title);
+      if (!result) return;
+      const { outcome, system } = result;
       setTaskNotice(outcome.output || (lang === 'zh' ? '系统任务执行完成' : 'Task completed'));
       if (activeId) {
         const refreshed = await api.previewCleanup(activeId);
@@ -893,7 +897,7 @@ export const SpaceRecycleView: React.FC<Props> = ({
                         size="small"
                         appearance="primary"
                         icon={taskRunning === 'component_cleanup' ? <Spinner size="tiny" /> : <PlayRegular />}
-                        disabled={Boolean(taskRunning)}
+                        disabled={Boolean(activeMaintenance)}
                         onClick={() => setPendingSysTask('component_cleanup')}
                       >
                         {lang === 'zh' ? '执行 DISM 组件存储清理' : 'Run DISM /StartComponentCleanup'}
@@ -905,7 +909,7 @@ export const SpaceRecycleView: React.FC<Props> = ({
                           size="small"
                           appearance="primary"
                           icon={taskRunning === 'compact_os_enable' ? <Spinner size="tiny" /> : <PlayRegular />}
-                          disabled={Boolean(taskRunning)}
+                          disabled={Boolean(activeMaintenance)}
                           onClick={() => setPendingSysTask('compact_os_enable')}
                         >
                           {lang === 'zh' ? '启用 CompactOS 系统压缩' : 'Enable CompactOS'}
@@ -913,7 +917,7 @@ export const SpaceRecycleView: React.FC<Props> = ({
                         <Button
                           size="small"
                           appearance="outline"
-                          disabled={Boolean(taskRunning)}
+                          disabled={Boolean(activeMaintenance)}
                           onClick={() => setPendingSysTask('compact_os_disable')}
                         >
                           {lang === 'zh' ? '关闭 CompactOS 压缩' : 'Disable CompactOS'}
@@ -925,7 +929,7 @@ export const SpaceRecycleView: React.FC<Props> = ({
                         size="small"
                         appearance="primary"
                         icon={taskRunning === 'restore_point_cleanup' ? <Spinner size="tiny" /> : <PlayRegular />}
-                        disabled={Boolean(taskRunning)}
+                        disabled={Boolean(activeMaintenance)}
                         onClick={() => setPendingSysTask('restore_point_cleanup')}
                       >
                         {lang === 'zh' ? '删除最旧系统还原点 (VSS)' : 'Delete Oldest Restore Point'}
@@ -936,7 +940,7 @@ export const SpaceRecycleView: React.FC<Props> = ({
                         size="small"
                         appearance="primary"
                         icon={taskRunning === 'driver_cleanup' ? <Spinner size="tiny" /> : <PlayRegular />}
-                        disabled={Boolean(taskRunning)}
+                        disabled={Boolean(activeMaintenance)}
                         onClick={() => setPendingSysTask('driver_cleanup')}
                       >
                         {lang === 'zh' ? '一键卸载全部过期重复驱动' : 'Clean Outdated Drivers'}

@@ -195,6 +195,17 @@ try {
         -TimeoutSec 10 -SkipHttpErrorCheck
     if ($oversized.StatusCode -ne 413) { throw 'The portable API did not enforce the request body limit.' }
     Write-Output 'Standalone EXE served embedded assets and enforced API session authentication.'
+    $job = Invoke-CleanupPost "$baseUrl/api/maintenance/start" @{ kind = 'rescue'; action_id = 'smoke-invalid-action' }
+    $deadline = [DateTime]::UtcNow.AddSeconds(10)
+    do {
+        $status = Invoke-RestMethod -Uri "$baseUrl/api/maintenance/status?id=$($job.id)" -Headers $sessionHeaders -TimeoutSec 5
+        if ($status.state -ne 'running') { break }
+        Start-Sleep -Milliseconds 100
+    } while ([DateTime]::UtcNow -lt $deadline)
+    if ($status.state -ne 'failed' -or $status.error -notmatch 'Unknown rescue action') {
+        throw 'The portable host did not report the maintenance worker failure.'
+    }
+    Write-Output 'Packaged desktop reported a maintenance worker failure through the job API.'
     if ($VerifyCleanup) {
         Test-CleanupReview $baseUrl $scratch $files
     }

@@ -6,7 +6,7 @@ use crate::evaluator::{
     reg_value_to_u32, reg_value_to_u64, wow64_sam_list,
 };
 use crate::snapshot::{
-    read_tree_recursive, split_parent_leaf, write_tree_recursive, RegistrySnapshot, SnapshotManager,
+    read_tree_recursive, split_parent_leaf, write_tree_recursive, RegistrySnapshot, ShellRefresh, SnapshotManager,
 };
 use crate::sysinfo::SystemInfo;
 use anyhow::{anyhow, Context, Result};
@@ -198,44 +198,52 @@ pub fn get_optimization_presets() -> Vec<OptimizationPreset> {
     ]
 }
 
-/// Applies multiple optimization entries sequentially, creating snapshots for each modified rule.
+/// Applies a batch with one pre-change snapshot and rolls back registry changes on failure.
 pub fn apply_optimization_batch(
     groups: &[OptimizationGroup],
     entries: &[OptimizationProfileEntry],
     snapshot_mgr: &SnapshotManager,
 ) -> Result<BatchApplyOutcome> {
-    let mut applied_count = 0usize;
-    let mut snapshots_created = 0usize;
-    let mut warnings = Vec::new();
-
+    let mut actions = Vec::new();
     for entry in entries {
-        match apply_optimization(
-            groups,
-            &entry.item_id,
-            entry.scope,
-            entry.value.clone(),
-            snapshot_mgr,
-        ) {
-            Ok(outcome) => {
-                applied_count += 1;
-                if outcome.snapshot.is_some() {
-                    snapshots_created += 1;
-                }
-                for w in outcome.warnings {
-                    warnings.push(format!("{}: {}", entry.item_id, w));
-                }
-            }
-            Err(e) => {
-                warnings.push(format!("{}: {}", entry.item_id, e));
-            }
-        }
+        let (_, item_actions, _, _) =
+            resolve_apply(groups, &entry.item_id, entry.scope, &entry.value)
+                .with_context(|| format!("Invalid batch entry {}", entry.item_id))?;
+        anyhow::ensure!(
+            item_actions.iter().all(is_batch_action),
+            "Batch entry {} includes an action that cannot be rolled back",
+            entry.item_id
+        );
+        actions.extend_from_slice(item_actions);
     }
 
+    let _mutation = snapshot_mgr.lock_mutation()?;
+    let snapshot = snapshot_mgr.capture_before_actions(
+        "batch",
+        &LocalizedText {
+            zh: "批量系统优化".into(),
+            en: "Optimization batch".into(),
+        },
+        "batch",
+        &format!("{} optimization settings", entries.len()),
+        &actions,
+    )?;
+    let (snapshot, warnings) = apply_captured_actions(&actions, snapshot_mgr, snapshot)?;
     Ok(BatchApplyOutcome {
-        applied_count,
-        snapshots_created,
+        applied_count: entries.len(),
+        snapshots_created: usize::from(snapshot.is_some()),
         warnings,
     })
+}
+
+fn is_batch_action(action: &Action) -> bool {
+    matches!(
+        action,
+        Action::RegWrite { fun: false, .. }
+            | Action::RegMove { .. }
+            | Action::RegDelete { .. }
+            | Action::SetServiceStart { .. }
+    ) || ShellRefresh::from_action(action).is_some()
 }
 
 /// Exports the active non-default optimization settings into a portable JSON profile.
@@ -275,6 +283,10 @@ pub fn export_optimization_profile(
         }
     }
 
+    entries.retain(|entry| {
+        resolve_apply(groups, &entry.item_id, entry.scope, &entry.value)
+            .is_ok_and(|(_, actions, _, _)| actions.iter().all(is_batch_action))
+    });
     OptimizationProfile {
         name: "DismNext Custom Optimization Profile".to_string(),
         created_at: chrono::Local::now().to_rfc3339(),
@@ -293,7 +305,7 @@ pub fn evaluate_all_groups(
             let items: Vec<OptimizationItemStatus> = g
                 .items
                 .par_iter()
-                .filter(|it| eval_condition(&it.applicable, sys))
+                .filter(|it| !item_requires_interaction(it) && eval_condition(&it.applicable, sys))
                 .map(|it| OptimizationItemStatus {
                     id: it.id.clone(),
                     name: it.name.clone(),
@@ -358,6 +370,62 @@ pub fn apply_optimization(
     value: ApplyValue,
     snapshot_mgr: &SnapshotManager,
 ) -> Result<ApplyOutcome> {
+    let (item, actions, restart_hint, action_summary) =
+        resolve_apply(groups, item_id, scope, &value)?;
+    let _mutation = snapshot_mgr.lock_mutation()?;
+    let snapshot = snapshot_mgr.capture_before_actions(
+        item_id,
+        &item.name,
+        scope.as_str(),
+        &action_summary,
+        actions,
+    )?;
+    let (snapshot, warnings) = apply_captured_actions(actions, snapshot_mgr, snapshot)?;
+    Ok(ApplyOutcome {
+        item_id: item_id.to_string(),
+        scope,
+        snapshot,
+        restart_hint,
+        warnings,
+    })
+}
+
+fn interactive_action(action: &Action) -> bool {
+    matches!(action, Action::RegWrite { fun: true, .. })
+}
+
+fn item_requires_interaction(item: &OptimizationItem) -> bool {
+    [
+        item.current.as_ref(),
+        item.default.as_ref(),
+        item.system.as_ref(),
+    ]
+    .into_iter()
+    .flatten()
+    .any(|scope| match scope {
+        OptimizationScope::CheckBox {
+            true_actions,
+            false_actions,
+            ..
+        } => true_actions
+            .iter()
+            .chain(false_actions)
+            .any(interactive_action),
+        OptimizationScope::Combo { dropdowns } => dropdowns
+            .iter()
+            .flat_map(|option| &option.actions)
+            .any(interactive_action),
+    })
+}
+
+type ResolvedApply<'a> = (&'a OptimizationItem, &'a [Action], Option<String>, String);
+
+fn resolve_apply<'a>(
+    groups: &'a [OptimizationGroup],
+    item_id: &str,
+    scope: ScopeName,
+    value: &ApplyValue,
+) -> Result<ResolvedApply<'a>> {
     let item = find_item(groups, item_id)
         .ok_or_else(|| anyhow!("Optimization item '{}' not found", item_id))?;
 
@@ -368,7 +436,7 @@ pub fn apply_optimization(
     }
     .ok_or_else(|| anyhow!("Item '{}' does not support scope {:?}", item_id, scope))?;
 
-    let (actions, restart_hint, action_summary) = match (scope_def, &value) {
+    let (actions, restart_hint, action_summary) = match (scope_def, value) {
         (
             OptimizationScope::CheckBox {
                 true_actions,
@@ -398,29 +466,67 @@ pub fn apply_optimization(
         _ => return Err(anyhow!("Mismatched ApplyValue type for item '{}'", item_id)),
     };
 
-    let _mutation = snapshot_mgr.lock_mutation()?;
-    let snapshot = snapshot_mgr.capture_before_actions(
-        item_id,
-        &item.name,
-        scope.as_str(),
-        &action_summary,
-        actions,
-    )?;
+    anyhow::ensure!(
+        !actions.iter().any(interactive_action),
+        "Item '{item_id}' requires an interactive Windows dialog"
+    );
+    Ok((item, actions, restart_hint, action_summary))
+}
 
-    let mut warnings = Vec::new();
-    for action in actions {
-        if let Err(e) = execute_action(action) {
-            warnings.push(e.to_string());
+fn apply_captured_actions(
+    actions: &[Action],
+    manager: &SnapshotManager,
+    snapshot: Option<RegistrySnapshot>,
+) -> Result<(Option<RegistrySnapshot>, Vec<String>)> {
+    let is_notification = |action: &Action| matches!(action, Action::ExplorerNotify { .. });
+    for action in actions.iter().filter(|action| !is_notification(action)) {
+        if let Err(error) = execute_action(action) {
+            if let Some(snapshot) = &snapshot {
+                let rollback = (|| -> Result<()> {
+                    if manager.has_changes(snapshot)? {
+                        manager.restore_records(snapshot)?;
+                    }
+                    manager.discard(snapshot)
+                })();
+                if let Err(rollback_error) = rollback {
+                    return Err(anyhow!(
+                        "{error:#}. Rollback incomplete ({rollback_error:#}). Snapshot {} was kept",
+                        snapshot.id
+                    ));
+                }
+            }
+            return Err(error);
         }
     }
 
-    Ok(ApplyOutcome {
-        item_id: item_id.to_string(),
-        scope,
-        snapshot,
-        restart_hint,
-        warnings,
-    })
+    let snapshot = if let Some(snapshot) = snapshot {
+        if manager.has_changes(&snapshot)? {
+            Some(snapshot)
+        } else {
+            manager.discard(&snapshot)?;
+            None
+        }
+    } else {
+        None
+    };
+
+    let mut warnings = Vec::new();
+    let mut sent = Vec::new();
+    for action in actions.iter().filter(|action| is_notification(action)) {
+        if let Some(notification) = ShellRefresh::from_action(action) {
+            if sent.contains(&notification) {
+                continue;
+            }
+            sent.push(notification);
+        }
+        if let Err(error) = execute_action(action) {
+            if snapshot.is_none() {
+                return Err(error);
+            }
+            warnings.push(error.to_string());
+        }
+    }
+    Ok((snapshot, warnings))
 }
 
 fn find_item<'a>(groups: &'a [OptimizationGroup], id: &str) -> Option<&'a OptimizationItem> {
@@ -706,6 +812,27 @@ fn exec_reg_move(
     Ok(())
 }
 
+const START_MENU_REFRESH: &str = "taskkill /f /im StartMenuExperienceHost.exe";
+
+pub(crate) fn is_start_menu_refresh(command: &str) -> bool {
+    command.trim().eq_ignore_ascii_case(START_MENU_REFRESH)
+}
+
+pub(crate) fn restore_shell_refresh(refresh: &ShellRefresh) -> Result<()> {
+    match refresh {
+        ShellRefresh::Associations => exec_explorer_notify("AssocChanged", None, None, None, None),
+        ShellRefresh::TraySettings => {
+            exec_explorer_notify("Custom", Some("1A"), None, Some("TraySettings"), None)
+        }
+        ShellRefresh::TrayCommand => {
+            exec_explorer_notify("Custom", Some("111"), Some("#A220"), None, None)
+        }
+        ShellRefresh::StartMenu => {
+            exec_explorer_notify("Cmd", None, None, None, Some(START_MENU_REFRESH))
+        }
+    }
+}
+
 fn exec_explorer_notify(
     notify_type: &str,
     msg: Option<&str>,
@@ -771,10 +898,21 @@ fn exec_explorer_notify(
                     }
                     _ => ("cmd.exe", &["/D", "/C", &expanded]),
                 };
-                let _ = crate::system_tools::system32_command(exe)?
+                let output = crate::system_tools::system32_command(exe)?
                     .args(args)
                     .creation_flags(CREATE_NO_WINDOW)
-                    .output();
+                    .output()
+                    .with_context(|| format!("Could not start {exe}"))?;
+                let code = output.status.code().unwrap_or(-1);
+                // There is nothing to refresh if the Start menu process is already stopped.
+                if !output.status.success() && !(is_start_menu_refresh(&expanded) && code == 128) {
+                    let stderr = crate::systasks::decode_cmd_output(&output.stderr);
+                    let stdout = crate::systasks::decode_cmd_output(&output.stdout);
+                    return Err(anyhow!(
+                        "{exe} exited with code {code}: {}",
+                        format!("{stdout}\n{stderr}").trim()
+                    ));
+                }
             }
             Ok(())
         }
@@ -954,5 +1092,115 @@ mod tests {
         let presets = get_optimization_presets();
         assert_eq!(presets.len(), 3);
         assert!(presets.iter().all(|p| !p.entries.is_empty()));
+    }
+
+    #[test]
+    fn batch_creates_one_snapshot_and_rolls_back_failed_writes() {
+        let name = format!("DismNext_BatchTest_{}", std::process::id());
+        let sub = format!(r"Software\{name}");
+        let branch = format!(r"{sub}\Created\Nested");
+        let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+        let (root, _) = hkcu.create_subkey(&sub).unwrap();
+        root.set_value("Flag", &10u32).unwrap();
+        let dir = std::env::temp_dir().join(&name);
+        let manager = SnapshotManager::new(dir.clone());
+        let label = LocalizedText {
+            zh: "测试".into(),
+            en: "Test".into(),
+        };
+        let write = |sub: &str, value: &str, data: &str| Action::RegWrite {
+            key: format!(r"HKEY_CURRENT_USER\{sub}"),
+            value: Some(value.into()),
+            reg_type: Some("REG_DWORD".into()),
+            data: Some(data.into()),
+            operator: "=".into(),
+            wow64: None,
+            fun: false,
+        };
+        let item = |id: &str, on: Action, off: Action| OptimizationItem {
+            id: id.into(),
+            name: label.clone(),
+            item_type: "CheckBox".into(),
+            source: "test".into(),
+            applicable: Condition::True,
+            current: Some(OptimizationScope::CheckBox {
+                state: Condition::True,
+                true_actions: vec![on],
+                false_actions: vec![off],
+                true_warning: None,
+                false_warning: None,
+                true_restart: None,
+                false_restart: None,
+            }),
+            default: None,
+            system: None,
+        };
+        let groups = [OptimizationGroup {
+            id: "test-group".into(),
+            name: label.clone(),
+            applicable: Condition::True,
+            items: vec![
+                item(
+                    "test-flag",
+                    write(&sub, "Flag", "20"),
+                    write(&sub, "Flag", "0"),
+                ),
+                item(
+                    "test-nested",
+                    write(&branch, "New", "2"),
+                    write(&branch, "New", "invalid"),
+                ),
+            ],
+        }];
+        let entry = |id: &str, enabled| OptimizationProfileEntry {
+            item_id: id.into(),
+            scope: ScopeName::Current,
+            value: ApplyValue::Bool(enabled),
+        };
+        let read_flag = || root.get_value::<u32, _>("Flag").unwrap();
+        let success = [entry("test-flag", true), entry("test-nested", true)];
+        let outcome = apply_optimization_batch(&groups, &success, &manager).unwrap();
+        assert_eq!(outcome.applied_count, 2);
+        assert_eq!(outcome.snapshots_created, 1);
+        assert_eq!(read_flag(), 0x20);
+        assert_eq!(
+            hkcu.open_subkey(&branch)
+                .unwrap()
+                .get_value::<u32, _>("New")
+                .unwrap(),
+            2
+        );
+        let snapshots = manager.list().unwrap();
+        assert_eq!(snapshots.len(), 1);
+        manager.restore(&snapshots[0].id).unwrap();
+        assert_eq!(read_flag(), 10);
+        assert!(hkcu.open_subkey(format!(r"{sub}\Created")).is_err());
+
+        let failure = [entry("test-flag", true), entry("test-nested", false)];
+        assert!(apply_optimization_batch(&groups, &failure, &manager).is_err());
+        assert_eq!(read_flag(), 10);
+        assert!(hkcu.open_subkey(format!(r"{sub}\Created")).is_err());
+        assert_eq!(manager.list().unwrap().len(), 1);
+        drop(root);
+        hkcu.delete_subkey_all(&sub).unwrap();
+        std::fs::remove_file(dir.join(format!("{}.json", snapshots[0].id))).unwrap();
+        std::fs::remove_dir(dir).unwrap();
+    }
+
+    #[test]
+    fn built_in_presets_only_use_batch_actions() {
+        let catalog = crate::Catalog::load(None).unwrap();
+        for preset in get_optimization_presets() {
+            for entry in preset.entries {
+                let (_, actions, _, _) = resolve_apply(
+                    &catalog.optimization_groups,
+                    &entry.item_id,
+                    entry.scope,
+                    &entry.value,
+                )
+                .unwrap();
+                assert!(actions.iter().all(is_batch_action), "{}", entry.item_id);
+            }
+        }
     }
 }

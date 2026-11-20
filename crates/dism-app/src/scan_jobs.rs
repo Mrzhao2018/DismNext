@@ -1,4 +1,5 @@
 use anyhow::{anyhow, Result};
+use dism_core::maintenance::{MaintenanceCancelled, MaintenanceProgress};
 use dism_core::scan_progress::{ScanCancelled, ScanProgress};
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -9,32 +10,77 @@ use std::sync::{Arc, Mutex};
 const MAX_FINISHED_JOBS: usize = 4;
 
 #[derive(Debug)]
-pub struct ScanBusy;
+pub struct ScanBusy(pub(crate) &'static str);
 
 impl std::fmt::Display for ScanBusy {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("Another scan is already running")
+        write!(f, "Another {} is already running", self.0)
     }
 }
 
 impl std::error::Error for ScanBusy {}
 
-#[derive(Default)]
-pub struct ScanJobs {
-    state: Mutex<JobState>,
+pub trait JobProgress: Default + Send + Sync + 'static {
+    const KIND: &'static str;
+    fn cancel(&self);
+    fn is_cancelled(&self) -> bool;
+    fn describe(&self) -> Value;
+    fn result_cancelled(&self, result: &Result<Value>) -> bool;
+}
+
+impl JobProgress for ScanProgress {
+    const KIND: &'static str = "scan";
+    fn cancel(&self) {
+        self.cancel();
+    }
+    fn is_cancelled(&self) -> bool {
+        self.is_cancelled()
+    }
+    fn describe(&self) -> Value {
+        json!(self.snapshot())
+    }
+    fn result_cancelled(&self, result: &Result<Value>) -> bool {
+        self.is_cancelled()
+            || result
+                .as_ref()
+                .is_err_and(|error| error.is::<ScanCancelled>())
+    }
+}
+
+impl JobProgress for MaintenanceProgress {
+    const KIND: &'static str = "maintenance task";
+    fn cancel(&self) {
+        self.cancel();
+    }
+    fn is_cancelled(&self) -> bool {
+        self.is_cancelled()
+    }
+    fn describe(&self) -> Value {
+        json!(self.snapshot())
+    }
+    fn result_cancelled(&self, result: &Result<Value>) -> bool {
+        result
+            .as_ref()
+            .is_err_and(|error| error.is::<MaintenanceCancelled>())
+    }
 }
 
 #[derive(Default)]
-struct JobState {
+pub struct ScanJobs<P: JobProgress = ScanProgress> {
+    state: Mutex<JobState<P>>,
+}
+
+#[derive(Default)]
+struct JobState<P> {
     sequence: u64,
-    active: Option<Arc<Job>>,
+    active: Option<Arc<Job<P>>>,
     finished: VecDeque<(u64, Arc<Finished>)>,
 }
 
-struct Job {
+struct Job<P> {
     id: u64,
     observable: bool,
-    progress: ScanProgress,
+    progress: P,
 }
 
 #[derive(Serialize)]
@@ -45,20 +91,19 @@ enum Finished {
     Failed { error: String },
 }
 
-struct Reservation {
-    jobs: Arc<ScanJobs>,
-    job: Arc<Job>,
+struct Reservation<P: JobProgress> {
+    jobs: Arc<ScanJobs<P>>,
+    job: Arc<Job<P>>,
 }
 
-impl Reservation {
+impl<P: JobProgress> Reservation<P> {
     fn finish(&self, result: Result<Value>) {
         let mut state = self.jobs.state.lock().unwrap();
-        let outcome = if self.job.progress.is_cancelled() {
+        let outcome = if self.job.progress.result_cancelled(&result) {
             Finished::Cancelled
         } else {
             match result {
                 Ok(result) => Finished::Completed { result },
-                Err(err) if err.is::<ScanCancelled>() => Finished::Cancelled,
                 Err(err) => Finished::Failed {
                     error: err.to_string(),
                 },
@@ -72,7 +117,7 @@ impl Reservation {
     }
 }
 
-impl Drop for Reservation {
+impl<P: JobProgress> Drop for Reservation<P> {
     fn drop(&mut self) {
         let mut state = self.jobs.state.lock().unwrap();
         if state
@@ -85,17 +130,21 @@ impl Drop for Reservation {
     }
 }
 
-impl ScanJobs {
-    fn reserve(self: &Arc<Self>, observable: bool) -> Result<Reservation> {
+impl<P: JobProgress> ScanJobs<P> {
+    pub fn is_active(&self) -> bool {
+        self.state.lock().unwrap().active.is_some()
+    }
+
+    fn reserve(self: &Arc<Self>, observable: bool) -> Result<Reservation<P>> {
         let mut state = self.state.lock().unwrap();
         if state.active.is_some() {
-            return Err(ScanBusy.into());
+            return Err(ScanBusy(P::KIND).into());
         }
         state.sequence += 1;
         let job = Arc::new(Job {
             id: state.sequence,
             observable,
-            progress: ScanProgress::default(),
+            progress: P::default(),
         });
         state.active = Some(Arc::clone(&job));
         Ok(Reservation {
@@ -105,21 +154,28 @@ impl ScanJobs {
     }
 
     pub fn run_inline<T>(self: &Arc<Self>, task: impl FnOnce() -> Result<T>) -> Result<T> {
-        let _reservation = self.reserve(false)?;
-        task()
+        self.run_inline_with_progress(|_| task())
+    }
+
+    pub fn run_inline_with_progress<T>(
+        self: &Arc<Self>,
+        task: impl FnOnce(&P) -> Result<T>,
+    ) -> Result<T> {
+        let reservation = self.reserve(false)?;
+        task(&reservation.job.progress)
     }
 
     pub fn start(
         self: &Arc<Self>,
-        task: impl FnOnce(&ScanProgress) -> Result<Value> + Send + 'static,
+        task: impl FnOnce(&P) -> Result<Value> + Send + 'static,
     ) -> Result<u64> {
         let reservation = self.reserve(true)?;
         let id = reservation.job.id;
         std::thread::Builder::new()
-            .name(format!("scan-{id}"))
+            .name(format!("{}-{id}", P::KIND))
             .spawn(move || {
                 let result = catch_unwind(AssertUnwindSafe(|| task(&reservation.job.progress)))
-                    .unwrap_or_else(|_| Err(anyhow!("Scan worker stopped unexpectedly")));
+                    .unwrap_or_else(|_| Err(anyhow!("{} worker stopped unexpectedly", P::KIND)));
                 reservation.finish(result);
             })?;
         Ok(id)
@@ -137,14 +193,14 @@ impl ScanJobs {
             } else {
                 "running"
             };
-            return Ok(json!({ "state": phase, "progress": job.progress.snapshot() }));
+            return Ok(json!({ "state": phase, "progress": job.progress.describe() }));
         }
         let finished = state
             .finished
             .iter()
             .find(|(job_id, _)| *job_id == id)
             .map(|(_, outcome)| Arc::clone(outcome))
-            .ok_or_else(|| anyhow!("Scan {id} is no longer available"))?;
+            .ok_or_else(|| anyhow!("{} {id} is no longer available", P::KIND))?;
         drop(state);
         Ok(serde_json::to_value(&*finished)?)
     }
@@ -158,7 +214,7 @@ impl ScanJobs {
         {
             job.progress.cancel();
         } else if !state.finished.iter().any(|(job_id, _)| *job_id == id) {
-            return Err(anyhow!("Scan {id} is no longer available"));
+            return Err(anyhow!("{} {id} is no longer available", P::KIND));
         }
         Ok(())
     }
@@ -187,7 +243,7 @@ mod tests {
 
     #[test]
     fn cancellation_releases_the_shared_slot_only_after_the_worker_stops() {
-        let jobs = Arc::new(ScanJobs::default());
+        let jobs = Arc::new(ScanJobs::<ScanProgress>::default());
         let (started, working) = mpsc::channel();
         let (release, wait) = mpsc::channel();
         let id = jobs

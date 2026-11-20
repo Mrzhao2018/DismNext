@@ -9,6 +9,7 @@ pub mod evaluator;
 pub mod features;
 mod file_stamp;
 pub mod lockcheck;
+pub mod maintenance;
 pub mod mcp;
 pub mod offline_wim;
 pub mod optimizer;

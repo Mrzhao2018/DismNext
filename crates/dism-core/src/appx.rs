@@ -156,8 +156,9 @@ pub fn remove_appx_package(package_full_name: &str) -> Result<()> {
         .output()?;
 
     if !out.status.success() {
-        let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
-        let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        let stderr = crate::systasks::decode_cmd_output(&out.stderr);
+        let stdout = crate::systasks::decode_cmd_output(&out.stdout);
+        let (stderr, stdout) = (stderr.trim(), stdout.trim());
         let detail = if !stderr.is_empty() { stderr } else { stdout };
         return Err(anyhow!("Remove-AppxPackage failed: {}", detail));
     }

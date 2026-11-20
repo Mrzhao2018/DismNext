@@ -12,8 +12,9 @@ use dism_core::diskmap::{
 use dism_core::drivers::{default_backup_dir, delete_driver, export_drivers, list_drivers};
 use dism_core::duplicate_recycle::{recycle_duplicates, DuplicateRecycleTarget};
 use dism_core::evaluator::eval_condition;
-use dism_core::features::{list_optional_features, set_feature_enabled};
+use dism_core::features::{list_optional_features, set_feature_enabled_with_progress};
 use dism_core::lockcheck::{find_locking_processes, terminate_locking_process};
+use dism_core::maintenance::MaintenanceProgress;
 use dism_core::offline_wim::inspect_wim;
 use dism_core::optimizer::{
     apply_optimization, apply_optimization_batch, evaluate_all_groups, export_optimization_profile,
@@ -21,13 +22,15 @@ use dism_core::optimizer::{
 };
 use dism_core::path_recycle::{recycle_reviewed_path, review_recycle_path, RecycleTarget};
 use dism_core::report::generate_health_report;
-use dism_core::rescue::{create_restore_point, list_restore_points, run_rescue_action};
+use dism_core::rescue::{create_restore_point, list_restore_points, run_rescue_action_with_progress};
 use dism_core::startup::{
     inspect_startup_item, list_scheduled_tasks, list_startup_items, list_third_party_services,
     set_scheduled_task_enabled, set_service_start_mode, set_startup_enabled,
 };
 use dism_core::sysinfo::{is_administrator, open_in_browser, relaunch_as_admin};
-use dism_core::systasks::{get_system_task_status, run_system_task};
+use dism_core::systasks::{
+    get_system_task_status, invalidate_systasks_cache, run_system_task_with_progress,
+};
 use dism_core::uninstaller::{
     launch_win32_uninstaller, list_win32_apps, recycle_app_leftovers, scan_reviewable_app_leftovers,
     LeftoverRecycleTarget, UninstallState, Win32Uninstall,
@@ -84,6 +87,7 @@ struct AppState {
     scan_cache: RwLock<CleanupScanCache>,
     cleanup_operation: Mutex<CleanupReviewSlot>,
     scan_jobs: Arc<ScanJobs>,
+    maintenance_jobs: Arc<ScanJobs<MaintenanceProgress>>,
     uninstall: Mutex<Option<Win32Uninstall>>,
     ui_dir: Option<PathBuf>,
 }
@@ -108,6 +112,7 @@ struct CleanupReviewSlot {
     ids: RandomState,
     sequence: u64,
     pending: Option<(String, Instant, ReviewedCleanup)>,
+    maintenance_active: bool,
 }
 
 impl CleanupReviewSlot {
@@ -146,16 +151,30 @@ impl std::error::Error for CleanupReviewUnavailable {}
 struct CleanupScanCache {
     rules: HashMap<String, CleanupScanResult>,
     full_scan: Option<(Instant, Arc<CleanupBatchScan>)>,
+    invalidated_at: Option<Instant>,
 }
 
 impl CleanupScanCache {
+    fn invalidate(&mut self) {
+        self.full_scan = None;
+        self.rules.clear();
+        self.invalidated_at = Some(Instant::now());
+    }
+
+    fn can_store(&self, started: Instant) -> bool {
+        self.invalidated_at
+            .is_none_or(|invalidated| started >= invalidated)
+    }
+
     fn store_full_scan(
         &mut self,
         results: CleanupBatchScan,
         started: Instant,
     ) -> Arc<CleanupBatchScan> {
         let results = Arc::new(results);
-        self.full_scan = Some((started, Arc::clone(&results)));
+        if self.can_store(started) {
+            self.full_scan = Some((started, Arc::clone(&results)));
+        }
         results
     }
 
@@ -169,17 +188,64 @@ impl AppState {
     fn begin_cleanup_mutation(&self) -> MutexGuard<'_, CleanupReviewSlot> {
         let mut operation = self.cleanup_operation.lock().unwrap();
         operation.pending = None;
-        *self.scan_cache.write().unwrap() = CleanupScanCache::default();
+        self.scan_cache.write().unwrap().invalidate();
         operation
     }
 
     fn publish_cleanup_scan(&self, results: CleanupBatchScan, started: Instant) -> serde_json::Value {
         let results = {
             let mut cache = self.scan_cache.write().unwrap();
-            cache.rules.clear();
+            if cache.can_store(started) {
+                cache.rules.clear();
+            }
             cache.store_full_scan(results, started)
         };
         serde_json::json!({ "items": results.items, "summary": results.summary })
+    }
+}
+
+struct MaintenanceGuard<'a>(&'a AppState);
+
+impl Drop for MaintenanceGuard<'_> {
+    fn drop(&mut self) {
+        invalidate_systasks_cache();
+        let mut operation = self.0.cleanup_operation.lock().unwrap();
+        operation.maintenance_active = false;
+        operation.pending = None;
+        self.0.scan_cache.write().unwrap().invalidate();
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum MaintenanceRequest {
+    Feature { name: String, enabled: bool },
+    SystemTask { task_id: String },
+    Rescue { action_id: String },
+}
+
+fn run_maintenance(
+    state: &AppState,
+    request: MaintenanceRequest,
+    progress: &MaintenanceProgress,
+) -> Result<serde_json::Value> {
+    {
+        let mut operation = state.begin_cleanup_mutation();
+        operation.maintenance_active = true;
+    }
+    let _guard = MaintenanceGuard(state);
+    match request {
+        MaintenanceRequest::Feature { name, enabled } => {
+            let outcome = set_feature_enabled_with_progress(&name, enabled, progress)?;
+            Ok(serde_json::json!({ "outcome": outcome, "features": list_optional_features() }))
+        }
+        MaintenanceRequest::SystemTask { task_id } => {
+            let outcome = run_system_task_with_progress(task_id.trim(), progress)?;
+            Ok(serde_json::json!({ "outcome": outcome, "system": SystemInfo::collect() }))
+        }
+        MaintenanceRequest::Rescue { action_id } => Ok(serde_json::to_value(
+            run_rescue_action_with_progress(&action_id, progress)?,
+        )?),
     }
 }
 
@@ -402,6 +468,7 @@ fn main() -> Result<()> {
         scan_cache: RwLock::new(CleanupScanCache::default()),
         cleanup_operation: Mutex::default(),
         scan_jobs: Arc::new(ScanJobs::default()),
+        maintenance_jobs: Arc::new(ScanJobs::default()),
         uninstall: Mutex::new(None),
         ui_dir,
     });
@@ -666,6 +733,25 @@ fn dispatch_api(
     state: &Arc<AppState>,
 ) -> Result<serde_json::Value> {
     match (req.method(), path) {
+        (&Method::Post, "/api/maintenance/start") => {
+            let request: MaintenanceRequest = read_json_body(req)?;
+            let app = Arc::clone(state);
+            let id = state
+                .maintenance_jobs
+                .start(move |progress| run_maintenance(&app, request, progress))?;
+            return Ok(serde_json::json!({ "id": id }));
+        }
+        (&Method::Get, "/api/maintenance/status") => {
+            let id = parse_query_param(query, "id")
+                .ok_or_else(|| anyhow::anyhow!("Missing ?id= parameter"))?
+                .parse()?;
+            return state.maintenance_jobs.status(id);
+        }
+        (&Method::Post, "/api/maintenance/cancel") => {
+            let payload: CancelScanReq = read_json_body(req)?;
+            state.maintenance_jobs.cancel(payload.id)?;
+            return Ok(serde_json::json!({ "ok": true }));
+        }
         (&Method::Post, "/api/scans/start") => {
             let payload: ScanRequest = read_json_body(req)?;
             let app = Arc::clone(state);
@@ -684,8 +770,6 @@ fn dispatch_api(
                     Ok(serde_json::to_value(report)?)
                 }
                 ScanRequest::CleanupRules => {
-                    let _cleanup = app.cleanup_operation.try_lock()
-                        .map_err(|_| anyhow::anyhow!("Another cleanup operation is already running"))?;
                     let started = Instant::now();
                     let sys = SystemInfo::collect();
                     let results = scan_all_with_progress(&app.catalog.read().unwrap().cleanup_rules, &sys, progress)?;
@@ -725,6 +809,9 @@ fn dispatch_api(
             if sys.is_admin {
                 return Ok(serde_json::json!({ "already_admin": true, "relaunching": false }));
             }
+            if state.maintenance_jobs.is_active() {
+                return Err(ScanBusy("maintenance task").into());
+            }
             let mut extra_args = vec!["--port".to_string(), state.port.to_string()];
             if let Some(ref catalog) = state.catalog_path {
                 extra_args.push("--catalog".to_string());
@@ -756,7 +843,6 @@ fn dispatch_api(
             Ok(serde_json::json!({ "items": list, "summary": null }))
         }
         (&Method::Post, "/api/cleanup/scan") => {
-            let _operation = state.cleanup_operation.lock().unwrap();
             let started = Instant::now();
             let results = state.scan_jobs.run_inline(|| {
                 Ok(scan_all_with_summary(&state.catalog.read().unwrap().cleanup_rules, &sys))
@@ -764,6 +850,7 @@ fn dispatch_api(
             Ok(state.publish_cleanup_scan(results, started))
         }
         (&Method::Get, "/api/cleanup/preview") => {
+            let started = Instant::now();
             let id = parse_query_param(query, "id")
                 .ok_or_else(|| anyhow::anyhow!("Missing ?id= parameter"))?;
             let cat = state.catalog.read().unwrap();
@@ -773,12 +860,10 @@ fn dispatch_api(
                 .find(|r| r.id == id)
                 .ok_or_else(|| anyhow::anyhow!("Rule '{}' not found", id))?;
             let res = scan_rule_preview(rule, &sys);
-            state
-                .scan_cache
-                .write()
-                .unwrap()
-                .rules
-                .insert(res.id.clone(), res.clone());
+            let mut cache = state.scan_cache.write().unwrap();
+            if cache.can_store(started) {
+                cache.rules.insert(res.id.clone(), res.clone());
+            }
             Ok(serde_json::to_value(res)?)
         }
         (&Method::Post, "/api/cleanup/execute") => {
@@ -795,6 +880,9 @@ fn dispatch_api(
         (&Method::Post, "/api/cleanup/review") => {
             let payload: CleanupReviewReq = read_json_body(req)?;
             let mut operation = state.cleanup_operation.lock().unwrap();
+            if operation.maintenance_active {
+                return Err(ScanBusy("maintenance task").into());
+            }
             operation.pending = None;
             let cat = state.catalog.read().unwrap();
             let (plan, report) = ReviewedCleanup::prepare(&cat.cleanup_rules, &payload.rule_ids, &sys);
@@ -804,8 +892,13 @@ fn dispatch_api(
         (&Method::Post, "/api/cleanup/confirm") => {
             let payload: CleanupPlanReq = read_json_body(req)?;
             let mut operation = state.cleanup_operation.lock().unwrap();
-            let plan = operation.take(&payload.plan_id, Instant::now()).ok_or(CleanupReviewUnavailable)?;
-            *state.scan_cache.write().unwrap() = CleanupScanCache::default();
+            if operation.maintenance_active {
+                return Err(ScanBusy("maintenance task").into());
+            }
+            let plan = operation
+                .take(&payload.plan_id, Instant::now())
+                .ok_or(CleanupReviewUnavailable)?;
+            state.scan_cache.write().unwrap().invalidate();
             let report = plan.execute();
             Ok(serde_json::json!({ "report": report, "system": SystemInfo::collect() }))
         }
@@ -993,7 +1086,10 @@ fn dispatch_api(
             if payload.published_names.is_empty() {
                 return Err(anyhow::anyhow!("No drivers specified for deletion"));
             }
-            let _operation = state.begin_cleanup_mutation();
+            let operation = state.begin_cleanup_mutation();
+            if operation.maintenance_active {
+                return Err(ScanBusy("maintenance task").into());
+            }
             let mut deleted = Vec::new();
             let mut errors = Vec::new();
             for name in &payload.published_names {
@@ -1018,13 +1114,13 @@ fn dispatch_api(
         }
         (&Method::Post, "/api/features/toggle") => {
             let payload: FeatureToggleReq = read_json_body(req)?;
-            let _operation = state.begin_cleanup_mutation();
-            let outcome = set_feature_enabled(&payload.name, payload.enabled)?;
-            let features = list_optional_features();
-            Ok(serde_json::json!({
-                "outcome": outcome,
-                "features": features,
-            }))
+            let request = MaintenanceRequest::Feature {
+                name: payload.name,
+                enabled: payload.enabled,
+            };
+            state
+                .maintenance_jobs
+                .run_inline_with_progress(|progress| run_maintenance(state, request, progress))
         }
         (&Method::Get, "/api/systasks/status") => {
             let status = get_system_task_status();
@@ -1032,13 +1128,12 @@ fn dispatch_api(
         }
         (&Method::Post, "/api/systasks/run") => {
             let payload: SysTaskRunReq = read_json_body(req)?;
-            let _operation = state.begin_cleanup_mutation();
-            let outcome = run_system_task(payload.task_id.trim())?;
-            let updated_sys = SystemInfo::collect();
-            Ok(serde_json::json!({
-                "outcome": outcome,
-                "system": updated_sys,
-            }))
+            let request = MaintenanceRequest::SystemTask {
+                task_id: payload.task_id,
+            };
+            state
+                .maintenance_jobs
+                .run_inline_with_progress(|progress| run_maintenance(state, request, progress))
         }
         (&Method::Post, "/api/lockcheck/inspect") => {
             let payload: RevealReq = read_json_body(req)?;
@@ -1110,9 +1205,12 @@ fn dispatch_api(
         }
         (&Method::Post, "/api/rescue/run") => {
             let payload: RescueRunReq = read_json_body(req)?;
-            let _operation = state.begin_cleanup_mutation();
-            let outcome = run_rescue_action(&payload.action_id)?;
-            Ok(serde_json::to_value(outcome)?)
+            let request = MaintenanceRequest::Rescue {
+                action_id: payload.action_id,
+            };
+            state
+                .maintenance_jobs
+                .run_inline_with_progress(|progress| run_maintenance(state, request, progress))
         }
         (&Method::Post, "/api/rescue/wim/inspect") => {
             let payload: WimInspectReq = read_json_body(req)?;
@@ -1203,7 +1301,6 @@ fn dispatch_api(
         }
         (&Method::Get, "/api/report/export") => {
             let (cat, scans) = {
-                let _operation = state.cleanup_operation.lock().unwrap();
                 let cat = state.catalog.read().unwrap().clone();
                 let cached = state
                     .scan_cache
@@ -1390,6 +1487,10 @@ mod tests {
 
         cache.store_full_scan(CleanupBatchScan::default(), started);
         assert!(cache.fresh_full_scan(started).unwrap().items.is_empty());
+
+        cache.invalidate();
+        cache.store_full_scan(CleanupBatchScan::default(), started);
+        assert!(cache.fresh_full_scan(Instant::now()).is_none());
     }
 
     #[test]

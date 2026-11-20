@@ -1,15 +1,16 @@
-use anyhow::{anyhow, Context, Result};
+use crate::maintenance::{run_system_command, MaintenanceProgress};
+use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::fs;
-use std::os::windows::process::CommandExt;
+use std::os::windows::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::sync::{OnceLock, RwLock};
 use std::time::{Duration, Instant};
 use winreg::enums::{HKEY_LOCAL_MACHINE, HKEY_USERS, KEY_READ, KEY_WOW64_32KEY, KEY_WOW64_64KEY};
 use winreg::RegKey;
 
-const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+const COMPACT_OS_KEY: &str = r"SYSTEM\Setup";
 const INSTALLER_USERDATA_KEY: &str = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Installer\UserData";
 
 #[link(name = "kernel32")]
@@ -48,6 +49,18 @@ pub fn decode_cmd_output(bytes: &[u8]) -> String {
     if bytes.is_empty() {
         return String::new();
     }
+    if let Some(rest) = bytes.strip_prefix(b"\xff\xfe") {
+        return decode_utf16le(rest);
+    }
+    if bytes.len() >= 4 && bytes.len() % 2 == 0 {
+        let pairs = bytes.chunks_exact(2);
+        let high_zeroes = pairs.clone().filter(|pair| pair[1] == 0).count();
+        let low_zeroes = pairs.filter(|pair| pair[0] == 0).count();
+        if high_zeroes > low_zeroes && high_zeroes * 4 >= bytes.len() / 2 {
+            return decode_utf16le(bytes);
+        }
+    }
+    let bytes = bytes.strip_prefix(b"\xef\xbb\xbf").unwrap_or(bytes);
     if let Ok(s) = std::str::from_utf8(bytes) {
         return s.to_string();
     }
@@ -76,6 +89,14 @@ pub fn decode_cmd_output(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).into_owned()
 }
 
+pub(crate) fn decode_utf16le(bytes: &[u8]) -> String {
+    let units: Vec<_> = bytes
+        .chunks_exact(2)
+        .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+        .collect();
+    String::from_utf16_lossy(&units)
+}
+
 static COMPACT_OS_CACHE: OnceLock<RwLock<Option<(Instant, (bool, String))>>> = OnceLock::new();
 static ORPHAN_INST_CACHE: OnceLock<RwLock<Option<(Instant, Vec<(PathBuf, u64)>)>>> =
     OnceLock::new();
@@ -93,7 +114,7 @@ pub fn invalidate_systasks_cache() {
     }
 }
 
-/// Queries live Windows CompactOS compression state via `compact.exe /CompactOS:query` (cached 30s).
+/// Reads the Windows CompactOS state (cached for 30 seconds).
 pub fn query_compact_os() -> (bool, String) {
     let cache = COMPACT_OS_CACHE.get_or_init(|| RwLock::new(None));
     if let Ok(guard) = cache.read() {
@@ -112,32 +133,52 @@ pub fn query_compact_os() -> (bool, String) {
 }
 
 fn query_compact_os_uncached() -> (bool, String) {
-    let Ok(output) =
-        crate::system_tools::system32_command("compact.exe").and_then(|mut command| {
-            command
-                .creation_flags(CREATE_NO_WINDOW)
-                .arg("/CompactOS:query")
-                .output()
-        })
-    else {
-        return (false, "Unable to query CompactOS state".to_string());
-    };
+    use windows_sys::Win32::Storage::FileSystem::{WofIsExternalFile, WOF_PROVIDER_FILE};
 
-    let stdout = decode_cmd_output(&output.stdout);
-    let stderr = decode_cmd_output(&output.stderr);
-    let raw = format!("{}\n{}", stdout.trim(), stderr.trim()).trim().to_string();
-    let enabled = parse_compact_os_output(&raw);
-    (enabled, raw)
-}
+    let setup = RegKey::predef(HKEY_LOCAL_MACHINE).open_subkey_with_flags(COMPACT_OS_KEY, KEY_READ);
+    if let Ok(value @ (0 | 1)) = setup.and_then(|key| key.get_value::<u32, _>("Compact")) {
+        let enabled = value == 1;
+        return (
+            enabled,
+            format!("CompactOS {}", if enabled { "enabled" } else { "disabled" }),
+        );
+    }
 
-fn parse_compact_os_output(raw: &str) -> bool {
-    let lower = raw.to_ascii_lowercase();
-    let negated = lower.contains("not in the compact state")
-        || raw.contains("不处于")
-        || raw.contains("未处于")
-        || raw.contains("不是处于");
-    let positive = lower.contains("is in the compact state") || raw.contains("处于压缩状态");
-    positive && !negated
+    // An automatic installation may have no explicit setting. Inspect inbox OS files
+    // with WOF and distinguish CompactOS file backing from WIM-backed files.
+    if let Ok(system32) = crate::system_tools::system32_dir() {
+        let mut observed = false;
+        for name in ["shell32.dll", "kernel32.dll", "win32kfull.sys"] {
+            let path = system32.join(name);
+            let wide: Vec<_> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+            let (mut external, mut provider) = (0, 0);
+            let result = unsafe {
+                WofIsExternalFile(
+                    wide.as_ptr(),
+                    &mut external,
+                    &mut provider,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                )
+            };
+            if result >= 0 {
+                observed = true;
+                if external != 0 && provider == WOF_PROVIDER_FILE {
+                    return (
+                        true,
+                        "CompactOS enabled (WOF-backed system binaries)".into(),
+                    );
+                }
+            }
+        }
+        if observed {
+            return (
+                false,
+                "CompactOS disabled (no WOF-backed system binaries detected)".into(),
+            );
+        }
+    }
+    (false, "Unable to query CompactOS state".into())
 }
 
 /// Finds orphaned `.msi` and `.msp` packages inside `%SystemRoot%\Installer` (cached 30s)
@@ -365,6 +406,23 @@ pub fn get_system_task_status() -> SystemTaskStatus {
 
 /// Executes an explicit system maintenance task (requires Administrator privileges).
 pub fn run_system_task(task_id: &str) -> Result<SystemTaskExecOutcome> {
+    run_system_task_impl(task_id, None)
+}
+
+pub fn run_system_task_with_progress(
+    task_id: &str,
+    progress: &MaintenanceProgress,
+) -> Result<SystemTaskExecOutcome> {
+    run_system_task_impl(task_id, Some(progress))
+}
+
+fn run_system_task_impl(
+    task_id: &str,
+    progress: Option<&MaintenanceProgress>,
+) -> Result<SystemTaskExecOutcome> {
+    if let Some(progress) = progress {
+        progress.check()?;
+    }
     let sys = crate::sysinfo::SystemInfo::collect();
     if !sys.is_admin {
         return Err(anyhow!(
@@ -373,14 +431,25 @@ pub fn run_system_task(task_id: &str) -> Result<SystemTaskExecOutcome> {
     }
 
     let output_text = match task_id {
-        "compact_os_enable" => exec_cmd("compact.exe", &["/CompactOS:always"])?,
-        "compact_os_disable" => exec_cmd("compact.exe", &["/CompactOS:never"])?,
-        "component_cleanup" => {
-            exec_cmd("dism.exe", &["/Online", "/Cleanup-Image", "/StartComponentCleanup", "/NoRestart"])?
-        }
+        "compact_os_enable" => exec_cmd("compact.exe", &["/CompactOS:always"], progress)?,
+        "compact_os_disable" => exec_cmd("compact.exe", &["/CompactOS:never"], progress)?,
+        "component_cleanup" => exec_cmd(
+            "dism.exe",
+            &[
+                "/Online",
+                "/Cleanup-Image",
+                "/StartComponentCleanup",
+                "/NoRestart",
+            ],
+            progress,
+        )?,
         "restore_point_cleanup" => {
             let drive_arg = format!("/for={}", sys.system_drive);
-            exec_cmd("vssadmin.exe", &["delete", "shadows", &drive_arg, "/oldest", "/quiet"])?
+            exec_cmd(
+                "vssadmin.exe",
+                &["delete", "shadows", &drive_arg, "/oldest", "/quiet"],
+                progress,
+            )?
         }
         "driver_cleanup" => {
             let drivers = crate::drivers::list_drivers();
@@ -393,6 +462,9 @@ pub fn run_system_task(task_id: &str) -> Result<SystemTaskExecOutcome> {
             } else {
                 let mut logs = Vec::new();
                 for drv in outdated {
+                    if let Some(progress) = progress {
+                        progress.check()?;
+                    }
                     match crate::drivers::delete_driver(&drv.published_name) {
                         Ok(msg) => logs.push(format!(
                             "Deleted {} ({} v{}): {}",
@@ -417,25 +489,20 @@ pub fn run_system_task(task_id: &str) -> Result<SystemTaskExecOutcome> {
     })
 }
 
-fn exec_cmd(program: &str, args: &[&str]) -> Result<String> {
-    let output = crate::system_tools::system32_command(program)?
-        .creation_flags(CREATE_NO_WINDOW)
-        .args(args)
-        .output()
-        .with_context(|| format!("Failed to start {}", program))?;
-
-    let stdout = decode_cmd_output(&output.stdout);
-    let stderr = decode_cmd_output(&output.stderr);
-    let combined = format!("{}\n{}", stdout.trim(), stderr.trim()).trim().to_string();
-    let code = output.status.code().unwrap_or(-1);
-    if !output.status.success() && code != 3010 {
-        return Err(anyhow!("{} exited with code {}: {}", program, code, combined));
-    }
-    Ok(if combined.is_empty() {
-        format!("{} completed cleanly (code {}).", program, code)
+fn exec_cmd(
+    program: &str,
+    args: &[&str],
+    progress: Option<&MaintenanceProgress>,
+) -> Result<String> {
+    let result = run_system_command(program, args, progress)?;
+    if result.output.is_empty() {
+        Ok(format!(
+            "{program} completed cleanly (code {}).",
+            result.code
+        ))
     } else {
-        combined
-    })
+        Ok(result.output)
+    }
 }
 
 #[cfg(test)]
@@ -443,17 +510,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_query_compact_os_and_orphaned_installer_scan() {
-        assert!(parse_compact_os_output("The system is in the Compact state."));
-        assert!(!parse_compact_os_output(
-            "The system is not in the Compact state because Windows has determined that it is not beneficial."
-        ));
-        assert!(parse_compact_os_output("系统处于压缩状态。"));
-        assert!(!parse_compact_os_output(
-            "系统不处于压缩状态，因为 Windows 已确定\r\n压缩状态不适用于此系统。"
-        ));
-        assert!(!parse_compact_os_output("系统未处于压缩状态。"));
+    fn decodes_utf16_before_utf8() {
+        let text = "Windows 资源保护\r\n";
+        let wide: Vec<_> = text.encode_utf16().flat_map(u16::to_le_bytes).collect();
+        assert_eq!(decode_cmd_output(&wide), text);
+        assert_eq!(
+            decode_cmd_output(&[b"\xff\xfe".as_slice(), &wide].concat()),
+            text
+        );
+        assert_eq!(decode_cmd_output(text.as_bytes()), text);
+    }
 
+    #[test]
+    fn test_query_compact_os_and_orphaned_installer_scan() {
         let (_enabled, raw) = query_compact_os();
         assert!(!raw.is_empty());
 

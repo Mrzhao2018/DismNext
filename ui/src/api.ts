@@ -589,11 +589,30 @@ export type ScanRequest =
   | { kind: 'duplicate_files'; path: string; min_size_bytes: number }
   | { kind: 'cleanup_rules' };
 
-export type ScanStatus<T> =
-  | { state: 'running' | 'cancelling'; progress: ScanProgress }
+type JobStatus<T, P> =
+  | { state: 'running' | 'cancelling'; progress: P }
   | { state: 'completed'; result: T }
   | { state: 'cancelled' }
   | { state: 'failed'; error: string };
+
+export type ScanStatus<T> = JobStatus<T, ScanProgress>;
+
+export type MaintenanceRequest =
+  | { kind: 'feature'; name: string; enabled: boolean }
+  | { kind: 'system_task'; task_id: string }
+  | { kind: 'rescue'; action_id: string };
+
+export interface MaintenanceResults {
+  feature: { outcome: FeatureToggleOutcome; features: WindowsFeatureInfo[] };
+  system_task: { outcome: SystemTaskExecOutcome; system: SystemInfo };
+  rescue: RescueActionOutcome;
+}
+
+export interface MaintenanceProgress {
+  program: string | null;
+  percent: number | null;
+  output: string;
+}
 
 export interface OrphanDirEntry {
   name: string;
@@ -796,21 +815,17 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ published_names }),
     }),
+  startMaintenance: (request: MaintenanceRequest) => reqJson<{ id: number }>('/api/maintenance/start', {
+    method: 'POST',
+    body: JSON.stringify(request),
+  }),
+  getMaintenanceStatus: <T>(id: number) => reqJson<JobStatus<T, MaintenanceProgress>>(`/api/maintenance/status?id=${id}`),
+  cancelMaintenance: (id: number) => reqJson<{ ok: boolean }>('/api/maintenance/cancel', {
+    method: 'POST',
+    body: JSON.stringify({ id }),
+  }),
   getFeatures: () => reqJson<{ features: WindowsFeatureInfo[] }>('/api/features/list'),
-  toggleFeature: (name: string, enabled: boolean) =>
-    reqJson<{ outcome: FeatureToggleOutcome; features: WindowsFeatureInfo[] }>(
-      '/api/features/toggle',
-      {
-        method: 'POST',
-        body: JSON.stringify({ name, enabled }),
-      }
-    ),
   getSysTaskStatus: () => reqJson<SystemTaskStatus>('/api/systasks/status'),
-  runSysTask: (task_id: string) =>
-    reqJson<{ outcome: SystemTaskExecOutcome; system: SystemInfo }>('/api/systasks/run', {
-      method: 'POST',
-      body: JSON.stringify({ task_id }),
-    }),
   inspectFileLocks: (path: string) =>
     reqJson<{ processes: LockingProcessInfo[] }>('/api/lockcheck/inspect', {
       method: 'POST',
@@ -855,11 +870,6 @@ export const api = {
         body: JSON.stringify({ description }),
       }
     ),
-  runRescueAction: (action_id: string) =>
-    reqJson<RescueActionOutcome>('/api/rescue/run', {
-      method: 'POST',
-      body: JSON.stringify({ action_id }),
-    }),
   inspectWim: (path: string) =>
     reqJson<WimInspection>('/api/rescue/wim/inspect', {
       method: 'POST',
