@@ -20,6 +20,8 @@ windows = { version = "0.62", features = [
 ] }
 windows-core = "0.62"
 windows-sys = { version = "0.59", features = [
+    "Win32_Devices_DeviceAndDriverInstallation",
+    "Win32_Devices_Properties",
     "Win32_Foundation",
     "Win32_Security",
     "Win32_Security_Cryptography_Catalog",

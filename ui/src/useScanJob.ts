@@ -1,10 +1,12 @@
 import { useEffect, useRef, useState } from 'react';
-import { api, CleanupScanPayload, DiskAnalysisReport, DuplicateScanReport, ScanProgress, ScanRequest } from './api';
+import { api, CleanupScanPayload, DiskAnalysisReport, DuplicateScanReport, PathRecyclePayload, PathRecyclePreview, ScanProgress, ScanRequest } from './api';
 
 interface ScanResults {
   disk_analysis: DiskAnalysisReport;
   duplicate_files: DuplicateScanReport;
   cleanup_rules: CleanupScanPayload;
+  recycle_review: PathRecyclePreview;
+  recycle_path: PathRecyclePayload;
 }
 
 interface Session {
@@ -55,14 +57,19 @@ export function useScanJob() {
           cancelSent = true;
         }
         const status = await api.getScanStatus<ScanResults[T['kind']]>(id);
-        if (status.state === 'cancelled' || (status.state === 'completed' && session.cancelRequested)) {
+        if (status.state === 'cancelled'
+          || (status.state === 'completed' && session.cancelRequested && request.kind !== 'recycle_path')) {
           if (!session.detached) setCancelled(true);
           return;
         }
         if (status.state === 'completed') return status.result;
         if (status.state === 'failed') throw new Error(status.error);
         if (!session.detached) {
-          setActive({ kind: request.kind, progress: status.progress, cancelling: status.state === 'cancelling' || session.cancelRequested });
+          setActive({
+            kind: request.kind,
+            progress: status.progress,
+            cancelling: status.state === 'cancelling' || (session.cancelRequested && status.progress.can_cancel),
+          });
         }
         await new Promise((resolve) => setTimeout(resolve, 200));
       }

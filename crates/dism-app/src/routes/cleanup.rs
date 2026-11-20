@@ -8,7 +8,7 @@ use dism_core::cleaner::{
     scan_rule_preview, CleanupScanResult, ReviewedCleanup,
 };
 use dism_core::evaluator::eval_condition;
-use dism_core::report::generate_health_report;
+use dism_core::report::{generate_localized_health_report, ReportLanguage};
 use dism_core::{Catalog, CustomRuleInput, SystemInfo};
 use serde::Deserialize;
 use std::{collections::HashMap, time::Instant};
@@ -178,6 +178,11 @@ pub(super) fn handle(
             Ok(serde_json::json!({ "items": items }))
         }
         (&Method::Get, "/api/report/export") => {
+            let language = match parse_query_param(query, "lang").as_deref() {
+                None | Some("zh") => ReportLanguage::Chinese,
+                Some("en") => ReportLanguage::English,
+                Some(_) => anyhow::bail!("Report language must be zh or en"),
+            };
             let (cat, scans) = {
                 let cat = state.catalog.read().unwrap().clone();
                 let cached = state
@@ -200,7 +205,7 @@ pub(super) fn handle(
                 };
                 (cat, scans)
             };
-            let report = generate_health_report(&cat, Some(&scans));
+            let report = generate_localized_health_report(&cat, Some(&scans), language);
             Ok(serde_json::to_value(report)?)
         }
         _ => unknown_endpoint(path),

@@ -270,6 +270,31 @@ async function reqJson<T>(url: string, init?: RequestInit): Promise<T> {
   return parseResponse<T>(res);
 }
 
+export function trackDesktopWindow() {
+  if (!sessionToken && !launchToken) return;
+  const id = crypto.randomUUID();
+  let sequence = 0;
+  const update = (open: boolean) => {
+    void reqJson('/api/desktop/window', {
+      method: 'POST',
+      body: JSON.stringify({ id, open, sequence: ++sequence }),
+      keepalive: !open,
+    }).catch(() => {});
+  };
+  let heartbeat = window.setInterval(() => update(true), 25_000);
+  update(true);
+  window.addEventListener('pagehide', () => {
+    window.clearInterval(heartbeat);
+    update(false);
+  });
+  window.addEventListener('pageshow', (event) => {
+    if (!event.persisted) return;
+    update(true);
+    window.clearInterval(heartbeat);
+    heartbeat = window.setInterval(() => update(true), 25_000);
+  });
+}
+
 export interface DiskTreeNode {
   name: string;
   path: string;
@@ -413,6 +438,7 @@ export interface DriverPackageInfo {
   repo_path: string;
   size_bytes: number;
   is_outdated_duplicate: boolean;
+  cleanup_status: 'candidate' | 'in_use' | 'unknown' | 'other';
   newer_version: string | null;
 }
 
@@ -562,6 +588,11 @@ export type PathRecycleResult = { path: string } & (
   | { status: 'failed'; error: string }
 );
 
+export interface PathRecyclePayload {
+  item: PathRecycleResult;
+  system: SystemInfo;
+}
+
 export interface DuplicateGroup {
   hash_hex: string;
   size_bytes: number;
@@ -578,16 +609,19 @@ export interface DuplicateScanReport {
 }
 
 export interface ScanProgress {
-  phase: 'walking' | 'sampling' | 'hashing' | 'finishing';
+  phase: 'walking' | 'sampling' | 'hashing' | 'finishing' | 'verifying' | 'recycling';
   processed_files: number;
   total_files: number | null;
   bytes_read: number;
+  can_cancel: boolean;
 }
 
 export type ScanRequest =
   | { kind: 'disk_analysis'; path: string; max_depth: number; measure_allocation?: boolean }
   | { kind: 'duplicate_files'; path: string; min_size_bytes: number }
-  | { kind: 'cleanup_rules' };
+  | { kind: 'cleanup_rules' }
+  | { kind: 'recycle_review'; path: string; is_dir: boolean; scan_started_at: string }
+  | { kind: 'recycle_path'; path: string; stamp: string };
 
 type JobStatus<T, P> =
   | { state: 'running' | 'cancelling'; progress: P }
@@ -620,6 +654,7 @@ export interface OrphanDirEntry {
   scope_label: string;
   size_bytes: number;
   file_count: number;
+  size_is_estimate: boolean;
   modified_date: string;
   scan_started_at: string;
 }
@@ -919,5 +954,5 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ rule_id }),
     }),
-  exportHealthReport: () => reqJson<HealthReportPayload>('/api/report/export'),
+  exportHealthReport: (lang: Lang) => reqJson<HealthReportPayload>(`/api/report/export?lang=${lang}`),
 };

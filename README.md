@@ -19,6 +19,8 @@ DismNext 是面向 Windows 11 的本地系统维护工具。你可以用它找�
 
 桌面版启动本地服务，默认地址为 `http://127.0.0.1:9527`，并尝试用 Microsoft Edge 的应用模式打开界面。需要使用 `main` 上的最新功能时，可以从源码构建。
 
+同一 Windows 用户和权限级别下，再次启动同端口的桌面版会用已有进程打开界面。关闭所有界面后，桌面版会等待后台任务结束再退出。`--no-window` 启动的服务会持续运行。
+
 ### 从源码构建
 
 准备 Windows、Rust stable（MSVC 工具链）、带 Windows SDK 的 Visual Studio C++ Build Tools，以及 Node.js 22.13 或更新的 22.x 版本。然后在仓库根目录运行以下命令。

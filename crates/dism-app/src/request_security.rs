@@ -1,4 +1,5 @@
 use anyhow::{ensure, Result};
+use std::collections::VecDeque;
 use std::fmt::Write;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -13,14 +14,14 @@ const BROWSER_LAUNCH_TTL: Duration = Duration::from_secs(120);
 
 pub struct Session {
     api_token: String,
-    browser_launch: Mutex<Option<(String, Instant)>>,
+    browser_launch: Mutex<VecDeque<(String, Instant)>>,
 }
 
 impl Session {
-    pub fn new(launch_token: Option<String>) -> Result<Self> {
+    pub fn new() -> Result<Self> {
         Ok(Self {
             api_token: new_session_token()?,
-            browser_launch: Mutex::new(launch_token.map(|token| (token, Instant::now()))),
+            browser_launch: Mutex::default(),
         })
     }
 
@@ -29,13 +30,27 @@ impl Session {
     }
 
     pub fn exchange(&self, candidate: Option<&str>) -> Option<&str> {
-        let mut launch = self.browser_launch.lock().ok()?;
-        let (expected, started) = launch.as_ref()?;
-        if started.elapsed() > BROWSER_LAUNCH_TTL || !token_matches(candidate, expected) {
-            return None;
-        }
-        launch.take();
+        let mut launches = self.browser_launch.lock().ok()?;
+        launches.retain(|(_, started)| started.elapsed() <= BROWSER_LAUNCH_TTL);
+        let index = launches
+            .iter()
+            .position(|(expected, _)| token_matches(candidate, expected))?;
+        launches.remove(index);
         Some(&self.api_token)
+    }
+
+    pub fn issue_browser_launch(&self) -> Result<String> {
+        let token = new_session_token()?;
+        let mut launches = self
+            .browser_launch
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Browser session state became unavailable"))?;
+        launches.retain(|(_, started)| started.elapsed() <= BROWSER_LAUNCH_TTL);
+        if launches.len() == 8 {
+            launches.pop_front();
+        }
+        launches.push_back((token.clone(), Instant::now()));
+        Ok(token)
     }
 }
 
@@ -154,10 +169,12 @@ mod tests {
 
     #[test]
     fn browser_launch_can_be_exchanged_once() {
-        let launch = new_session_token().unwrap();
-        let session = Session::new(Some(launch.clone())).unwrap();
+        let session = Session::new().unwrap();
+        let launch = session.issue_browser_launch().unwrap();
+        let reopen = session.issue_browser_launch().unwrap();
         assert!(session.exchange(Some(session.api_token())).is_none());
         assert_eq!(session.exchange(Some(&launch)), Some(session.api_token()));
         assert!(session.exchange(Some(&launch)).is_none());
+        assert_eq!(session.exchange(Some(&reopen)), Some(session.api_token()));
     }
 }

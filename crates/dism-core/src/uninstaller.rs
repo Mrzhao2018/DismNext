@@ -306,8 +306,8 @@ fn scan_leftovers(
                 Err(reason) => (0, 0, Some(LeftoverReview::Blocked { reason })),
             }
         } else {
-            let (size, count) = measure_dir_stats(path);
-            (size, count, None)
+            let stats = measure_dir_stats(path);
+            (stats.size_bytes, stats.file_count, None)
         };
         if match_basis == LeftoverMatch::RegisteredInstallLocation
             || file_count > 0

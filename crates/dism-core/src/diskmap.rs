@@ -873,6 +873,8 @@ pub struct OrphanDirEntry {
     pub scope_label: String,
     pub size_bytes: u64,
     pub file_count: usize,
+    #[serde(default)]
+    pub size_is_estimate: bool,
     pub modified_date: String,
     #[serde(default)]
     pub scan_started_at: String,
@@ -1332,8 +1334,8 @@ fn compute_orphaned_app_dirs() -> Vec<OrphanDirEntry> {
     let mut results: Vec<OrphanDirEntry> = candidates
         .into_par_iter()
         .filter_map(|(name, path, meta_tag)| {
-            let (size_bytes, file_count) = measure_dir_stats(&path);
-            if size_bytes < 1_048_576 {
+            let stats = measure_dir_stats(&path);
+            if stats.size_bytes < 1_048_576 {
                 return None;
             }
             let (scope_label, modified_date) = meta_tag.split_once('|').unwrap_or(("", ""));
@@ -1341,8 +1343,9 @@ fn compute_orphaned_app_dirs() -> Vec<OrphanDirEntry> {
                 name,
                 path: path.to_string_lossy().into_owned(),
                 scope_label: scope_label.to_string(),
-                size_bytes,
-                file_count,
+                size_bytes: stats.size_bytes,
+                file_count: stats.file_count,
+                size_is_estimate: stats.incomplete,
                 modified_date: modified_date.to_string(),
                 scan_started_at: scan_started_at.clone(),
             })
@@ -1353,17 +1356,32 @@ fn compute_orphaned_app_dirs() -> Vec<OrphanDirEntry> {
     results
 }
 
-pub(crate) fn measure_dir_stats(dir: &Path) -> (u64, usize) {
-    const MAX_FILES_PER_ORPHAN_DIR: usize = 20_000;
-    let mut size = 0u64;
-    let mut files = 0usize;
+#[derive(Default)]
+pub(crate) struct DirStats {
+    pub size_bytes: u64,
+    pub file_count: usize,
+    pub incomplete: bool,
+}
+
+pub(crate) fn measure_dir_stats(dir: &Path) -> DirStats {
+    measure_dir_stats_up_to(dir, 20_000)
+}
+
+fn measure_dir_stats_up_to(dir: &Path, file_limit: usize) -> DirStats {
+    let mut stats = DirStats::default();
     let mut stack = vec![dir.to_path_buf()];
     while let Some(cur) = stack.pop() {
         let Ok(rd) = std::fs::read_dir(&cur) else {
+            stats.incomplete = true;
             continue;
         };
-        for entry in rd.flatten() {
+        for entry in rd {
+            let Ok(entry) = entry else {
+                stats.incomplete = true;
+                continue;
+            };
             let Ok(meta) = entry.metadata() else {
+                stats.incomplete = true;
                 continue;
             };
             if (meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT) != 0 {
@@ -1372,15 +1390,16 @@ pub(crate) fn measure_dir_stats(dir: &Path) -> (u64, usize) {
             if meta.is_dir() {
                 stack.push(entry.path());
             } else if meta.is_file() {
-                size = size.saturating_add(meta.len());
-                files += 1;
-                if files >= MAX_FILES_PER_ORPHAN_DIR {
-                    return (size, files);
+                stats.size_bytes = stats.size_bytes.saturating_add(meta.len());
+                stats.file_count += 1;
+                if stats.file_count >= file_limit {
+                    stats.incomplete = true;
+                    return stats;
                 }
             }
         }
     }
-    (size, files)
+    stats
 }
 
 fn collect_installed_app_tokens() -> (HashSet<String>, Vec<String>) {
@@ -1758,4 +1777,19 @@ mod tests {
         assert_eq!(entries[1].name, "original-0");
         assert_eq!(entries.last().unwrap().name, "original-98");
     }
+}
+#[test]
+fn limited_directory_statistics_are_marked_as_incomplete() {
+    let dir = std::env::temp_dir().join(format!("dismnext-limited-stats-{}", std::process::id()));
+    std::fs::create_dir(&dir).unwrap();
+    for index in 0..3 {
+        std::fs::write(dir.join(index.to_string()), b"1234").unwrap();
+    }
+    let limited = measure_dir_stats_up_to(&dir, 2);
+    let full = measure_dir_stats(&dir);
+    std::fs::remove_dir_all(dir).unwrap();
+    assert!(limited.incomplete);
+    assert_eq!((limited.size_bytes, limited.file_count), (8, 2));
+    assert!(!full.incomplete);
+    assert_eq!((full.size_bytes, full.file_count), (12, 3));
 }

@@ -13,7 +13,7 @@ use std::hash::{BuildHasher, RandomState};
 use std::os::windows::ffi::OsStrExt;
 use std::os::windows::fs::MetadataExt;
 use std::path::{Component, Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, SystemTime};
 use walkdir::WalkDir;
 use windows_sys::Win32::Foundation::{
@@ -169,10 +169,16 @@ impl TargetKey {
 
 struct IndexedTarget {
     size: u64,
-    status: FileStatus,
-    reason: Option<String>,
+    diagnosis: TargetDiagnosis,
     first_rule: usize,
     other_rules: Vec<usize>,
+}
+
+type FileDiagnosis = (FileStatus, Option<String>);
+
+enum TargetDiagnosis {
+    Pending(Arc<OnceLock<Option<FileDiagnosis>>>),
+    Ready(FileDiagnosis),
 }
 
 const INDEX_SHARDS: usize = 32;
@@ -190,38 +196,80 @@ impl ScanIndex<'_> {
         key: &TargetKey,
         rule: usize,
         size: u64,
+        io_probe: bool,
         diagnose: impl FnOnce() -> (FileStatus, Option<String>),
     ) -> Option<(u64, FileStatus, Option<String>)> {
         let shard = self.hasher.hash_one(key) as usize % INDEX_SHARDS;
-        let mut targets = self.targets[shard].lock().unwrap();
         if self.progress.is_some_and(ScanProgress::is_cancelled) {
             return None;
         }
-        // Diagnose a shared path once so parallel probes never lock each other out.
-        match targets.entry(key.clone()) {
-            Entry::Vacant(entry) => {
-                let (status, reason) = diagnose();
-                if let Some(progress) = self.progress {
-                    progress.file_processed();
-                }
-                entry.insert(IndexedTarget {
-                    size,
-                    status,
-                    reason: reason.clone(),
-                    first_rule: rule,
-                    other_rules: Vec::new(),
-                });
-                Some((size, status, reason))
+        let diagnose = || {
+            let diagnosis = diagnose();
+            if let Some(progress) = self.progress {
+                progress.file_processed();
             }
-            Entry::Occupied(mut entry) => {
-                let target = entry.get_mut();
-                if target.first_rule == rule || target.other_rules.contains(&rule) {
-                    return None;
+            diagnosis
+        };
+        let (size, probe, owns_probe) = {
+            let mut targets = self.targets[shard].lock().unwrap();
+            match targets.entry(key.clone()) {
+                Entry::Vacant(entry) if !io_probe => {
+                    let (status, reason) = diagnose();
+                    entry.insert(IndexedTarget {
+                        size,
+                        diagnosis: TargetDiagnosis::Ready((status, reason.clone())),
+                        first_rule: rule,
+                        other_rules: Vec::new(),
+                    });
+                    return Some((size, status, reason));
                 }
-                target.other_rules.push(rule);
-                Some((target.size, target.status, target.reason.clone()))
+                Entry::Vacant(entry) => {
+                    let probe = Arc::new(OnceLock::new());
+                    entry.insert(IndexedTarget {
+                        size,
+                        diagnosis: TargetDiagnosis::Pending(Arc::clone(&probe)),
+                        first_rule: rule,
+                        other_rules: Vec::new(),
+                    });
+                    (size, probe, true)
+                }
+                Entry::Occupied(mut entry) => {
+                    let target = entry.get_mut();
+                    if target.first_rule == rule || target.other_rules.contains(&rule) {
+                        return None;
+                    }
+                    target.other_rules.push(rule);
+                    match &target.diagnosis {
+                        TargetDiagnosis::Ready((status, reason)) => {
+                            return Some((target.size, *status, reason.clone()));
+                        }
+                        TargetDiagnosis::Pending(probe) => (target.size, Arc::clone(probe), false),
+                    }
+                }
+            }
+        };
+        // Multiple rules can wait for one target, while other paths in the shard keep scanning.
+        if owns_probe {
+            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(diagnose)) {
+                Ok(result) => {
+                    let _ = probe.set(Some(result));
+                }
+                Err(panic) => {
+                    // Unblock rules waiting for this path before unwinding the scan.
+                    let _ = probe.set(None);
+                    std::panic::resume_unwind(panic);
+                }
             }
         }
+        let (status, reason) = probe.wait().as_ref()?;
+        let mut targets = self.targets[shard].lock().unwrap();
+        let target = targets
+            .get_mut(key)
+            .expect("indexed target is retained until summary");
+        if matches!(target.diagnosis, TargetDiagnosis::Pending(_)) {
+            target.diagnosis = TargetDiagnosis::Ready((*status, reason.clone()));
+        }
+        Some((size, *status, reason.clone()))
     }
 
     fn summarize(self, rules: &[CleanupRule]) -> anyhow::Result<CleanupScanSummary> {
@@ -232,7 +280,10 @@ impl ScanIndex<'_> {
                 if let Some(progress) = self.progress {
                     progress.check()?;
                 }
-                match target.status {
+                let TargetDiagnosis::Ready((status, _)) = target.diagnosis else {
+                    unreachable!("all diagnoses finish before summarizing the scan");
+                };
+                match status {
                     FileStatus::Ready => {
                         summary.cleanable_bytes += target.size;
                         if !target.other_rules.is_empty() && target.size != 0 {
@@ -301,10 +352,11 @@ impl CollectedFiles<'_> {
         key: &TargetKey,
         seen_paths: &mut HashSet<TargetKey>,
         size: u64,
+        io_probe: bool,
         diagnose: impl FnOnce() -> (FileStatus, Option<String>),
     ) -> Option<(u64, FileStatus, Option<String>)> {
         if let Some((index, rule)) = self.index {
-            return index.observe(key, rule, size, diagnose);
+            return index.observe(key, rule, size, io_probe, diagnose);
         }
         if !seen_paths.insert(key.clone()) {
             return None;
@@ -1216,7 +1268,9 @@ fn handle_custom_proc(
             for d in &outdated {
                 let key = TargetKey::Driver(d.published_name.to_ascii_lowercase());
                 if let Some((size_bytes, status, _)) =
-                    files.observe(&key, seen_paths, d.size_bytes, || (FileStatus::Ready, None))
+                    files.observe(&key, seen_paths, d.size_bytes, false, || {
+                        (FileStatus::Ready, None)
+                    })
                 {
                     let newer = d.newer_version.as_deref().unwrap_or("newer");
                     files.record(
@@ -1445,21 +1499,24 @@ fn record_file_with_size(
 ) {
     let path_str = path.to_string_lossy().into_owned();
     let key = TargetKey::file(path);
-    let Some((size_bytes, status, reason)) = files.observe(&key, seen_paths, size_bytes, || {
-        if reparse {
-            (
-                FileStatus::Protected,
-                Some("Windows reparse point".to_string()),
-            )
-        } else if *probe_budget > 0 || size_bytes >= 4 * 1024 * 1024 {
-            if *probe_budget > 0 {
-                *probe_budget -= 1;
+    let io_probe = !reparse && (*probe_budget > 0 || size_bytes >= 4 * 1024 * 1024);
+    let Some((size_bytes, status, reason)) =
+        files.observe(&key, seen_paths, size_bytes, io_probe, || {
+            if reparse {
+                (
+                    FileStatus::Protected,
+                    Some("Windows reparse point".to_string()),
+                )
+            } else if io_probe {
+                if *probe_budget > 0 {
+                    *probe_budget -= 1;
+                }
+                diagnose_file(path, &path_str)
+            } else {
+                diagnose_file_fast(&path_str, sys_is_admin)
             }
-            diagnose_file(path, &path_str)
-        } else {
-            diagnose_file_fast(&path_str, sys_is_admin)
-        }
-    }) else {
+        })
+    else {
         return;
     };
     files.record(
@@ -2089,4 +2146,52 @@ mod tests {
             }
         }
     }
+}
+#[test]
+fn slow_diagnosis_does_not_hold_the_shard_and_is_shared_by_rules() {
+    use std::sync::mpsc;
+    use std::thread;
+    use std::time::Duration;
+
+    let index = ScanIndex::default();
+    let first = TargetKey::File("first".into());
+    let shard = index.hasher.hash_one(&first) as usize % INDEX_SHARDS;
+    let second = (0..)
+        .map(|number| TargetKey::File(format!("other-{number}")))
+        .find(|key| index.hasher.hash_one(key) as usize % INDEX_SHARDS == shard)
+        .unwrap();
+    let (started, wait_started) = mpsc::channel();
+    let (release, wait_release) = mpsc::channel();
+    let (done, wait_done) = mpsc::channel();
+    thread::scope(|scope| {
+        let index = &index;
+        let first = &first;
+        scope.spawn(move || {
+            index.observe(first, 0, 7, true, || {
+                started.send(()).unwrap();
+                wait_release.recv().unwrap();
+                (FileStatus::Locked, None)
+            });
+        });
+        wait_started.recv().unwrap();
+        scope.spawn(move || {
+            let result = index.observe(&second, 0, 5, false, || (FileStatus::Ready, None));
+            done.send(result).unwrap();
+        });
+        let shared = scope.spawn(|| {
+            index.observe(first, 1, 8, true, || {
+                panic!("only one rule may probe the target")
+            })
+        });
+        let independent = wait_done.recv_timeout(Duration::from_secs(2));
+        release.send(()).unwrap();
+        assert!(matches!(
+            independent.unwrap(),
+            Some((5, FileStatus::Ready, _))
+        ));
+        assert!(matches!(
+            shared.join().unwrap(),
+            Some((7, FileStatus::Locked, _))
+        ));
+    });
 }

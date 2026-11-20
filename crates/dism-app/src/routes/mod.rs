@@ -54,7 +54,7 @@ fn unknown_endpoint(path: &str) -> Result<serde_json::Value> {
     Err(anyhow::anyhow!("Unknown API endpoint: {}", path))
 }
 
-fn read_json_body<T: serde::de::DeserializeOwned>(req: &mut Request) -> Result<T> {
+pub(crate) fn read_json_body<T: serde::de::DeserializeOwned>(req: &mut Request) -> Result<T> {
     let mut body = Vec::new();
     req.as_reader()
         .take(MAX_HTTP_BODY as u64 + 1)

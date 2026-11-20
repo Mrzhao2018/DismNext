@@ -52,6 +52,7 @@ import {
 } from '../api';
 import { useScanJob } from '../useScanJob';
 import { ScanStatusBar } from '../ScanStatusBar';
+import { VirtualRows } from './VirtualRows';
 import { adjustHexColor, createTreemapHover, TreemapCanvas, TreemapReadout, type PaintedLeaf } from './DiskTreemap';
 
 interface Props {
@@ -235,6 +236,8 @@ const useStyles = makeStyles({
   },
 });
 
+const TREE_ROW_HEIGHT = 28;
+
 function spliceTreeChildren(
   root: DiskTreeNode,
   targetPath: string,
@@ -320,7 +323,7 @@ export const DiskAnalyzerView: React.FC<Props> = ({ visible, lang, onSystemUpdat
   const [copiedNotice, setCopiedNotice] = useState(false);
 
   const splitRef = useRef<HTMLDivElement | null>(null);
-  const rowRefs = useRef<Map<string, HTMLDivElement>>(new Map());
+  const [revealTreePath, setRevealTreePath] = useState<string | null>(null);
 
   useEffect(() => {
     api
@@ -483,9 +486,7 @@ export const DiskAnalyzerView: React.FC<Props> = ({ visible, lang, onSystemUpdat
         ancestors.forEach((p) => next.add(p));
         return next;
       });
-      setTimeout(() => {
-        rowRefs.current.get(path)?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
-      }, 40);
+      setRevealTreePath(path);
     }
   };
 
@@ -542,7 +543,11 @@ export const DiskAnalyzerView: React.FC<Props> = ({ visible, lang, onSystemUpdat
     const request = { paths: [path], label: path, size_bytes: 0 };
     setRecycleConfirmTarget(request);
     try {
-      const review = await api.reviewRecyclePath(path, isDir, scanStartedAt);
+      const review = await scan.run({ kind: 'recycle_review', path, is_dir: isDir, scan_started_at: scanStartedAt });
+      if (!review) {
+        setRecycleConfirmTarget((current) => current === request ? null : current);
+        return;
+      }
       setRecycleConfirmTarget((current) => current === request
         ? { ...request, review, size_bytes: review.status === 'ready' ? review.size_bytes : 0 }
         : current);
@@ -568,7 +573,8 @@ export const DiskAnalyzerView: React.FC<Props> = ({ visible, lang, onSystemUpdat
         items = response.items;
         onSystemUpdated?.(response.system);
       } else if (review?.status === 'ready') {
-        const response = await api.recyclePath(paths[0], review.stamp);
+        const response = await scan.run({ kind: 'recycle_path', path: paths[0], stamp: review.stamp });
+        if (!response) return;
         items = [response.item];
         onSystemUpdated?.(response.system);
       } else {
@@ -804,7 +810,9 @@ export const DiskAnalyzerView: React.FC<Props> = ({ visible, lang, onSystemUpdat
         )}
       </div>
 
-      <ScanStatusBar active={scan.active} cancelled={scan.cancelled} cancel={scan.cancel} lang={lang} />
+      {!recycleConfirmTarget && (
+        <ScanStatusBar active={scan.active} cancelled={scan.cancelled} cancel={scan.cancel} lang={lang} />
+      )}
 
       {!report ? (
         <div
@@ -836,8 +844,13 @@ export const DiskAnalyzerView: React.FC<Props> = ({ visible, lang, onSystemUpdat
                       <span style={{ textAlign: 'right' }}>{logicalSizeLabel}</span>
                       <span style={{ textAlign: 'right' }}>{lang === 'zh' ? '文件' : 'Files'}</span>
                     </div>
-                    <div className={styles.scrollBody}>
-                      {flatRows.map((row) => {
+                    <VirtualRows
+                      className={styles.scrollBody}
+                      rows={flatRows}
+                      rowHeight={TREE_ROW_HEIGHT}
+                      revealIndex={revealTreePath === null ? -1 : flatRows.findIndex(({ node }) => node.path === revealTreePath)}
+                      onReveal={() => setRevealTreePath(null)}
+                      renderRow={(row) => {
                         const pct =
                           row.parentBytes > 0
                             ? (row.node.size_bytes / row.parentBytes) * 100
@@ -846,10 +859,7 @@ export const DiskAnalyzerView: React.FC<Props> = ({ visible, lang, onSystemUpdat
                         return (
                           <div
                             key={`${row.node.path}-${row.depth}-${row.node.name}`}
-                            ref={(el) => {
-                              if (el) rowRefs.current.set(row.node.path, el);
-                              else rowRefs.current.delete(row.node.path);
-                            }}
+                            style={{ height: TREE_ROW_HEIGHT, boxSizing: 'border-box' }}
                             className={`${styles.gridRow} ${styles.treeGridCols} ${
                               isSel ? styles.gridRowSelected : ''
                             }`}
@@ -963,8 +973,8 @@ export const DiskAnalyzerView: React.FC<Props> = ({ visible, lang, onSystemUpdat
                             </span>
                           </div>
                         );
-                      })}
-                    </div>
+                      }}
+                    />
                   </>
                 ) : leftTab === 'files' ? (
                   <>
@@ -1217,6 +1227,7 @@ export const DiskAnalyzerView: React.FC<Props> = ({ visible, lang, onSystemUpdat
                                 </Badge>
                                 <Badge size="small" appearance="tint" color="warning">
                                   {formatBytes(od.size_bytes)}
+                                  {od.size_is_estimate && (lang === 'zh' ? ' · 部分统计' : ' · Partial estimate')}
                                 </Badge>
                               </div>
                               <Text
@@ -1501,7 +1512,10 @@ export const DiskAnalyzerView: React.FC<Props> = ({ visible, lang, onSystemUpdat
       <Dialog
         open={visible && Boolean(recycleConfirmTarget)}
         onOpenChange={(_, d) => {
-          if (!d.open && !recycling) setRecycleConfirmTarget(null);
+          if (!d.open && !recycling) {
+            if (scan.active?.kind === 'recycle_review') scan.cancel();
+            setRecycleConfirmTarget(null);
+          }
         }}
       >
         <DialogSurface>
@@ -1559,9 +1573,12 @@ export const DiskAnalyzerView: React.FC<Props> = ({ visible, lang, onSystemUpdat
                         ? `${recycleConfirmTarget.review.file_count} 个文件 · ${recycleConfirmTarget.review.dir_count} 个目录`
                         : `${recycleConfirmTarget.review.file_count} files · ${recycleConfirmTarget.review.dir_count} folders`}
                     </Text>
-                  ) : (
-                    <Spinner size="small" label={lang === 'zh' ? '正在核对目标…' : 'Reviewing target…'} />
-                  )}
+                  ) : null}
+                </div>
+              )}
+              {(scan.active?.kind === 'recycle_review' || scan.active?.kind === 'recycle_path') && (
+                <div style={{ marginTop: 8 }}>
+                  <ScanStatusBar active={scan.active} cancelled={false} cancel={scan.cancel} lang={lang} />
                 </div>
               )}
             </DialogContent>
@@ -1569,7 +1586,10 @@ export const DiskAnalyzerView: React.FC<Props> = ({ visible, lang, onSystemUpdat
               <Button
                 appearance="secondary"
                 disabled={recycling}
-                onClick={() => setRecycleConfirmTarget(null)}
+                onClick={() => {
+                  if (scan.active?.kind === 'recycle_review') scan.cancel();
+                  setRecycleConfirmTarget(null);
+                }}
               >
                 {lang === 'zh' ? '取消' : 'Cancel'}
               </Button>

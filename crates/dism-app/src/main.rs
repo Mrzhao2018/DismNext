@@ -4,22 +4,27 @@ use dism_core::drivers::list_drivers;
 use dism_core::startup::list_scheduled_tasks;
 use dism_core::sysinfo::{is_administrator, open_in_browser};
 use dism_core::systasks::get_system_task_status;
+use dism_core::uninstaller::UninstallState;
 use dism_core::{Catalog, SnapshotManager, SystemInfo};
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex, RwLock};
+use std::time::{Duration, Instant};
 use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
 
+mod desktop_lifecycle;
+mod http_workers;
 mod request_security;
 mod routes;
 mod scan_jobs;
 mod state;
 mod static_files;
 
+use desktop_lifecycle::{DesktopLifecycle, WakeEvent, WINDOW_PATH};
+use http_workers::HttpWorkers;
 use request_security::{
-    add_cors_headers, header_value, new_session_token, verify_request, Session,
-    SESSION_EXCHANGE_PATH, SESSION_HEADER,
+    add_cors_headers, header_value, verify_request, Session, SESSION_EXCHANGE_PATH, SESSION_HEADER,
 };
 use routes::{HttpBodyTooLarge, MAX_HTTP_BODY};
 use scan_jobs::{ScanBusy, ScanJobs};
@@ -61,6 +66,15 @@ fn main() -> Result<()> {
         !args.dev_origin || (cfg!(debug_assertions) && !is_admin),
         "--dev-origin requires a non-elevated debug build"
     );
+    let wake_event = if args.no_window {
+        None
+    } else {
+        let Some(event) = WakeEvent::launch_or_signal(args.port, is_admin)? else {
+            println!("Requested a window from the running DismNext instance.");
+            return Ok(());
+        };
+        Some(event)
+    };
     let catalog_path = args
         .catalog
         .as_deref()
@@ -69,15 +83,9 @@ fn main() -> Result<()> {
     let catalog = Catalog::load(catalog_path.as_deref())?;
     let snap_mgr = SnapshotManager::user_default();
     let ui_dir = resolve_ui_dir(args.ui_dir, args.dev_origin)?;
-    let launch_token = if args.no_window {
-        None
-    } else {
-        Some(new_session_token()?)
-    };
-
     let state = Arc::new(AppState {
         port: args.port,
-        session: Session::new(launch_token.clone())?,
+        session: Session::new()?,
         dev_origin: args.dev_origin,
         catalog_path,
         catalog: RwLock::new(catalog),
@@ -88,6 +96,7 @@ fn main() -> Result<()> {
         maintenance_jobs: Arc::new(ScanJobs::default()),
         uninstall: Mutex::new(None),
         ui_dir,
+        desktop: wake_event.as_ref().map(|_| DesktopLifecycle::new()),
     });
 
     let addr = format!("127.0.0.1:{}", args.port);
@@ -105,12 +114,13 @@ fn main() -> Result<()> {
         println!("UI assets not found; serving API endpoints only.");
     }
 
-    match launch_token {
-        Some(token) => launch_desktop_window(&format!("{url}/#launch={token}"))?,
-        None => println!(
+    if state.desktop.is_some() {
+        open_desktop(&state, &url)?;
+    } else {
+        println!(
             "DismNext session URL: {url}/#token={}",
             state.session.api_token()
-        ),
+        );
     }
 
     // Pre-warm static system metadata, driver cache, system task status, and scheduled tasks
@@ -121,14 +131,50 @@ fn main() -> Result<()> {
         let _ = list_scheduled_tasks();
     });
 
-    for req in server.incoming_requests() {
-        let st = Arc::clone(&state);
-        std::thread::spawn(move || {
-            handle_request(req, &st);
-        });
+    let workers = HttpWorkers::new(&state)?;
+    let mut last_window_check = Instant::now();
+    loop {
+        if let Some(req) = server.recv_timeout(Duration::from_millis(250))? {
+            workers.submit(req, &state);
+        }
+        if let (Some(event), Some(desktop)) = (&wake_event, &state.desktop) {
+            if event.requested()? {
+                if let Err(error) = open_desktop(&state, &url) {
+                    eprintln!("Could not reopen DismNext: {error:#}");
+                }
+            }
+            if last_window_check.elapsed() >= Duration::from_millis(250) {
+                last_window_check = Instant::now();
+                let has_work = workers.has_work()
+                    || state.scan_jobs.is_active()
+                    || state.maintenance_jobs.is_active()
+                    || uninstall_running(&state);
+                if desktop.idle(has_work) {
+                    break;
+                }
+            }
+        }
     }
 
     Ok(())
+}
+
+fn open_desktop(state: &AppState, url: &str) -> Result<()> {
+    let token = state.session.issue_browser_launch()?;
+    launch_desktop_window(&format!("{url}/#launch={token}"))?;
+    if let Some(desktop) = &state.desktop {
+        desktop.launching();
+    }
+    Ok(())
+}
+
+fn uninstall_running(state: &AppState) -> bool {
+    state.uninstall.try_lock().map_or(true, |mut tracked| {
+        tracked.as_mut().is_some_and(|job| {
+            job.status()
+                .is_ok_and(|status| status.state == UninstallState::Running)
+        })
+    })
 }
 
 fn bind_with_retry(addr: &str) -> Result<Server> {
@@ -251,6 +297,14 @@ fn handle_request(mut req: Request, state: &Arc<AppState>) {
     if path.starts_with("/api/") {
         let result = if req.body_length().is_some_and(|len| len > MAX_HTTP_BODY) {
             Err(HttpBodyTooLarge.into())
+        } else if req.method() == &Method::Post && path == WINDOW_PATH {
+            (|| {
+                let update = routes::read_json_body(&mut req)?;
+                if let Some(desktop) = &state.desktop {
+                    desktop.update(update)?;
+                }
+                Ok(serde_json::json!({ "ok": true }))
+            })()
         } else {
             routes::dispatch(&mut req, path, query, state)
         };

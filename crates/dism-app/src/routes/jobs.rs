@@ -6,11 +6,18 @@ use dism_core::cleaner::scan_all_with_progress;
 use dism_core::diskmap::{analyze_path_with_options, find_duplicate_files_with_progress};
 use dism_core::features::{list_optional_features, set_feature_enabled_with_progress};
 use dism_core::maintenance::MaintenanceProgress;
+use dism_core::path_recycle::{
+    recycle_reviewed_path_with_progress, review_recycle_path_with_progress, RecycleTarget,
+};
 use dism_core::rescue::run_rescue_action_with_progress;
 use dism_core::systasks::run_system_task_with_progress;
 use dism_core::SystemInfo;
 use serde::Deserialize;
-use std::{path::Path, sync::Arc, time::Instant};
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+    time::Instant,
+};
 use tiny_http::{Method, Request};
 
 #[derive(Deserialize)]
@@ -27,6 +34,12 @@ enum ScanRequest {
         min_size_bytes: Option<u64>,
     },
     CleanupRules,
+    RecycleReview {
+        path: PathBuf,
+        is_dir: bool,
+        scan_started_at: String,
+    },
+    RecyclePath(RecycleTarget),
 }
 
 #[derive(Deserialize)]
@@ -100,6 +113,27 @@ pub(super) fn handle(
                         return Err(dism_core::scan_progress::ScanCancelled.into());
                     }
                     Ok(app.publish_cleanup_scan(results, started))
+                }
+                ScanRequest::RecycleReview {
+                    path,
+                    is_dir,
+                    scan_started_at,
+                } => {
+                    let review = review_recycle_path_with_progress(
+                        &path,
+                        is_dir,
+                        scan_started_at.parse()?,
+                        progress,
+                    )?;
+                    Ok(serde_json::to_value(review)?)
+                }
+                ScanRequest::RecyclePath(target) => {
+                    let operation = app.begin_cleanup_mutation();
+                    if operation.maintenance_active {
+                        return Err(crate::scan_jobs::ScanBusy("maintenance task").into());
+                    }
+                    let item = recycle_reviewed_path_with_progress(&target, progress)?;
+                    Ok(serde_json::json!({ "item": item, "system": SystemInfo::collect() }))
                 }
             })?;
             Ok(serde_json::json!({ "id": id }))

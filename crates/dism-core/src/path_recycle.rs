@@ -1,6 +1,7 @@
 use crate::diskmap::{invalidate_orphans_cache, is_protected_recycle_target};
 use crate::file_stamp::{open_for_verification, read_basic_info, TargetStamp};
 use crate::recycle_bin::{move_batch, move_to_recycle_bin, RecycleRequest, Verified};
+use crate::scan_progress::{ScanPhase, ScanProgress};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::hash::{BuildHasher, Hash, Hasher, RandomState};
@@ -90,7 +91,26 @@ pub(crate) fn scan_timestamp() -> String {
 }
 
 pub fn review_recycle_path(path: &Path, is_dir: bool, scan_started_at: i64) -> RecyclePreview {
-    match PathSnapshot::capture(path, Some(is_dir)) {
+    describe_review(PathSnapshot::capture(path, Some(is_dir)), scan_started_at)
+}
+
+pub fn review_recycle_path_with_progress(
+    path: &Path,
+    is_dir: bool,
+    scan_started_at: i64,
+    progress: &ScanProgress,
+) -> anyhow::Result<RecyclePreview> {
+    progress.set_phase(ScanPhase::Verifying, None);
+    let snapshot = PathSnapshot::capture_with_progress(path, Some(is_dir), Some(progress));
+    progress.check()?;
+    Ok(describe_review(snapshot, scan_started_at))
+}
+
+fn describe_review(
+    snapshot: Result<PathSnapshot, RecycleSkipReason>,
+    scan_started_at: i64,
+) -> RecyclePreview {
+    match snapshot {
         Ok(snapshot) if snapshot.latest_change <= scan_started_at => RecyclePreview::Ready {
             stamp: snapshot.stamp,
             size_bytes: snapshot.size_bytes,
@@ -121,6 +141,20 @@ pub fn recycle_reviewed_path(target: &RecycleTarget) -> RecycleItem {
         .unwrap()
 }
 
+pub fn recycle_reviewed_path_with_progress(
+    target: &RecycleTarget,
+    progress: &ScanProgress,
+) -> anyhow::Result<RecycleItem> {
+    progress.check()?;
+    progress.set_phase(ScanPhase::Verifying, None);
+    let mut results =
+        recycle_paths_with_progress(std::slice::from_ref(target), None, Some(progress));
+    progress.check()?;
+    Ok(results
+        .pop()
+        .expect("one recycle target returns one outcome"))
+}
+
 pub(crate) fn recycle_path_immediately(path: &Path) -> anyhow::Result<u64> {
     let snapshot = PathSnapshot::capture(path, None).map_err(|reason| {
         anyhow::anyhow!(
@@ -138,6 +172,15 @@ impl PathSnapshot {
         path: &Path,
         expected_dir: Option<bool>,
     ) -> Result<Self, RecycleSkipReason> {
+        Self::capture_with_progress(path, expected_dir, None)
+    }
+
+    fn capture_with_progress(
+        path: &Path,
+        expected_dir: Option<bool>,
+        progress: Option<&ScanProgress>,
+    ) -> Result<Self, RecycleSkipReason> {
+        check_progress(progress)?;
         let path = std::path::absolute(path).map_err(|_| RecycleSkipReason::Unverifiable)?;
         if path.to_str().is_none() {
             return Err(RecycleSkipReason::Unverifiable);
@@ -155,6 +198,9 @@ impl PathSnapshot {
                 return Err(RecycleSkipReason::Changed);
             }
             revision.hash(&mut stamp);
+            if let Some(progress) = progress {
+                progress.file_processed();
+            }
             return Ok(Self {
                 path,
                 stamp: format!("{:016x}", stamp.finish()),
@@ -178,6 +224,7 @@ impl PathSnapshot {
             .follow_root_links(false)
             .sort_by_file_name()
         {
+            check_progress(progress)?;
             let entry = entry.map_err(|_| RecycleSkipReason::Unverifiable)?;
             if entry.depth() == 0 {
                 continue;
@@ -202,6 +249,9 @@ impl PathSnapshot {
                 revision.hash(&mut stamp);
                 size_bytes = size_bytes.saturating_add(revision.file_size().unwrap());
                 file_count += 1;
+                if let Some(progress) = progress {
+                    progress.file_processed();
+                }
             }
         }
 
@@ -209,6 +259,7 @@ impl PathSnapshot {
         // Detect additions to directories whose entries were already enumerated.
         let dir_count = checked_dirs.len();
         for (dir, previous) in checked_dirs.into_iter().rev() {
+            check_progress(progress)?;
             if directory_revision(&dir).map_err(entry_error)? != previous {
                 return Err(RecycleSkipReason::Changed);
             }
@@ -222,6 +273,13 @@ impl PathSnapshot {
             latest_change,
         })
     }
+}
+
+fn check_progress(progress: Option<&ScanProgress>) -> Result<(), RecycleSkipReason> {
+    if progress.is_some_and(ScanProgress::is_cancelled) {
+        return Err(RecycleSkipReason::Unverifiable);
+    }
+    Ok(())
 }
 
 fn check_route(path: &Path) -> Result<bool, RecycleSkipReason> {
@@ -287,7 +345,15 @@ pub(crate) fn recycle_paths(
     targets: &[RecycleTarget],
     expected_dir: Option<bool>,
 ) -> Vec<RecycleItem> {
-    let results = recycle_with(targets, expected_dir, move_batch);
+    recycle_paths_with_progress(targets, expected_dir, None)
+}
+
+fn recycle_paths_with_progress(
+    targets: &[RecycleTarget],
+    expected_dir: Option<bool>,
+    progress: Option<&ScanProgress>,
+) -> Vec<RecycleItem> {
+    let results = recycle_with(targets, expected_dir, progress, move_batch);
     if results
         .iter()
         .any(|item| matches!(item.outcome, RecycleOutcome::Recycled { .. }))
@@ -311,6 +377,7 @@ impl std::error::Error for VerificationError {}
 fn recycle_with(
     targets: &[RecycleTarget],
     expected_dir: Option<bool>,
+    progress: Option<&ScanProgress>,
     recycle: impl FnOnce(Vec<RecycleRequest<PathSnapshot>>) -> Vec<anyhow::Result<PathSnapshot>>,
 ) -> Vec<RecycleItem> {
     let mut seen = HashSet::new();
@@ -322,13 +389,21 @@ fn recycle_with(
         .iter()
         .map(|target| {
             let target = (*target).clone();
+            let progress = progress.cloned();
             RecycleRequest {
                 path: target.path.clone(),
                 verify: Box::new(move || {
-                    let snapshot = PathSnapshot::capture(&target.path, expected_dir)
-                        .map_err(VerificationError)?;
+                    let snapshot = PathSnapshot::capture_with_progress(
+                        &target.path,
+                        expected_dir,
+                        progress.as_ref(),
+                    )
+                    .map_err(VerificationError)?;
                     if snapshot.stamp != target.stamp {
                         return Err(VerificationError(RecycleSkipReason::Changed).into());
+                    }
+                    if let Some(progress) = progress {
+                        progress.begin_recycling()?;
                     }
                     Ok(Verified {
                         value: snapshot,
@@ -375,7 +450,7 @@ mod tests {
         expected_dir: Option<bool>,
         recycle: impl FnMut(&Path) -> anyhow::Result<()>,
     ) -> Vec<RecycleItem> {
-        recycle_with(targets, expected_dir, |requests| {
+        recycle_with(targets, expected_dir, None, |requests| {
             test_move_batch(requests, recycle)
         })
     }

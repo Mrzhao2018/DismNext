@@ -430,6 +430,16 @@ export const DriverView: React.FC<Props> = ({ lang, isAdmin }) => {
                           : `Superseded by ${drv.newer_version}`}
                       </Badge>
                     )}
+                    {drv.cleanup_status === 'in_use' && (
+                      <Badge size="small" appearance="outline">
+                        {lang === 'zh' ? '设备正在使用' : 'In use by a device'}
+                      </Badge>
+                    )}
+                    {drv.cleanup_status === 'unknown' && (
+                      <Badge size="small" appearance="outline">
+                        {lang === 'zh' ? '无法判断是否可清理' : 'Cleanup eligibility unknown'}
+                      </Badge>
+                    )}
                   </div>
                   <Text size={200} style={{ color: tokens.colorNeutralForeground3 }} truncate>
                     {drv.provider}

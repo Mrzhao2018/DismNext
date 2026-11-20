@@ -5,11 +5,18 @@ use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fs;
+use std::io;
 use std::os::windows::ffi::OsStrExt;
 use std::os::windows::fs::MetadataExt;
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
+use windows_sys::Win32::Devices::DeviceAndDriverInstallation::{
+    SetupDiDestroyDeviceInfoList, SetupDiEnumDeviceInfo, SetupDiGetClassDevsW,
+    SetupDiGetDevicePropertyW, DIGCF_ALLCLASSES, DIGCF_PRESENT, HDEVINFO, SP_DEVINFO_DATA,
+};
+use windows_sys::Win32::Devices::Properties::{DEVPKEY_Device_DriverInfPath, DEVPROP_TYPE_STRING};
+use windows_sys::Win32::Foundation::{ERROR_NOT_FOUND, ERROR_NO_MORE_ITEMS, INVALID_HANDLE_VALUE};
 use winreg::enums::{HKEY_LOCAL_MACHINE, KEY_READ};
 use winreg::RegKey;
 
@@ -33,6 +40,8 @@ pub struct DriverPackageInfo {
     pub size_bytes: u64,
     pub is_outdated_duplicate: bool,
     pub newer_version: Option<String>,
+    #[serde(default)]
+    pub cleanup_status: DriverCleanupStatus,
     #[serde(skip)]
     version_rank: u64,
     #[serde(skip)]
@@ -41,6 +50,16 @@ pub struct DriverPackageInfo {
     published_num: u32,
     #[serde(skip)]
     hw_descriptors: HashSet<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DriverCleanupStatus {
+    Candidate,
+    InUse,
+    #[default]
+    Unknown,
+    Other,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -121,7 +140,7 @@ pub(crate) fn compute_drivers_uncached() -> Vec<DriverPackageInfo> {
             .unwrap_or_default();
         let (class_guid, date_filetime, date, version_rank, version) =
             decode_driver_version_blob(&version_bytes);
-        let hw_descriptors = read_driver_descriptors(&sk);
+        let hw_descriptors = read_driver_descriptors(&sk).unwrap_or_default();
 
         raw_entries.push(RawDriverMeta {
             repo_folder,
@@ -166,6 +185,7 @@ pub(crate) fn compute_drivers_uncached() -> Vec<DriverPackageInfo> {
                 size_bytes,
                 is_outdated_duplicate: false,
                 newer_version: None,
+                cleanup_status: DriverCleanupStatus::Unknown,
                 version_rank: raw.version_rank,
                 date_filetime: raw.date_filetime,
                 published_num: raw.published_num,
@@ -174,7 +194,8 @@ pub(crate) fn compute_drivers_uncached() -> Vec<DriverPackageInfo> {
         })
         .collect();
 
-    mark_outdated_duplicates(&mut items);
+    let in_use = present_device_driver_packages();
+    mark_outdated_duplicates(&mut items, in_use.as_ref().ok());
 
     // Sort outdated duplicates first, then largest packages descending
     items.sort_by(|a, b| {
@@ -350,30 +371,102 @@ pub fn delete_driver(published_name: &str) -> Result<String> {
     Ok(combined)
 }
 
-fn read_driver_descriptors(pkg_key: &RegKey) -> HashSet<String> {
-    let mut set = HashSet::new();
-    let Ok(desc_root) = pkg_key.open_subkey_with_flags("Descriptors", KEY_READ) else {
-        return set;
+fn present_device_driver_packages() -> io::Result<HashSet<u32>> {
+    let set = unsafe {
+        SetupDiGetClassDevsW(
+            std::ptr::null(),
+            std::ptr::null(),
+            std::ptr::null_mut(),
+            DIGCF_ALLCLASSES | DIGCF_PRESENT,
+        )
     };
-    for bus in desc_root.enum_keys().flatten() {
-        let Ok(bus_key) = desc_root.open_subkey_with_flags(&bus, KEY_READ) else {
-            continue;
+    if set == INVALID_HANDLE_VALUE as HDEVINFO {
+        return Err(io::Error::last_os_error());
+    }
+    struct DeviceInfoSet(HDEVINFO);
+    impl Drop for DeviceInfoSet {
+        fn drop(&mut self) {
+            unsafe { SetupDiDestroyDeviceInfoList(self.0) };
+        }
+    }
+    let set = DeviceInfoSet(set);
+    let mut packages = HashSet::new();
+    let mut index = 0;
+    loop {
+        let mut device: SP_DEVINFO_DATA = unsafe { std::mem::zeroed() };
+        device.cbSize = std::mem::size_of::<SP_DEVINFO_DATA>() as u32;
+        if unsafe { SetupDiEnumDeviceInfo(set.0, index, &mut device) } == 0 {
+            let error = io::Error::last_os_error();
+            return if error.raw_os_error() == Some(ERROR_NO_MORE_ITEMS as i32) {
+                Ok(packages)
+            } else {
+                Err(error)
+            };
+        }
+        index += 1;
+        let mut property_type = 0;
+        let mut inf = [0u16; 260];
+        let mut required_size = 0;
+        let found = unsafe {
+            SetupDiGetDevicePropertyW(
+                set.0,
+                &device,
+                &DEVPKEY_Device_DriverInfPath,
+                &mut property_type,
+                inf.as_mut_ptr().cast(),
+                std::mem::size_of_val(&inf) as u32,
+                &mut required_size,
+                0,
+            )
         };
+        if found == 0 {
+            let error = io::Error::last_os_error();
+            if error.raw_os_error() == Some(ERROR_NOT_FOUND as i32) {
+                continue;
+            }
+            return Err(error);
+        }
+        if property_type != DEVPROP_TYPE_STRING {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Invalid driver INF property",
+            ));
+        }
+        let end = inf.iter().position(|&unit| unit == 0).unwrap_or(inf.len());
+        if let Some(package) = parse_oem_inf_number(&String::from_utf16_lossy(&inf[..end])) {
+            packages.insert(package);
+        }
+    }
+}
+
+fn read_driver_descriptors(pkg_key: &RegKey) -> io::Result<HashSet<String>> {
+    let mut set = HashSet::new();
+    let desc_root = pkg_key.open_subkey_with_flags("Descriptors", KEY_READ)?;
+    for bus in desc_root.enum_keys() {
+        let bus = bus?;
+        let bus_key = desc_root.open_subkey_with_flags(&bus, KEY_READ)?;
         let mut has_child = false;
-        for hwid in bus_key.enum_keys().flatten() {
+        for hwid in bus_key.enum_keys() {
             has_child = true;
-            set.insert(format!("{}\\{}", bus, hwid).to_ascii_lowercase());
+            set.insert(format!("{}\\{}", bus, hwid?).to_ascii_lowercase());
         }
         if !has_child {
             set.insert(bus.to_ascii_lowercase());
         }
     }
-    set
+    Ok(set)
 }
 
-fn mark_outdated_duplicates(items: &mut [DriverPackageInfo]) {
+fn mark_outdated_duplicates(items: &mut [DriverPackageInfo], in_use: Option<&HashSet<u32>>) {
     let mut groups: HashMap<(String, String, String), Vec<usize>> = HashMap::new();
-    for (idx, item) in items.iter().enumerate() {
+    for (idx, item) in items.iter_mut().enumerate() {
+        item.is_outdated_duplicate = false;
+        item.newer_version = None;
+        item.cleanup_status = match in_use {
+            Some(packages) if packages.contains(&item.published_num) => DriverCleanupStatus::InUse,
+            Some(_) if !item.hw_descriptors.is_empty() => DriverCleanupStatus::Other,
+            _ => DriverCleanupStatus::Unknown,
+        };
         let key = (
             item.provider.trim().to_ascii_lowercase(),
             item.original_name.trim().to_ascii_lowercase(),
@@ -418,7 +511,11 @@ fn mark_outdated_duplicates(items: &mut [DriverPackageInfo]) {
             let hw_covered = items[idx]
                 .hw_descriptors
                 .is_subset(&items[newest_idx].hw_descriptors);
-            if cur_key < newest_key && hw_covered {
+            if items[idx].cleanup_status == DriverCleanupStatus::Other
+                && cur_key < newest_key
+                && hw_covered
+            {
+                items[idx].cleanup_status = DriverCleanupStatus::Candidate;
                 items[idx].is_outdated_duplicate = true;
                 items[idx].newer_version = Some(newest_label.clone());
             }
@@ -679,6 +776,7 @@ mod tests {
                 size_bytes: 1024,
                 is_outdated_duplicate: false,
                 newer_version: None,
+                cleanup_status: DriverCleanupStatus::Unknown,
                 version_rank: rank,
                 date_filetime: 100,
                 published_num: 1,
@@ -719,10 +817,21 @@ mod tests {
             ),
         ];
 
-        mark_outdated_duplicates(&mut list);
+        mark_outdated_duplicates(&mut list, Some(&HashSet::new()));
         assert!(!list[0].is_outdated_duplicate);
         assert!(list[1].is_outdated_duplicate);
         assert!(!list[2].is_outdated_duplicate);
         assert!(!list[3].is_outdated_duplicate);
+        let mut missing_descriptors = list[1].clone();
+        missing_descriptors.published_num = 500;
+        missing_descriptors.hw_descriptors.clear();
+        list.push(missing_descriptors);
+        let active = HashSet::from([list[1].published_num]);
+        mark_outdated_duplicates(&mut list, Some(&active));
+        assert_eq!(list[1].cleanup_status, DriverCleanupStatus::InUse);
+        assert_eq!(list[4].cleanup_status, DriverCleanupStatus::Unknown);
+        assert!(!list[1].is_outdated_duplicate && !list[4].is_outdated_duplicate);
+        mark_outdated_duplicates(&mut list, None);
+        assert!(list.iter().all(|driver| !driver.is_outdated_duplicate));
     }
 }

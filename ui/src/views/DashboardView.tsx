@@ -176,7 +176,7 @@ export const DashboardView: React.FC<Props> = ({
     setReportLoading(true);
     setReportError(null);
     try {
-      const data = await api.exportHealthReport();
+      const data = await api.exportHealthReport(lang);
       setReportData(data);
     } catch (error) {
       setReportError(String(error));

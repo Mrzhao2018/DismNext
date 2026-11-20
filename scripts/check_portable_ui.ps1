@@ -61,6 +61,44 @@ function Test-EmbeddedEncoding([string] $Uri) {
     Write-Output 'Portable JavaScript served equivalent gzip and identity responses.'
 }
 
+function Wait-ScanResult([string] $BaseUrl, [long] $Id) {
+    $deadline = [DateTime]::UtcNow.AddSeconds(10)
+    do {
+        $status = Invoke-RestMethod -Uri "$BaseUrl/api/scans/status?id=$Id" -Headers $sessionHeaders -TimeoutSec 5
+        if ($status.state -eq 'completed') { return $status.result }
+        if ($status.state -notin @('running', 'cancelling')) {
+            throw "Scan job ended as $($status.state)."
+        }
+        Start-Sleep -Milliseconds 100
+    } while ([DateTime]::UtcNow -lt $deadline)
+    throw 'Scan job did not finish.'
+}
+
+function Test-BackgroundRecycleReview([string] $BaseUrl, [string] $Directory) {
+    $scanApi = "$BaseUrl/api/scans/start"
+    $started = Invoke-CleanupPost $scanApi @{
+        kind = 'recycle_review'
+        path = $Directory
+        is_dir = $true
+        scan_started_at = [DateTime]::UtcNow.ToFileTimeUtc().ToString()
+    }
+    $review = Wait-ScanResult $BaseUrl $started.id
+    if ($review.status -ne 'ready' -or !$review.stamp -or $review.file_count -ne 4) {
+        throw 'Background recycle review did not inspect the four fixture files.'
+    }
+    $started = Invoke-CleanupPost $scanApi @{
+        kind = 'recycle_path'
+        path = $Directory
+        stamp = 'invalid fixture stamp'
+    }
+    $recycle = Wait-ScanResult $BaseUrl $started.id
+    if ($recycle.item.status -ne 'skipped' -or $recycle.item.reason -ne 'changed' -or
+        [IO.Directory]::GetFiles($Directory).Count -ne 4) {
+        throw 'Background recycle did not preserve the fixture after revision verification failed.'
+    }
+    Write-Output 'Packaged desktop reviewed a directory in the background and skipped a mismatched revision.'
+}
+
 function Test-CleanupReview([string] $BaseUrl, [string] $Scratch, [hashtable] $Files) {
     $api = "$BaseUrl/api/cleanup"
     $rules = (Invoke-RestMethod -Uri "$api/rules" -Headers $sessionHeaders -TimeoutSec 10).items.rule
@@ -146,6 +184,7 @@ $scratch = Join-Path ([IO.Path]::GetTempPath()) "dismnext-portable-$([Guid]::New
 $portable = Join-Path $scratch 'dism-app.exe'
 $inputDir = Join-Path $scratch 'release-smoke-files'
 $dataDir = Join-Path $scratch 'data'
+$profileDir = Join-Path $scratch 'profile'
 $customRules = Join-Path $dataDir 'custom_rules.json'
 $catalogDir = Join-Path $scratch 'catalog'
 $implicitCatalog = Join-Path $catalogDir 'rules.json'
@@ -182,7 +221,7 @@ try {
     Copy-Item -LiteralPath $source -Destination $portable
     $start = [Diagnostics.ProcessStartInfo]::new($portable)
     $start.WorkingDirectory = $scratch
-    $start.Environment['LOCALAPPDATA'] = (Join-Path $scratch 'profile')
+    $start.Environment['LOCALAPPDATA'] = $profileDir
     $start.UseShellExecute = $false
     $start.CreateNoWindow = $true
     $start.RedirectStandardOutput = $true
@@ -255,6 +294,7 @@ try {
     }
     Write-Output 'Packaged desktop reported a maintenance worker failure through the job API.'
     if ($VerifyCleanup) {
+        Test-BackgroundRecycleReview $baseUrl $inputDir
         Test-CleanupReview $baseUrl $scratch $files
     }
 } finally {
@@ -269,6 +309,16 @@ try {
         try {
             foreach ($file in @($portable, $implicitCatalog, $customRules) + @($files.Values)) {
                 if ([IO.File]::Exists($file)) { [IO.File]::Delete($file) }
+            }
+            if (Test-Path -LiteralPath $profileDir) {
+                # Shell recycle verification can initialize directories in the isolated profile.
+                $profile = Get-Item -LiteralPath $profileDir -Force
+                $resolvedScratch = (Resolve-Path -LiteralPath $scratch).ProviderPath
+                if (!$profile.PSIsContainer -or $profile.Parent.FullName -ne $resolvedScratch -or
+                    ($profile.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+                    throw 'The isolated profile does not resolve to a normal directory inside the fixture.'
+                }
+                Remove-Item -LiteralPath $profile.FullName -Recurse -Force
             }
             foreach ($dir in @($inputDir, $dataDir, $catalogDir, $scratch)) {
                 if ([IO.Directory]::Exists($dir)) { [IO.Directory]::Delete($dir, $false) }

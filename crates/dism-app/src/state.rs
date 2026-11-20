@@ -1,4 +1,4 @@
-use crate::{request_security::Session, scan_jobs::ScanJobs};
+use crate::{desktop_lifecycle::DesktopLifecycle, request_security::Session, scan_jobs::ScanJobs};
 use dism_core::cleaner::{CleanupBatchScan, CleanupScanResult, ReviewedCleanup};
 use dism_core::maintenance::MaintenanceProgress;
 use dism_core::systasks::invalidate_systasks_cache;
@@ -23,6 +23,7 @@ pub(crate) struct AppState {
     pub(crate) maintenance_jobs: Arc<ScanJobs<MaintenanceProgress>>,
     pub(crate) uninstall: Mutex<Option<Win32Uninstall>>,
     pub(crate) ui_dir: Option<PathBuf>,
+    pub(crate) desktop: Option<DesktopLifecycle>,
 }
 
 const FULL_SCAN_TTL: Duration = Duration::from_secs(60);
