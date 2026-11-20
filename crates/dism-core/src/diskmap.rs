@@ -1,7 +1,8 @@
 use crate::catalog::LocalizedText;
 use crate::disk_allocation::AllocationScan;
 pub use crate::disk_allocation::DiskAllocation;
-use crate::duplicate_recycle::FileState;
+use crate::duplicate_recycle::{FileIdentity, FileState};
+use crate::file_stamp::open_for_verification;
 use crate::path_recycle::{recycle_path_immediately, scan_timestamp};
 use crate::scan_progress::{ScanPhase, ScanProgress};
 use crate::sysinfo::SystemInfo;
@@ -9,15 +10,21 @@ use anyhow::{anyhow, Result};
 use chrono::DateTime;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
-use std::cmp::Reverse;
-use std::collections::{HashMap, HashSet};
+use std::borrow::Cow;
+use std::cmp::{Ordering, Reverse};
+use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::os::windows::fs::MetadataExt;
+use std::os::windows::io::AsRawHandle;
 use std::path::{Path, PathBuf};
 use std::sync::{OnceLock, RwLock};
 use std::time::{Duration, Instant, UNIX_EPOCH};
 use walkdir::WalkDir;
+use windows_sys::Win32::Storage::FileSystem::{
+    GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION, FILE_READ_DATA,
+    FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+};
 use winreg::enums::{
     HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ, KEY_WOW64_32KEY, KEY_WOW64_64KEY,
 };
@@ -93,7 +100,75 @@ pub struct DiskAnalysisReport {
 struct ScanAccumulator {
     node: RawNode,
     exts: HashMap<String, (u64, usize)>,
-    top_files: Vec<LargeFileEntry>,
+    top_files: LargestFiles,
+}
+
+#[derive(Default)]
+struct LargestFiles {
+    heap: BinaryHeap<RankedFile>,
+    sequence: usize,
+}
+
+struct RankedFile {
+    entry: LargeFileEntry,
+    order: usize,
+}
+
+impl Ord for RankedFile {
+    fn cmp(&self, other: &Self) -> Ordering {
+        other.entry.size_bytes.cmp(&self.entry.size_bytes).then_with(|| self.order.cmp(&other.order))
+    }
+}
+
+impl PartialOrd for RankedFile {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl PartialEq for RankedFile {
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other).is_eq()
+    }
+}
+
+impl Eq for RankedFile {}
+
+impl LargestFiles {
+    fn accepts(&self, size: u64) -> bool {
+        self.heap.len() < MAX_LARGEST_FILES
+            || self.heap.peek().is_some_and(|entry| size > entry.entry.size_bytes)
+    }
+
+    fn insert(&mut self, entry: LargeFileEntry) {
+        if !self.accepts(entry.size_bytes) {
+            return;
+        }
+        let ranked = RankedFile { entry, order: self.sequence };
+        self.sequence += 1;
+        self.push_ranked(ranked);
+    }
+
+    fn push_ranked(&mut self, ranked: RankedFile) {
+        if self.heap.len() < MAX_LARGEST_FILES {
+            self.heap.push(ranked);
+        } else if self.heap.peek().is_some_and(|last| ranked < *last) {
+            *self.heap.peek_mut().unwrap() = ranked;
+        }
+    }
+
+    fn merge(&mut self, other: Self) {
+        let offset = self.sequence;
+        self.sequence += other.sequence;
+        for mut ranked in other.heap {
+            ranked.order += offset;
+            self.push_ranked(ranked);
+        }
+    }
+
+    fn into_ranked_entries(self) -> Vec<LargeFileEntry> {
+        self.heap.into_sorted_vec().into_iter().map(|ranked| ranked.entry).collect()
+    }
 }
 
 struct RawNode {
@@ -218,6 +293,7 @@ pub fn analyze_path_with_options(
     let mut other_count = 0usize;
     for (i, (ext, sz, cnt)) in ext_vec.into_iter().enumerate() {
         if i < MAX_EXTENSIONS {
+            let ext = extension_label(&ext);
             let description = describe_extension(&ext);
             extensions.push(ExtensionStat {
                 ext,
@@ -258,7 +334,7 @@ pub fn analyze_path_with_options(
         total_dirs,
         tree,
         extensions,
-        largest_files: acc.top_files,
+        largest_files: acc.top_files.into_ranked_entries(),
     })
 }
 
@@ -298,17 +374,19 @@ fn scan_recursive(
     if meta.is_file() {
         if let Some(progress) = progress { progress.file_processed(); }
         let size = meta.len();
-        let ext = extract_ext(path);
+        let ext = normalized_extension(path);
         let mut exts = HashMap::new();
-        exts.insert(ext.clone(), (size, 1));
-        let top_files = vec![LargeFileEntry {
+        let label = extension_label(&ext);
+        exts.insert(ext.into_owned(), (size, 1));
+        let mut top_files = LargestFiles::default();
+        top_files.insert(LargeFileEntry {
             path: path_str.clone(),
             name: name.clone(),
-            ext: ext.clone(),
+            ext: label.clone(),
             size_bytes: size,
             allocated_bytes: allocation
                 .and_then(|scan| scan.record_file(path, meta.file_attributes())),
-        }];
+        });
         return Ok(ScanAccumulator {
             node: RawNode {
                 name,
@@ -317,7 +395,7 @@ fn scan_recursive(
                 size_bytes: size,
                 file_count: 1,
                 dir_count: 0,
-                ext: Some(ext),
+                ext: Some(label),
                 children: Vec::new(),
                 omitted_children: OmittedChildren::default(),
             },
@@ -339,7 +417,8 @@ fn scan_recursive(
     let mut children: Vec<RawNode> = Vec::new();
     let mut omitted_children = OmittedChildren::default();
     let mut exts: HashMap<String, (u64, usize)> = HashMap::new();
-    let mut top_files: Vec<LargeFileEntry> = Vec::new();
+    let mut top_files = LargestFiles::default();
+    let mut visible_cutoff = None;
     let mut sub_dirs: Vec<PathBuf> = Vec::new();
 
     for entry in rd {
@@ -356,27 +435,40 @@ fn scan_recursive(
         if (c_meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT) != 0 {
             continue;
         }
-        let child_path = entry.path();
         if c_meta.is_file() {
             if let Some(progress) = progress { progress.file_processed(); }
-            let sz = c_meta.len();
-            let c_name = entry.file_name().to_string_lossy().into_owned();
-            let c_path_str = child_path.to_string_lossy().into_owned();
-            let ext = extract_ext(&child_path);
+            let size = c_meta.len();
+            let file_name = entry.file_name();
+            let ext = normalized_extension(Path::new(&file_name));
 
-            total_bytes = total_bytes.saturating_add(sz);
+            total_bytes = total_bytes.saturating_add(size);
             total_files += 1;
+            add_extension(&mut exts, &ext, size, 1);
 
-            let ent = exts.entry(ext.clone()).or_insert((0, 0));
-            ent.0 = ent.0.saturating_add(sz);
-            ent.1 += 1;
-
-            if child_depth.is_some() {
+            let largest = top_files.accepts(size);
+            let visible = child_depth.is_some() && visible_cutoff.is_none_or(|cutoff| size > cutoff);
+            if child_depth.is_some() && !visible && size != 0 {
+                omitted_children.size_bytes = omitted_children.size_bytes.saturating_add(size);
+                omitted_children.file_count += 1;
+                omitted_children.count += 1;
+            }
+            if !(largest || visible || allocation.is_some()) {
+                continue;
+            }
+            let child_path = entry.path();
+            let allocated_bytes = allocation.and_then(|scan| scan.record_file(&child_path, c_meta.file_attributes()));
+            if !(largest || visible) {
+                continue;
+            }
+            let c_name = file_name.to_string_lossy().into_owned();
+            let c_path_str = child_path.to_string_lossy().into_owned();
+            let ext = extension_label(&ext);
+            if visible {
                 children.push(RawNode {
                     name: c_name.clone(),
                     path: c_path_str.clone(),
                     is_dir: false,
-                    size_bytes: sz,
+                    size_bytes: size,
                     file_count: 1,
                     dir_count: 0,
                     ext: Some(ext.clone()),
@@ -385,21 +477,20 @@ fn scan_recursive(
                 });
                 if children.len() == MAX_CHILDREN_PER_NODE * 2 {
                     trim_children(&mut children, &mut omitted_children);
+                    visible_cutoff = children.last().map(|node| node.size_bytes);
                 }
             }
-            top_files.push(LargeFileEntry {
-                path: c_path_str,
-                name: c_name,
-                ext,
-                size_bytes: sz,
-                allocated_bytes: allocation
-                    .and_then(|scan| scan.record_file(&child_path, c_meta.file_attributes())),
-            });
-            if top_files.len() == MAX_LARGEST_FILES * 2 {
-                trim_largest_files(&mut top_files);
+            if largest {
+                top_files.insert(LargeFileEntry {
+                    path: c_path_str,
+                    name: c_name,
+                    ext,
+                    size_bytes: size,
+                    allocated_bytes,
+                });
             }
         } else if c_meta.is_dir() {
-            sub_dirs.push(child_path);
+            sub_dirs.push(entry.path());
         }
     }
 
@@ -420,19 +511,13 @@ fn scan_recursive(
                     trim_children(&mut children, &mut omitted_children);
                 }
             }
-            for (ext, (sz, cnt)) in c.exts {
-                let entry = exts.entry(ext).or_insert((0, 0));
-                entry.0 = entry.0.saturating_add(sz);
-                entry.1 += cnt;
+            for (ext, (size, count)) in c.exts {
+                add_extension(&mut exts, &ext, size, count);
             }
-            top_files.extend(c.top_files);
-            if top_files.len() >= MAX_LARGEST_FILES * 2 {
-                trim_largest_files(&mut top_files);
-            }
+            top_files.merge(c.top_files);
         }
     }
 
-    trim_largest_files(&mut top_files);
     trim_children(&mut children, &mut omitted_children);
 
     Ok(ScanAccumulator {
@@ -450,11 +535,6 @@ fn scan_recursive(
         exts,
         top_files,
     })
-}
-
-fn trim_largest_files(files: &mut Vec<LargeFileEntry>) {
-    files.sort_by_key(|file| Reverse(file.size_bytes));
-    files.truncate(MAX_LARGEST_FILES);
 }
 
 fn trim_children(children: &mut Vec<RawNode>, omitted: &mut OmittedChildren) {
@@ -480,16 +560,30 @@ fn empty_acc(name: String, path: String, is_dir: bool) -> ScanAccumulator {
             omitted_children: OmittedChildren::default(),
         },
         exts: HashMap::new(),
-        top_files: Vec::new(),
+        top_files: LargestFiles::default(),
     }
 }
 
-fn extract_ext(path: &Path) -> String {
-    path.extension()
-        .and_then(|s| s.to_str())
-        .filter(|s| !s.is_empty())
-        .map(|s| format!(".{}", s.to_ascii_lowercase()))
-        .unwrap_or_else(|| "(no ext)".to_string())
+fn normalized_extension(path: &Path) -> Cow<'_, str> {
+    let ext = path.extension().and_then(|ext| ext.to_str()).unwrap_or("");
+    if ext.bytes().any(|byte| byte.is_ascii_uppercase()) {
+        Cow::Owned(ext.to_ascii_lowercase())
+    } else {
+        Cow::Borrowed(ext)
+    }
+}
+
+fn extension_label(ext: &str) -> String {
+    if ext.is_empty() { "(no ext)".to_string() } else { format!(".{ext}") }
+}
+
+fn add_extension(exts: &mut HashMap<String, (u64, usize)>, ext: &str, size: u64, count: usize) {
+    if let Some(total) = exts.get_mut(ext) {
+        total.0 = total.0.saturating_add(size);
+        total.1 += count;
+    } else {
+        exts.insert(ext.to_string(), (size, count));
+    }
 }
 
 fn is_cache_folder_name(name: &str, path: &str) -> bool {
@@ -738,12 +832,16 @@ pub struct OrphanDirEntry {
     pub scan_started_at: String,
 }
 
-/// Three-stage parallel duplicate file finder (`size -> 4KB head/tail sample -> 128-bit full hash`).
+/// Finds duplicate files by size, sampled content and a full BLAKE3 hash.
 pub fn find_duplicate_files(root: &Path, min_size_bytes: u64) -> Result<DuplicateScanReport> {
     find_duplicate_files_inner(root, min_size_bytes, None)
 }
 
-pub fn find_duplicate_files_with_progress(root: &Path, min_size_bytes: u64, progress: &ScanProgress) -> Result<DuplicateScanReport> {
+pub fn find_duplicate_files_with_progress(
+    root: &Path,
+    min_size_bytes: u64,
+    progress: &ScanProgress,
+) -> Result<DuplicateScanReport> {
     find_duplicate_files_inner(root, min_size_bytes, Some(progress))
 }
 
@@ -754,76 +852,65 @@ fn find_duplicate_files_inner(root: &Path, min_size_bytes: u64, progress: Option
     }
     let started = Instant::now();
     let threshold = min_size_bytes.max(64 * 1024);
-    let sys_root = std::env::var("SystemRoot")
-        .unwrap_or_else(|_| r"C:\Windows".to_string())
-        .to_ascii_lowercase();
-    let winsxs_prefix = format!(r"{}\winsxs", sys_root);
-    let driverstore_prefix = format!(r"{}\system32\driverstore", sys_root);
+    let windows = crate::system_tools::windows_dir().unwrap_or_else(|_| PathBuf::from(r"C:\Windows"));
+    let winsxs = normalize_win_path(&windows.join("WinSxS"));
+    let driverstore = normalize_win_path(&windows.join(r"System32\DriverStore"));
 
-    let mut by_size: HashMap<u64, Vec<(PathBuf, u64)>> = HashMap::new();
-    let mut walker = WalkDir::new(root).follow_links(false).into_iter();
+    let mut by_size: HashMap<u64, Vec<PathBuf>> = HashMap::new();
+    let mut walker = WalkDir::new(root).follow_links(false).follow_root_links(false).into_iter();
     loop {
         check_scan(progress)?;
         let Some(entry) = walker.next() else { break; };
         let Ok(entry) = entry else { continue; };
-        let path = entry.path();
-        let lower = path.to_string_lossy().to_ascii_lowercase();
-        if lower.starts_with(&winsxs_prefix) || lower.starts_with(&driverstore_prefix)
-            || (path != root && !std::fs::symlink_metadata(path)
-                .is_ok_and(|meta| meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT == 0))
-        {
-            if entry.file_type().is_dir() { walker.skip_current_dir(); }
-            continue;
-        }
-        if !entry.file_type().is_file() {
-            continue;
-        }
+        let directory = entry.file_type().is_dir();
+        // WalkDir uses the Windows directory entry's cached attributes and size.
         let Ok(meta) = entry.metadata() else {
+            if directory { walker.skip_current_dir(); }
             continue;
         };
-        if let Some(progress) = progress { progress.file_processed(); }
-        let sz = meta.len();
-        if sz < threshold {
+        let servicing_path = if directory || entry.depth() == 0 {
+            let path = normalize_win_path(entry.path());
+            path.starts_with(&winsxs) || path.starts_with(&driverstore)
+        } else {
+            false
+        };
+        if meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 || servicing_path {
+            if directory { walker.skip_current_dir(); }
             continue;
         }
-        let mod_unix = meta
-            .modified()
-            .ok()
-            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        by_size.entry(sz).or_default().push((entry.into_path(), mod_unix));
+        if !meta.is_file() {
+            continue;
+        }
+        if let Some(progress) = progress { progress.file_processed(); }
+        let size = meta.len();
+        if size >= threshold {
+            by_size.entry(size).or_default().push(entry.into_path());
+        }
     }
 
-    let size_candidates: Vec<(u64, PathBuf, u64)> = by_size
-        .into_iter()
-        .filter(|(_, list)| list.len() >= 2)
-        .flat_map(|(sz, list)| list.into_iter().map(move |(p, m)| (sz, p, m)))
-        .collect();
-
+    let size_candidates = distinct_duplicate_candidates(by_size, progress)?;
     if let Some(progress) = progress {
         progress.set_phase(ScanPhase::Sampling, Some(size_candidates.len()));
     }
     let sampled = size_candidates
         .into_par_iter()
-        .filter_map(|(sz, path, mod_unix)| {
+        .filter_map(|(sz, path)| {
             if let Err(error) = check_scan(progress) { return Some(Err(error)); }
             let sample = sample_hash_file(&path, sz, progress);
             if let Some(progress) = progress { progress.file_processed(); }
-            sample.map(|hash| Ok((sz, hash, path, mod_unix)))
+            sample.map(|hash| Ok((sz, hash, path)))
         })
         .collect::<Result<Vec<_>>>()?;
 
-    let mut by_sample: HashMap<(u64, u64), Vec<(PathBuf, u64)>> = HashMap::new();
-    for (sz, sample, path, mod_unix) in sampled {
+    let mut by_sample: HashMap<(u64, blake3::Hash), Vec<PathBuf>> = HashMap::new();
+    for (size, sample, path) in sampled {
         check_scan(progress)?;
-        by_sample.entry((sz, sample)).or_default().push((path, mod_unix));
+        by_sample.entry((size, sample)).or_default().push(path);
     }
 
-    let full_candidates: Vec<(u64, PathBuf, u64)> = by_sample
-        .into_iter()
-        .filter(|(_, list)| list.len() >= 2)
-        .flat_map(|((sz, _), list)| list.into_iter().map(move |(p, m)| (sz, p, m)))
+    let full_candidates: Vec<_> = by_sample.into_iter()
+        .filter(|(_, paths)| paths.len() >= 2)
+        .flat_map(|((size, _), paths)| paths.into_iter().map(move |path| (size, path)))
         .collect();
 
     if let Some(progress) = progress {
@@ -831,17 +918,17 @@ fn find_duplicate_files_inner(root: &Path, min_size_bytes: u64, progress: Option
     }
     let hashed = full_candidates
         .into_par_iter()
-        .filter_map(|(sz, path, mod_unix)| {
+        .filter_map(|(size, path)| {
             if let Err(error) = check_scan(progress) { return Some(Err(error)); }
             let result = (|| {
-                let file = File::open(&path).ok()?;
+                let mut file = open_hash_file(&path, size)?;
+                let modified = file.metadata().ok()?.last_write_time();
                 let state = FileState::read(&file).ok();
-                let hash = full_hash_128(&file, progress)?;
-                let size = state.as_ref().map(|state| state.size).or_else(|| file.metadata().ok().map(|meta| meta.len()))?;
-                if size != sz || state != FileState::read(&file).ok() {
+                let hash = full_hash(&mut file, progress)?;
+                if state != FileState::read(&file).ok() {
                     return None;
                 }
-                Some((sz, hash, path, mod_unix, state))
+                Some((size, hash, path, modified, state))
             })();
             if let Some(progress) = progress { progress.file_processed(); }
             result.map(Ok)
@@ -852,11 +939,22 @@ fn find_duplicate_files_inner(root: &Path, min_size_bytes: u64, progress: Option
 
     const WINDOWS_EPOCH_SECONDS: u64 = 11_644_473_600;
     const TICKS_PER_SECOND: u64 = 10_000_000;
-    let mut by_full: HashMap<(u64, u128), Vec<(u64, DuplicateFileEntry)>> = HashMap::new();
-    for (sz, h, path, mod_unix, state) in hashed {
+    let mut by_full: HashMap<(u64, blake3::Hash), Vec<(u64, DuplicateFileEntry)>> = HashMap::new();
+    let mut identities = HashSet::new();
+    for (sz, h, path, modified, state) in hashed {
         check_scan(progress)?;
-        let modified_ticks = state.as_ref().map(|state| state.modified)
-            .unwrap_or_else(|| mod_unix.saturating_add(WINDOWS_EPOCH_SECONDS).saturating_mul(TICKS_PER_SECOND));
+        let modified_ticks = state.as_ref().map_or(modified, |state| state.modified);
+        let stamp = match state {
+            Some(state) => {
+                let stamp = state.stamp();
+                // Also guard against aliases created after the first identity check.
+                if !identities.insert(state.identity) {
+                    continue;
+                }
+                Some(stamp)
+            }
+            None => None,
+        };
         let mod_unix = (modified_ticks / TICKS_PER_SECOND).saturating_sub(WINDOWS_EPOCH_SECONDS);
         let name = path
             .file_name()
@@ -871,7 +969,7 @@ fn find_duplicate_files_inner(root: &Path, min_size_bytes: u64, progress: Option
             name,
             modified_date,
             modified_unix: mod_unix,
-            stamp: state.map(|state| state.stamp()),
+            stamp,
         }));
     }
 
@@ -884,7 +982,7 @@ fn find_duplicate_files_inner(root: &Path, min_size_bytes: u64, progress: Option
         files.sort_by(|(a_time, a), (b_time, b)| b_time.cmp(a_time).then_with(|| a.path.cmp(&b.path)));
         let wasted_bytes = sz.saturating_mul((files.len() - 1) as u64);
         groups.push(DuplicateGroup {
-            hash_hex: format!("{:032x}", h),
+            hash_hex: h.to_hex().to_string(),
             size_bytes: sz,
             wasted_bytes,
             files: files.into_iter().map(|(_, file)| file).collect(),
@@ -906,6 +1004,54 @@ fn find_duplicate_files_inner(root: &Path, min_size_bytes: u64, progress: Option
     })
 }
 
+fn distinct_duplicate_candidates(
+    by_size: HashMap<u64, Vec<PathBuf>>,
+    progress: Option<&ScanProgress>,
+) -> Result<Vec<(u64, PathBuf)>> {
+    let candidates: Vec<_> = by_size.into_iter()
+        .filter(|(_, paths)| paths.len() >= 2)
+        .flat_map(|(size, paths)| paths.into_iter().map(move |path| (size, path)))
+        .collect();
+    let probed = candidates.into_par_iter().map(|(size, path)| {
+        check_scan(progress)?;
+        let identity = hard_link_identity(&path);
+        Ok((size, path, identity))
+    }).collect::<Result<Vec<_>>>()?;
+
+    let mut linked: HashMap<FileIdentity, (u64, PathBuf)> = HashMap::new();
+    let mut distinct = Vec::new();
+    for (size, path, identity) in probed {
+        check_scan(progress)?;
+        if let Some(identity) = identity {
+            let entry = linked.entry(identity).or_insert_with(|| (size, path.clone()));
+            if path < entry.1 {
+                *entry = (size, path);
+            }
+        } else {
+            distinct.push((size, path));
+        }
+    }
+    distinct.extend(linked.into_values());
+    let mut counts = HashMap::new();
+    for (size, _) in &distinct {
+        *counts.entry(*size).or_insert(0usize) += 1;
+    }
+    distinct.retain(|(size, _)| counts[size] > 1);
+    Ok(distinct)
+}
+
+fn hard_link_identity(path: &Path) -> Option<FileIdentity> {
+    let sharing = FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE;
+    let file = open_for_verification(path, false, 0, sharing).ok()?;
+    let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+    let ok = unsafe { GetFileInformationByHandle(file.as_raw_handle(), &mut info) };
+    if ok != 0 && info.nNumberOfLinks > 1 {
+        FileIdentity::read(&file).ok()
+    } else {
+        None
+    }
+}
+
 fn read_hash_chunk(reader: &mut impl Read, buffer: &mut [u8], progress: Option<&ScanProgress>) -> Option<usize> {
     check_scan(progress).ok()?;
     let bytes = reader.read(buffer).ok()?;
@@ -913,45 +1059,43 @@ fn read_hash_chunk(reader: &mut impl Read, buffer: &mut [u8], progress: Option<&
     Some(bytes)
 }
 
-fn sample_hash_file(path: &Path, size: u64, progress: Option<&ScanProgress>) -> Option<u64> {
-    let mut f = File::open(path).ok()?;
-    let mut h: u64 = 0xcbf29ce484222325 ^ size;
-    let mut buf = [0u8; 4096];
-    let n1 = read_hash_chunk(&mut f, &mut buf, progress)?;
-    for &b in &buf[..n1] {
-        h ^= b as u64;
-        h = h.wrapping_mul(0x100000001b3);
-    }
-    if size > 4096 {
-        check_scan(progress).ok()?;
-        let tail_pos = size.saturating_sub(4096);
-        f.seek(SeekFrom::Start(tail_pos)).ok()?;
-        let n2 = read_hash_chunk(&mut f, &mut buf, progress)?;
-        for &b in &buf[..n2] {
-            h ^= b as u64;
-            h = h.wrapping_mul(0x100000001b3);
-        }
-    }
-    Some(h)
+fn open_hash_file(path: &Path, expected_size: u64) -> Option<File> {
+    let file = open_for_verification(path, false, FILE_READ_DATA, FILE_SHARE_READ | FILE_SHARE_DELETE).ok()?;
+    let metadata = file.metadata().ok()?;
+    (metadata.is_file() && metadata.len() == expected_size
+        && metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT == 0)
+        .then_some(file)
 }
 
-fn full_hash_128(mut reader: impl Read, progress: Option<&ScanProgress>) -> Option<u128> {
-    let mut h1: u64 = 0xcbf29ce484222325;
-    let mut h2: u64 = 0x9e3779b97f4a7c15;
-    let mut buf = [0u8; 65536];
-    loop {
-        let n = read_hash_chunk(&mut reader, &mut buf, progress)?;
-        if n == 0 {
-            break;
+fn sample_hash_file(path: &Path, size: u64, progress: Option<&ScanProgress>) -> Option<blake3::Hash> {
+    let mut file = open_hash_file(path, size)?;
+    let mut hash = blake3::Hasher::new();
+    let mut buffer = [0; 4096];
+    for offset in [0, size - buffer.len() as u64] {
+        file.seek(SeekFrom::Start(offset)).ok()?;
+        let mut copied = 0;
+        while copied < buffer.len() {
+            let count = read_hash_chunk(&mut file, &mut buffer[copied..], progress)?;
+            if count == 0 {
+                return None;
+            }
+            copied += count;
         }
-        for (i, &b) in buf[..n].iter().enumerate() {
-            h1 ^= b as u64;
-            h1 = h1.wrapping_mul(0x100000001b3);
-            h2 = h2.wrapping_add((b as u64).wrapping_mul((i as u64).wrapping_add(1)));
-            h2 = h2.rotate_left(13).wrapping_mul(0xff51afd7ed558ccd);
-        }
+        hash.update(&buffer);
     }
-    Some(((h1 as u128) << 64) | (h2 as u128))
+    Some(hash.finalize())
+}
+
+fn full_hash(mut reader: impl Read, progress: Option<&ScanProgress>) -> Option<blake3::Hash> {
+    let mut hash = blake3::Hasher::new();
+    let mut buffer = [0; 64 * 1024];
+    loop {
+        let count = read_hash_chunk(&mut reader, &mut buffer, progress)?;
+        if count == 0 {
+            return Some(hash.finalize());
+        }
+        hash.update(&buffer[..count]);
+    }
 }
 
 static ORPHANS_CACHE: OnceLock<RwLock<Option<(Instant, Vec<OrphanDirEntry>)>>> = OnceLock::new();
@@ -1240,7 +1384,7 @@ mod tests {
         }
         let progress = ScanProgress::default();
         let mut reader = CancelAfterChunk { progress: &progress, reads: 0 };
-        assert!(full_hash_128(&mut reader, Some(&progress)).is_none());
+        assert!(full_hash(&mut reader, Some(&progress)).is_none());
         assert_eq!(reader.reads, 1);
         let snapshot = serde_json::to_value(progress.snapshot()).unwrap();
         assert_eq!(snapshot["bytes_read"], 65536);
@@ -1421,7 +1565,51 @@ mod tests {
         assert_eq!(report.total_wasted_bytes, 70 * 1024);
         assert_eq!(report.groups[0].files.len(), 2);
         assert_eq!(report.groups[0].files[0].name, "dup2.bin");
+        assert_eq!(report.groups[0].hash_hex, blake3::hash(&same_payload).to_hex().to_string());
 
         let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn hard_link_aliases_are_removed_before_reading_duplicate_content() {
+        let root = std::env::temp_dir().join(format!("dismnext_hardlink_dups_{}", std::process::id()));
+        fs::create_dir(&root).unwrap();
+        let size = 72 * 1024;
+        let bytes = vec![0x42; size];
+        let original = root.join("a.bin");
+        let alias = root.join("z-link.bin");
+        let copy = root.join("b.bin");
+        fs::write(&original, &bytes).unwrap();
+        fs::hard_link(&original, &alias).unwrap();
+        fs::write(&copy, &bytes).unwrap();
+        let progress = ScanProgress::default();
+        let report = find_duplicate_files_with_progress(&root, 64 * 1024, &progress).unwrap();
+        let counters = serde_json::to_value(progress.snapshot()).unwrap();
+        assert_eq!(counters["bytes_read"], 2 * (size + 2 * 4096));
+        assert_eq!(report.total_wasted_bytes, size as u64);
+        assert_eq!(report.groups[0].files.len(), 2);
+        assert!(report.groups[0].files.iter().all(|file| file.name != "z-link.bin"));
+        for path in [alias, original, copy] { fs::remove_file(path).unwrap(); }
+        fs::remove_dir(root).unwrap();
+    }
+
+    #[test]
+    fn largest_files_heap_preserves_rank_and_ties_across_subtrees() {
+        let file = |size_bytes, name: String| LargeFileEntry {
+            path: name.clone(), name, ext: "(no ext)".into(), size_bytes, allocated_bytes: None,
+        };
+        let mut parent = LargestFiles::default();
+        let mut child = LargestFiles::default();
+        for index in 0..120 {
+            parent.insert(file(10, format!("original-{index}")));
+            child.insert(file(10, format!("later-{index}")));
+        }
+        child.insert(file(20, "largest".into()));
+        parent.merge(child);
+        let entries = parent.into_ranked_entries();
+        assert_eq!(entries.len(), MAX_LARGEST_FILES);
+        assert_eq!(entries[0].name, "largest");
+        assert_eq!(entries[1].name, "original-0");
+        assert_eq!(entries.last().unwrap().name, "original-98");
     }
 }

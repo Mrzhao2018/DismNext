@@ -134,6 +134,25 @@ const useStyles = makeStyles({
   },
 });
 
+const LANGUAGE_KEY = 'dismnext-language';
+const THEME_KEY = 'dismnext-theme';
+
+function storedPreference(key: string): string | null {
+  try {
+    return window.localStorage.getItem(key);
+  } catch {
+    return null;
+  }
+}
+
+function savePreference(key: string, value: string) {
+  try {
+    window.localStorage.setItem(key, value);
+  } catch {
+    // The preference still applies for the current window.
+  }
+}
+
 const fetchOptimizerGroups = async () => (await api.getOptimizerGroups()).groups;
 const fetchSnapshots = async () => (await api.getSnapshots()).snapshots;
 
@@ -165,8 +184,20 @@ const AppShell: React.FC<{
   onToggleTheme: () => void;
 }> = ({ dark, onToggleTheme }) => {
   const styles = useStyles();
-  const [lang, setLang] = useState<Lang>('zh');
+  const [lang, setLang] = useState<Lang>(() => storedPreference(LANGUAGE_KEY) === 'en' ? 'en' : 'zh');
   const [tab, setTab] = useState<NavTab>('dashboard');
+  const [visitedCleanup, setVisitedCleanup] = useState(false);
+  const [visitedDiskmap, setVisitedDiskmap] = useState(false);
+  const navigate = useCallback((next: NavTab) => {
+    if (next === 'cleanup') setVisitedCleanup(true);
+    if (next === 'diskmap') setVisitedDiskmap(true);
+    setTab(next);
+  }, []);
+  const toggleLanguage = () => {
+    const next = lang === 'zh' ? 'en' : 'zh';
+    savePreference(LANGUAGE_KEY, next);
+    setLang(next);
+  };
   const system = useResource(api.getSysInfo);
   const cleanup = useResource(api.getCleanupRules);
   const optimizer = useResource(fetchOptimizerGroups, tab === 'optimize');
@@ -237,6 +268,12 @@ const AppShell: React.FC<{
     lang === 'zh' ? '加载快照' : 'Load snapshots', error, refreshSnapshots,
   );
 
+  const viewLoading = (
+    <div style={{ display: 'flex', justifyContent: 'center', paddingTop: 60 }}>
+      <Spinner label={lang === 'zh' ? '正在加载视图...' : 'Loading view...'} />
+    </div>
+  );
+
   return (
     <div className={styles.shell}>
       <aside className={styles.sidebar}>
@@ -258,7 +295,7 @@ const AppShell: React.FC<{
               className={styles.navBtn}
               appearance={tab === 'dashboard' ? 'primary' : 'subtle'}
               icon={<HomeRegular style={{ fontSize: 22 }} />}
-              onClick={() => setTab('dashboard')}
+              onClick={() => navigate('dashboard')}
             >
               {lang === 'zh' ? '系统概览' : 'Dashboard'}
             </Button>
@@ -266,7 +303,7 @@ const AppShell: React.FC<{
               className={styles.navBtn}
               appearance={tab === 'cleanup' ? 'primary' : 'subtle'}
               icon={<Broom24Regular />}
-              onClick={() => setTab('cleanup')}
+              onClick={() => navigate('cleanup')}
             >
               {lang === 'zh' ? '空间回收' : 'Space Recycle'}
             </Button>
@@ -274,7 +311,7 @@ const AppShell: React.FC<{
               className={styles.navBtn}
               appearance={tab === 'diskmap' ? 'primary' : 'subtle'}
               icon={<DataPie24Regular />}
-              onClick={() => setTab('diskmap')}
+              onClick={() => navigate('diskmap')}
             >
               {lang === 'zh' ? '空间分析' : 'Space Analyzer'}
             </Button>
@@ -282,7 +319,7 @@ const AppShell: React.FC<{
               className={styles.navBtn}
               appearance={tab === 'drivers' ? 'primary' : 'subtle'}
               icon={<DeveloperBoardRegular style={{ fontSize: 22 }} />}
-              onClick={() => setTab('drivers')}
+              onClick={() => navigate('drivers')}
             >
               {lang === 'zh' ? '驱动管理' : 'Driver Manager'}
             </Button>
@@ -290,7 +327,7 @@ const AppShell: React.FC<{
               className={styles.navBtn}
               appearance={tab === 'features' ? 'primary' : 'subtle'}
               icon={<PuzzlePieceRegular style={{ fontSize: 22 }} />}
-              onClick={() => setTab('features')}
+              onClick={() => navigate('features')}
             >
               {lang === 'zh' ? '可选功能' : 'Optional Features'}
             </Button>
@@ -298,7 +335,7 @@ const AppShell: React.FC<{
               className={styles.navBtn}
               appearance={tab === 'optimize' ? 'primary' : 'subtle'}
               icon={<Settings24Regular />}
-              onClick={() => setTab('optimize')}
+              onClick={() => navigate('optimize')}
             >
               {lang === 'zh' ? '系统优化' : 'Optimization'}
             </Button>
@@ -306,7 +343,7 @@ const AppShell: React.FC<{
               className={styles.navBtn}
               appearance={tab === 'startup' ? 'primary' : 'subtle'}
               icon={<Rocket24Regular />}
-              onClick={() => setTab('startup')}
+              onClick={() => navigate('startup')}
             >
               {lang === 'zh' ? '开机启动项' : 'Startup'}
             </Button>
@@ -314,7 +351,7 @@ const AppShell: React.FC<{
               className={styles.navBtn}
               appearance={tab === 'appx' ? 'primary' : 'subtle'}
               icon={<Apps24Regular />}
-              onClick={() => setTab('appx')}
+              onClick={() => navigate('appx')}
             >
               {lang === 'zh' ? '应用卸载管理' : 'App Uninstaller'}
             </Button>
@@ -322,7 +359,7 @@ const AppShell: React.FC<{
               className={styles.navBtn}
               appearance={tab === 'rescue' ? 'primary' : 'subtle'}
               icon={<ToolboxRegular style={{ fontSize: 22 }} />}
-              onClick={() => setTab('rescue')}
+              onClick={() => navigate('rescue')}
             >
               {lang === 'zh' ? '系统急救箱' : 'Rescue Center'}
             </Button>
@@ -330,7 +367,7 @@ const AppShell: React.FC<{
               className={styles.navBtn}
               appearance={tab === 'snapshots' ? 'primary' : 'subtle'}
               icon={<History24Regular />}
-              onClick={() => setTab('snapshots')}
+              onClick={() => navigate('snapshots')}
             >
               {lang === 'zh' ? '快照回滚' : 'Snapshots'}{snapshots && ` (${snapshots.length})`}
             </Button>
@@ -353,7 +390,7 @@ const AppShell: React.FC<{
           </Button>
           <Button
             appearance="outline"
-            onClick={() => setLang((prev) => (prev === 'zh' ? 'en' : 'zh'))}
+            onClick={toggleLanguage}
           >
             {lang === 'zh' ? 'English UI' : '简体中文界面'}
           </Button>
@@ -462,29 +499,11 @@ const AppShell: React.FC<{
           {tab === 'optimize' && optGroups !== null && optimizer.error && resourceFeedback(
             lang === 'zh' ? '加载系统优化项' : 'Load optimization controls', optimizer.error, optimizer.reload,
           )}
-          <Suspense
-            fallback={
-              <div style={{ display: 'flex', justifyContent: 'center', paddingTop: 60 }}>
-                <Spinner label={lang === 'zh' ? '正在加载视图...' : 'Loading view...'} />
-              </div>
-            }
-          >
-            {tab === 'dashboard' ? (
-              <DashboardView
-                lang={lang}
-                sysPayload={sysPayload}
-                cleanupEntries={cleanupEntries}
-                reclaimableBytes={cleanupSummary?.cleanable_bytes ?? null}
-                snapshotCount={snapshots?.length ?? null}
-                scanning={scanning}
-                onScanCleanup={handleScan}
-                onNavigate={setTab}
-                onSystemUpdated={(sys) =>
-                  setSysPayload((prev) => (prev ? { ...prev, system: sys } : prev))
-                }
-              />
-            ) : tab === 'cleanup' ? cleanupEntries === null ? cleanupFeedback(cleanup.error) : (
+          {visitedCleanup && cleanupEntries !== null && (
+            <div hidden={tab !== 'cleanup'} style={{ height: '100%' }}>
+              <Suspense fallback={viewLoading}>
               <SpaceRecycleView
+                visible={tab === 'cleanup'}
                 lang={lang}
                 entries={cleanupEntries}
                 summary={cleanupSummary}
@@ -502,14 +521,39 @@ const AppShell: React.FC<{
                   await handleScan();
                 }}
               />
-            ) : tab === 'diskmap' ? (
+              </Suspense>
+            </div>
+          )}
+          {visitedDiskmap && (
+            <div hidden={tab !== 'diskmap'} style={{ height: '100%' }}>
+              <Suspense fallback={viewLoading}>
               <DiskAnalyzerView
+                visible={tab === 'diskmap'}
                 lang={lang}
                 onSystemUpdated={(sys) =>
                   setSysPayload((prev) => (prev ? { ...prev, system: sys } : prev))
                 }
               />
-            ) : tab === 'drivers' ? (
+              </Suspense>
+            </div>
+          )}
+          <Suspense fallback={viewLoading}>
+            {tab === 'dashboard' ? (
+              <DashboardView
+                lang={lang}
+                sysPayload={sysPayload}
+                cleanupEntries={cleanupEntries}
+                reclaimableBytes={cleanupSummary?.cleanable_bytes ?? null}
+                snapshotCount={snapshots?.length ?? null}
+                scanning={scanning}
+                onScanCleanup={handleScan}
+                onNavigate={navigate}
+                onSystemUpdated={(sys) =>
+                  setSysPayload((prev) => (prev ? { ...prev, system: sys } : prev))
+                }
+              />
+            ) : tab === 'cleanup' ? (cleanupEntries === null ? cleanupFeedback(cleanup.error) : null
+            ) : tab === 'diskmap' ? null : tab === 'drivers' ? (
               <DriverView lang={lang} isAdmin={Boolean(sysPayload?.system.is_admin)} />
             ) : tab === 'features' ? (
               <FeaturesView lang={lang} isAdmin={Boolean(sysPayload?.system.is_admin)} />
@@ -530,7 +574,7 @@ const AppShell: React.FC<{
                   void refreshSnapshots();
                 }}
                 onSnapshotCreated={(snap) => setSnapshots((prev) => prev && [snap, ...prev.filter((item) => item.id !== snap.id)])}
-                onJumpToSnapshots={() => setTab('snapshots')}
+                onJumpToSnapshots={() => navigate('snapshots')}
               />
             ) : snapshots === null ? snapshotFeedback(snapshotList.error) : (
               <SnapshotView
@@ -548,11 +592,27 @@ const AppShell: React.FC<{
 };
 
 export default function App() {
-  const [dark, setDark] = useState(false);
+  const [theme, setTheme] = useState<'dark' | 'light' | null>(() => {
+    const saved = storedPreference(THEME_KEY);
+    return saved === 'dark' || saved === 'light' ? saved : null;
+  });
+  const [systemDark, setSystemDark] = useState(() => window.matchMedia('(prefers-color-scheme: dark)').matches);
+  useEffect(() => {
+    const query = window.matchMedia('(prefers-color-scheme: dark)');
+    const onChange = (event: MediaQueryListEvent) => setSystemDark(event.matches);
+    query.addEventListener('change', onChange);
+    return () => query.removeEventListener('change', onChange);
+  }, []);
+  const dark = theme === null ? systemDark : theme === 'dark';
+  const toggleTheme = () => {
+    const next = dark ? 'light' : 'dark';
+    savePreference(THEME_KEY, next);
+    setTheme(next);
+  };
   return (
     <FluentProvider theme={dark ? webDarkTheme : webLightTheme}>
       <MaintenanceProvider>
-        <AppShell dark={dark} onToggleTheme={() => setDark((d) => !d)} />
+        <AppShell dark={dark} onToggleTheme={toggleTheme} />
       </MaintenanceProvider>
     </FluentProvider>
   );

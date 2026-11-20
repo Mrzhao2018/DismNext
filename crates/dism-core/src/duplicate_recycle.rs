@@ -1,28 +1,20 @@
 use crate::diskmap::{invalidate_orphans_cache, is_protected_recycle_target};
-use anyhow::{anyhow, Result};
+use crate::recycle_bin::{move_batch, RecycleRequest, Verified};
+use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Seek};
-use std::os::windows::ffi::OsStrExt;
 use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
 use std::os::windows::io::AsRawHandle;
-use std::path::{Path, PathBuf};
-use windows::core::PCWSTR;
-use windows::Win32::System::Com::{
-    CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER,
-    COINIT_APARTMENTTHREADED,
-};
-use windows::Win32::UI::Shell::{
-    FileOperation, IFileOperation, IShellItem, SHCreateItemFromParsingName, FOFX_EARLYFAILURE,
-    FOFX_RECYCLEONDELETE, FOF_NOCONFIRMATION, FOF_NOERRORUI, FOF_NO_CONNECTED_ELEMENTS, FOF_SILENT,
-};
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 use windows_sys::Win32::Storage::FileSystem::{
     FileIdInfo, GetFileInformationByHandleEx, FILE_ATTRIBUTE_REPARSE_POINT,
     FILE_FLAG_OPEN_REPARSE_POINT, FILE_ID_INFO, FILE_SHARE_DELETE, FILE_SHARE_READ,
 };
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct DuplicateRecycleTarget {
     pub path: PathBuf,
     pub stamp: String,
@@ -98,7 +90,7 @@ impl FileIdentity {
 
 #[derive(PartialEq, Eq)]
 pub(crate) struct FileState {
-    identity: FileIdentity,
+    pub(crate) identity: FileIdentity,
     pub(crate) modified: u64,
     pub(crate) size: u64,
 }
@@ -189,7 +181,7 @@ pub fn recycle_duplicates(
     keeper: &DuplicateRecycleTarget,
     candidates: &[DuplicateRecycleTarget],
 ) -> Vec<DuplicateRecycleItem> {
-    let results = recycle_duplicates_with(keeper, candidates, move_to_recycle_bin);
+    let results = recycle_duplicates_with(keeper, candidates, move_batch);
     if results
         .iter()
         .any(|item| matches!(item.outcome, DuplicateRecycleOutcome::Recycled { .. }))
@@ -199,97 +191,79 @@ pub fn recycle_duplicates(
     results
 }
 
+#[derive(Debug)]
+struct VerificationError(DuplicateRecycleOutcome);
+
+impl std::fmt::Display for VerificationError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "Could not verify duplicate: {:?}", self.0)
+    }
+}
+
+impl std::error::Error for VerificationError {}
+
 fn recycle_duplicates_with(
     keeper: &DuplicateRecycleTarget,
     candidates: &[DuplicateRecycleTarget],
-    mut recycle: impl FnMut(&Path) -> Result<()>,
+    recycle: impl FnOnce(Vec<RecycleRequest<u64>>) -> Vec<Result<u64>>,
 ) -> Vec<DuplicateRecycleItem> {
-    // Denying write and delete sharing keeps the reference available throughout the batch.
-    let mut reference = open_verified(keeper, FILE_SHARE_READ).ok();
-    let mut seen = HashSet::new();
-    candidates
-        .iter()
-        .map(|target| {
-            let outcome = (|| {
-                let Some((reference_file, reference_state)) = reference.as_mut() else {
-                    return Err(skipped(DuplicateSkipReason::KeeperUnavailable));
+    // Deny write and delete sharing while comparing and recycling the selected copies.
+    let reference = Arc::new(Mutex::new(open_verified(keeper, FILE_SHARE_READ).ok()));
+    let keeper = Arc::new(keeper.clone());
+    let seen = Arc::new(Mutex::new(HashSet::new()));
+    let requests = candidates.iter().map(|target| {
+        let target = target.clone();
+        let reference = Arc::clone(&reference);
+        let keeper = Arc::clone(&keeper);
+        let seen = Arc::clone(&seen);
+        RecycleRequest {
+            path: target.path.clone(),
+            verify: Box::new(move || {
+                let verify = || -> std::result::Result<Verified<u64>, DuplicateRecycleOutcome> {
+                    let mut reference = reference.lock().unwrap();
+                    let Some((reference_file, reference_state)) = reference.as_mut() else {
+                        return Err(skipped(DuplicateSkipReason::KeeperUnavailable));
+                    };
+                    let (mut file, state) = open_verified(&target, FILE_SHARE_READ | FILE_SHARE_DELETE)?;
+                    if state.identity == reference_state.identity || seen.lock().unwrap().contains(&state.identity) {
+                        return Err(skipped(DuplicateSkipReason::SameFile));
+                    }
+                    if state.size != reference_state.size
+                        || !same_content(reference_file, &mut file, state.size).map_err(failed)?
+                    {
+                        return Err(skipped(DuplicateSkipReason::DifferentContent));
+                    }
+                    // Reopen the paths just before the Shell acts, while the original files are held.
+                    if open_verified(&keeper, FILE_SHARE_READ).is_err() {
+                        *reference = None;
+                        return Err(skipped(DuplicateSkipReason::KeeperUnavailable));
+                    }
+                    let (checked, _) = open_verified(&target, FILE_SHARE_READ | FILE_SHARE_DELETE)?;
+                    seen.lock().unwrap().insert(state.identity);
+                    Ok(Verified { value: state.size, hold: Some(checked) })
                 };
-                let (mut file, state) = open_verified(target, FILE_SHARE_READ | FILE_SHARE_DELETE)?;
-                if state.identity == reference_state.identity || seen.contains(&state.identity) {
-                    return Err(skipped(DuplicateSkipReason::SameFile));
-                }
-                if state.size != reference_state.size
-                    || !same_content(reference_file, &mut file, state.size).map_err(failed)?
-                {
-                    return Err(skipped(DuplicateSkipReason::DifferentContent));
-                }
-
-                // The Shell API takes a path. Reopen it immediately before handing it off.
-                if open_verified(keeper, FILE_SHARE_READ).is_err() {
-                    reference = None;
-                    return Err(skipped(DuplicateSkipReason::KeeperUnavailable));
-                }
-                let _target = open_verified(target, FILE_SHARE_READ | FILE_SHARE_DELETE)?;
-                recycle(&target.path).map_err(failed)?;
-                seen.insert(state.identity);
-                Ok(DuplicateRecycleOutcome::Recycled {
-                    size_bytes: state.size,
-                })
-            })()
-            .unwrap_or_else(|outcome| outcome);
-            DuplicateRecycleItem {
-                path: target.path.clone(),
-                outcome,
-            }
-        })
-        .collect()
-}
-
-pub(crate) fn move_to_recycle_bin(path: &Path) -> Result<()> {
-    struct Apartment;
-    impl Drop for Apartment {
-        fn drop(&mut self) {
-            unsafe { CoUninitialize() }
+                verify().map_err(|outcome| VerificationError(outcome).into())
+            }),
         }
-    }
-
-    let path = std::path::absolute(path)?;
-    if is_protected_recycle_target(&path) {
-        return Err(anyhow!("Refusing to recycle protected path '{}'", path.display()));
-    }
-    let wide: Vec<_> = path.as_os_str().encode_wide().chain(Some(0)).collect();
-    unsafe {
-        CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok()?;
-        let _apartment = Apartment;
-        let operation: IFileOperation =
-            CoCreateInstance(&FileOperation, None, CLSCTX_INPROC_SERVER)?;
-        operation.SetOperationFlags(
-            FOFX_RECYCLEONDELETE
-                | FOFX_EARLYFAILURE
-                | FOF_SILENT
-                | FOF_NOERRORUI
-                | FOF_NOCONFIRMATION
-                | FOF_NO_CONNECTED_ELEMENTS,
-        )?;
-        let item: IShellItem = SHCreateItemFromParsingName(PCWSTR(wide.as_ptr()), None)?;
-        operation.DeleteItem(&item, None)?;
-        operation.PerformOperations()?;
-        let moved = path
-            .symlink_metadata()
-            .is_err_and(|error| error.kind() == io::ErrorKind::NotFound);
-        if operation.GetAnyOperationsAborted()?.as_bool() || !moved {
-            return Err(anyhow!(
-                "Windows did not complete the move to the Recycle Bin"
-            ));
-        }
-    }
-    Ok(())
+    }).collect();
+    candidates.iter().zip(recycle(requests)).map(|(target, result)| {
+        let outcome = match result {
+            Ok(size_bytes) => DuplicateRecycleOutcome::Recycled { size_bytes },
+            Err(error) => match error.downcast::<VerificationError>() {
+                Ok(verification) => verification.0,
+                Err(error) => failed(error),
+            },
+        };
+        DuplicateRecycleItem { path: target.path.clone(), outcome }
+    }).collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::fs;
+    use anyhow::anyhow;
+    use crate::recycle_bin::test_move_batch;
 
     fn sandbox(label: &str) -> PathBuf {
         let dir =
@@ -306,11 +280,11 @@ mod tests {
     #[test]
     fn native_batch_recycles_the_unchanged_copy_and_keeps_the_modified_file() {
         let dir = sandbox("changed");
-        for name in ["keep.bin", "changed.bin", "old.bin"] {
+        for name in ["keep.bin", "changed.bin", "old.bin", "another.bin"] {
             fs::write(dir.join(name), b"identical contents").unwrap();
         }
         let keeper = target(dir.join("keep.bin"));
-        let copies = [target(dir.join("changed.bin")), target(dir.join("old.bin"))];
+        let copies = ["changed.bin", "old.bin", "another.bin"].map(|name| target(dir.join(name)));
         fs::write(&copies[0].path, b"edited after the scan").unwrap();
 
         let results = recycle_duplicates(&keeper, &copies);
@@ -330,6 +304,8 @@ mod tests {
         assert_eq!(fs::read(&copies[0].path).unwrap(), b"edited after the scan");
         assert_eq!(fs::read(&keeper.path).unwrap(), b"identical contents");
         assert!(!copies[1].path.exists());
+        assert!(matches!(results[2].outcome, DuplicateRecycleOutcome::Recycled { size_bytes: 18 }));
+        assert!(!copies[2].path.exists());
         fs::remove_file(&copies[0].path).unwrap();
         fs::remove_file(&keeper.path).unwrap();
         fs::remove_dir(&dir).unwrap();
@@ -347,13 +323,13 @@ mod tests {
         let candidates = ["first.bin", "error.bin", "different.bin", "alias.bin"]
             .map(|name| target(dir.join(name)));
         let mut attempted = Vec::new();
-        let results = recycle_duplicates_with(&keeper, &candidates, |path| {
+        let results = recycle_duplicates_with(&keeper, &candidates, |requests| test_move_batch(requests, |path| {
             attempted.push(path.to_path_buf());
             if path == candidates[1].path {
                 return Err(anyhow!("simulated shell failure"));
             }
             Ok(())
-        });
+        }));
         assert_eq!(
             attempted,
             [candidates[0].path.clone(), candidates[1].path.clone()]
@@ -381,7 +357,9 @@ mod tests {
 
         fs::remove_file(&keeper.path).unwrap();
         let skipped =
-            recycle_duplicates_with(&keeper, &candidates, |_| panic!("keeper is missing"));
+            recycle_duplicates_with(&keeper, &candidates, |requests| {
+                test_move_batch(requests, |_| panic!("keeper is missing"))
+            });
         assert!(skipped.iter().all(|item| matches!(
             item.outcome,
             DuplicateRecycleOutcome::Skipped {

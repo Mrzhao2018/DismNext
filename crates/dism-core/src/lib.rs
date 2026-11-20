@@ -1,6 +1,7 @@
 pub mod appx;
 pub mod catalog;
 pub mod cleaner;
+mod com;
 mod disk_allocation;
 pub mod diskmap;
 pub mod drivers;
@@ -14,6 +15,7 @@ pub mod mcp;
 pub mod offline_wim;
 pub mod optimizer;
 pub mod path_recycle;
+mod recycle_bin;
 pub mod report;
 pub mod rescue;
 pub mod scan_progress;

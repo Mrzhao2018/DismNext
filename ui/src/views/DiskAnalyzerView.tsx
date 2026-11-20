@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Badge,
   Button,
@@ -51,8 +51,10 @@ import {
 } from '../api';
 import { useScanJob } from '../useScanJob';
 import { ScanStatusBar } from '../ScanStatusBar';
+import { adjustHexColor, createTreemapHover, TreemapCanvas, TreemapReadout, type PaintedLeaf } from './DiskTreemap';
 
 interface Props {
+  visible: boolean;
   lang: Lang;
   onSystemUpdated?: (sys: SystemInfo) => void;
 }
@@ -65,27 +67,6 @@ interface FlatTreeRow {
   isExpanded: boolean;
   isLoading: boolean;
 }
-
-interface PaintedLeaf {
-  node: DiskTreeNode;
-  ancestorPaths: string[];
-  x: number;
-  y: number;
-  w: number;
-  h: number;
-  color: string;
-}
-
-const DIR_FALLBACK_COLORS = [
-  '#2E74B5',
-  '#388E3C',
-  '#C85A32',
-  '#7E57C2',
-  '#00838F',
-  '#AD1457',
-  '#D84315',
-  '#455A64',
-];
 
 const useStyles = makeStyles({
   root: {
@@ -242,6 +223,8 @@ const useStyles = makeStyles({
     display: 'flex',
     alignItems: 'center',
     justifyContent: 'space-between',
+    boxSizing: 'border-box',
+    height: '42px',
     gap: '10px',
     padding: '6px 12px',
     borderRadius: tokens.borderRadiusMedium,
@@ -250,153 +233,6 @@ const useStyles = makeStyles({
     flexShrink: 0,
   },
 });
-
-function adjustHexColor(hex: string, factor: number): string {
-  const clean = hex.replace('#', '');
-  if (clean.length !== 6) return hex;
-  const r = parseInt(clean.slice(0, 2), 16);
-  const g = parseInt(clean.slice(2, 4), 16);
-  const b = parseInt(clean.slice(4, 6), 16);
-  const clamp = (v: number) => Math.max(0, Math.min(255, Math.round(v)));
-  const apply = (c: number) => (factor >= 0 ? clamp(c + (255 - c) * factor) : clamp(c * (1 + factor)));
-  const nr = apply(r).toString(16).padStart(2, '0');
-  const ng = apply(g).toString(16).padStart(2, '0');
-  const nb = apply(b).toString(16).padStart(2, '0');
-  return `#${nr}${ng}${nb}`;
-}
-
-function squarifyRects(
-  nodes: DiskTreeNode[],
-  x: number,
-  y: number,
-  w: number,
-  h: number
-): { node: DiskTreeNode; x: number; y: number; w: number; h: number }[] {
-  const valid = nodes.filter((n) => n.size_bytes > 0);
-  if (valid.length === 0 || w < 1.5 || h < 1.5) return [];
-  const total = valid.reduce((a, b) => a + b.size_bytes, 0);
-  if (total <= 0) return [];
-
-  const area = w * h;
-  const items = valid.map((node) => ({
-    node,
-    area: (node.size_bytes / total) * area,
-  }));
-
-  const out: { node: DiskTreeNode; x: number; y: number; w: number; h: number }[] = [];
-  let cx = x;
-  let cy = y;
-  let cw = w;
-  let ch = h;
-  let row: { node: DiskTreeNode; area: number }[] = [];
-
-  const worst = (r: { area: number }[], side: number): number => {
-    if (r.length === 0 || side <= 0) return Infinity;
-    let sum = 0;
-    let maxA = 0;
-    let minA = Infinity;
-    for (const it of r) {
-      sum += it.area;
-      if (it.area > maxA) maxA = it.area;
-      if (it.area < minA) minA = it.area;
-    }
-    const s2 = side * side;
-    const sum2 = sum * sum;
-    return Math.max((s2 * maxA) / sum2, sum2 / (s2 * Math.max(minA, 0.0001)));
-  };
-
-  const commit = (r: { node: DiskTreeNode; area: number }[]) => {
-    const sum = r.reduce((a, b) => a + b.area, 0);
-    if (sum <= 0) return;
-    if (cw >= ch) {
-      const stripW = sum / ch;
-      let oy = cy;
-      for (const it of r) {
-        const ih = it.area / stripW;
-        out.push({ node: it.node, x: cx, y: oy, w: stripW, h: ih });
-        oy += ih;
-      }
-      cx += stripW;
-      cw -= stripW;
-    } else {
-      const stripH = sum / cw;
-      let ox = cx;
-      for (const it of r) {
-        const iw = it.area / stripH;
-        out.push({ node: it.node, x: ox, y: cy, w: iw, h: stripH });
-        ox += iw;
-      }
-      cy += stripH;
-      ch -= stripH;
-    }
-  };
-
-  for (const item of items) {
-    const side = Math.min(cw, ch);
-    if (row.length === 0) {
-      row.push(item);
-      continue;
-    }
-    const cand = [...row, item];
-    if (worst(cand, side) <= worst(row, side)) {
-      row = cand;
-    } else {
-      commit(row);
-      row = [item];
-    }
-  }
-  if (row.length > 0) commit(row);
-  return out;
-}
-
-function collectTreemapLeaves(
-  node: DiskTreeNode,
-  x: number,
-  y: number,
-  w: number,
-  h: number,
-  ancestors: string[],
-  extColorMap: Map<string, string>,
-  fallbackIdx: number,
-  out: PaintedLeaf[]
-): void {
-  if (w < 1.2 || h < 1.2 || node.size_bytes <= 0) return;
-  if (!node.is_dir || node.children.length === 0 || (w < 6 && h < 6)) {
-    const color =
-      node.is_aggregate
-        ? '#595959'
-        : node.ext
-        ? extColorMap.get(node.ext) || '#0078D4'
-        : DIR_FALLBACK_COLORS[fallbackIdx % DIR_FALLBACK_COLORS.length];
-    out.push({
-      node,
-      ancestorPaths: ancestors,
-      x,
-      y,
-      w,
-      h,
-      color,
-    });
-    return;
-  }
-
-  const nextAncestors = [...ancestors, node.path];
-  const pad = w > 18 && h > 18 ? 1 : 0;
-  const rects = squarifyRects(node.children, x + pad, y + pad, w - pad * 2, h - pad * 2);
-  rects.forEach((r, idx) => {
-    collectTreemapLeaves(
-      r.node,
-      r.x,
-      r.y,
-      r.w,
-      r.h,
-      nextAncestors,
-      extColorMap,
-      fallbackIdx + idx + 1,
-      out
-    );
-  });
-}
 
 function spliceTreeChildren(
   root: DiskTreeNode,
@@ -498,7 +334,7 @@ const skipReasons = {
   unverifiable: { zh: '无法完整核对目标。', en: 'The target could not be completely verified.' },
 };
 
-export const DiskAnalyzerView: React.FC<Props> = ({ lang, onSystemUpdated }) => {
+export const DiskAnalyzerView: React.FC<Props> = ({ visible, lang, onSystemUpdated }) => {
   const styles = useStyles();
   const [presets, setPresets] = useState<DiskPreset[]>([]);
   const [targetPath, setTargetPath] = useState('');
@@ -515,7 +351,7 @@ export const DiskAnalyzerView: React.FC<Props> = ({ lang, onSystemUpdated }) => 
   const [orphanDirs, setOrphanDirs] = useState<OrphanDirEntry[] | null>(null);
   const [orphanLoading, setOrphanLoading] = useState(false);
   const [activeExt, setActiveExt] = useState<string | null>(null);
-  const [hoveredLeaf, setHoveredLeaf] = useState<PaintedLeaf | null>(null);
+  const treemapHover = useMemo(createTreemapHover, []);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [recycleNotice, setRecycleNotice] = useState<string | null>(null);
   const [recycleResults, setRecycleResults] = useState<(DuplicateRecycleResult | PathRecycleResult)[]>([]);
@@ -536,9 +372,6 @@ export const DiskAnalyzerView: React.FC<Props> = ({ lang, onSystemUpdated }) => 
   const [copiedNotice, setCopiedNotice] = useState(false);
 
   const splitRef = useRef<HTMLDivElement | null>(null);
-  const canvasWrapRef = useRef<HTMLDivElement | null>(null);
-  const canvasRef = useRef<HTMLCanvasElement | null>(null);
-  const [canvasSize, setCanvasSize] = useState({ w: 800, h: 260 });
   const rowRefs = useRef<Map<string, HTMLDivElement>>(new Map());
 
   useEffect(() => {
@@ -553,21 +386,6 @@ export const DiskAnalyzerView: React.FC<Props> = ({ lang, onSystemUpdated }) => 
       .catch((e) => setErrorMsg(String(e)));
   }, []);
 
-  useEffect(() => {
-    const el = canvasWrapRef.current;
-    if (!el) return;
-    const ro = new ResizeObserver((entries) => {
-      for (const entry of entries) {
-        const { width, height } = entry.contentRect;
-        if (width > 20 && height > 20) {
-          setCanvasSize({ w: Math.floor(width), h: Math.floor(height) });
-        }
-      }
-    });
-    ro.observe(el);
-    return () => ro.disconnect();
-  }, [report]);
-
   const runAnalyze = async (pathToScan: string) => {
     const trimmed = pathToScan.trim();
     if (!trimmed || scan.active || recycling) return;
@@ -581,7 +399,7 @@ export const DiskAnalyzerView: React.FC<Props> = ({ lang, onSystemUpdated }) => 
       });
       if (!res) return;
       setActiveExt(null);
-      setHoveredLeaf(null);
+      treemapHover.set(null);
       setReport(res);
       setAllocationStale(false);
       setTargetPath(res.root_path);
@@ -707,136 +525,6 @@ export const DiskAnalyzerView: React.FC<Props> = ({ lang, onSystemUpdated }) => 
     return findNodeByPath(report.tree, zPath) || report.tree;
   }, [report, zoomStack]);
 
-  const paintedLeaves = useMemo(() => {
-    if (!zoomRootNode) return [];
-    const leaves: PaintedLeaf[] = [];
-    collectTreemapLeaves(
-      zoomRootNode,
-      0,
-      0,
-      canvasSize.w,
-      canvasSize.h,
-      [],
-      extColorMap,
-      0,
-      leaves
-    );
-    return leaves;
-  }, [zoomRootNode, canvasSize, extColorMap]);
-
-  // Draw 3D Cushion Treemap onto HiDPI canvas
-  useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const dpr = window.devicePixelRatio || 1;
-    canvas.width = Math.max(1, Math.floor(canvasSize.w * dpr));
-    canvas.height = Math.max(1, Math.floor(canvasSize.h * dpr));
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
-
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    ctx.fillStyle = '#14171c';
-    ctx.fillRect(0, 0, canvasSize.w, canvasSize.h);
-
-    for (const leaf of paintedLeaves) {
-      if (leaf.w < 1 || leaf.h < 1) continue;
-      const isExtDimmed =
-        activeExt !== null && (leaf.node.is_dir ? true : leaf.node.ext !== activeExt);
-      const isSelected =
-        selectedPath !== null &&
-        (leaf.node.path === selectedPath || leaf.ancestorPaths.includes(selectedPath));
-
-      ctx.save();
-      if (isExtDimmed) {
-        ctx.globalAlpha = 0.18;
-      }
-
-      if (leaf.w >= 4 && leaf.h >= 4) {
-        const grad = ctx.createLinearGradient(leaf.x, leaf.y, leaf.x + leaf.w, leaf.y + leaf.h);
-        grad.addColorStop(0, adjustHexColor(leaf.color, 0.36));
-        grad.addColorStop(0.32, leaf.color);
-        grad.addColorStop(1, adjustHexColor(leaf.color, -0.45));
-        ctx.fillStyle = grad;
-        ctx.fillRect(leaf.x, leaf.y, leaf.w, leaf.h);
-
-        // Specular top-left bevel & dark bottom-right seam for crisp 3D cushion effect
-        ctx.strokeStyle = 'rgba(255,255,255,0.28)';
-        ctx.lineWidth = 1;
-        ctx.beginPath();
-        ctx.moveTo(leaf.x + 0.5, leaf.y + leaf.h - 0.5);
-        ctx.lineTo(leaf.x + 0.5, leaf.y + 0.5);
-        ctx.lineTo(leaf.x + leaf.w - 0.5, leaf.y + 0.5);
-        ctx.stroke();
-
-        ctx.strokeStyle = 'rgba(0,0,0,0.45)';
-        ctx.beginPath();
-        ctx.moveTo(leaf.x + leaf.w - 0.5, leaf.y + 0.5);
-        ctx.lineTo(leaf.x + leaf.w - 0.5, leaf.y + leaf.h - 0.5);
-        ctx.lineTo(leaf.x + 0.5, leaf.y + leaf.h - 0.5);
-        ctx.stroke();
-      } else {
-        ctx.fillStyle = leaf.color;
-        ctx.fillRect(leaf.x, leaf.y, leaf.w, leaf.h);
-      }
-
-      if (isSelected) {
-        ctx.globalAlpha = 1;
-        ctx.strokeStyle = '#FFFFFF';
-        ctx.lineWidth = 1.6;
-        ctx.strokeRect(leaf.x + 1, leaf.y + 1, Math.max(1, leaf.w - 2), Math.max(1, leaf.h - 2));
-      }
-
-      if (leaf.w >= 58 && leaf.h >= 20 && !isExtDimmed) {
-        ctx.fillStyle = 'rgba(255,255,255,0.92)';
-        ctx.font = '11px "Segoe UI", "Microsoft YaHei UI", sans-serif';
-        ctx.shadowColor = 'rgba(0,0,0,0.75)';
-        ctx.shadowBlur = 2;
-        const label = leaf.node.is_aggregate
-          ? `+${leaf.node.aggregate_count}`
-          : leaf.node.name;
-        ctx.save();
-        ctx.beginPath();
-        ctx.rect(leaf.x + 3, leaf.y + 2, leaf.w - 6, leaf.h - 4);
-        ctx.clip();
-        ctx.fillText(label, leaf.x + 4, leaf.y + 13);
-        ctx.restore();
-      }
-
-      ctx.restore();
-    }
-
-    if (hoveredLeaf) {
-      ctx.save();
-      ctx.strokeStyle = '#60CDFF';
-      ctx.lineWidth = 2;
-      ctx.strokeRect(
-        hoveredLeaf.x + 1,
-        hoveredLeaf.y + 1,
-        Math.max(1, hoveredLeaf.w - 2),
-        Math.max(1, hoveredLeaf.h - 2)
-      );
-      ctx.restore();
-    }
-  }, [paintedLeaves, canvasSize, activeExt, selectedPath, hoveredLeaf]);
-
-  const hitTest = useCallback(
-    (clientX: number, clientY: number): PaintedLeaf | null => {
-      const canvas = canvasRef.current;
-      if (!canvas) return null;
-      const rect = canvas.getBoundingClientRect();
-      const x = clientX - rect.left;
-      const y = clientY - rect.top;
-      for (let i = paintedLeaves.length - 1; i >= 0; i--) {
-        const lf = paintedLeaves[i];
-        if (x >= lf.x && x <= lf.x + lf.w && y >= lf.y && y <= lf.y + lf.h) {
-          return lf;
-        }
-      }
-      return null;
-    },
-    [paintedLeaves]
-  );
-
   const selectAndRevealInTree = (path: string) => {
     setSelectedPath(path);
     if (!report) return;
@@ -853,18 +541,15 @@ export const DiskAnalyzerView: React.FC<Props> = ({ lang, onSystemUpdated }) => 
     }
   };
 
-  const handleCanvasClick = (e: React.MouseEvent<HTMLCanvasElement>) => {
-    const leaf = hitTest(e.clientX, e.clientY);
-    if (!leaf) return;
+  const handleCanvasClick = (leaf: PaintedLeaf) => {
     selectAndRevealInTree(leaf.node.path);
     if (!leaf.node.is_dir && leaf.node.ext) {
       setActiveExt((prev) => (prev === leaf.node.ext ? prev : null));
     }
   };
 
-  const handleCanvasDoubleClick = (e: React.MouseEvent<HTMLCanvasElement>) => {
-    const leaf = hitTest(e.clientX, e.clientY);
-    if (!leaf || !report) return;
+  const handleCanvasDoubleClick = (leaf: PaintedLeaf) => {
+    if (!report) return;
     const targetDir = leaf.node.is_dir
       ? leaf.node.path
       : leaf.ancestorPaths[leaf.ancestorPaths.length - 1];
@@ -900,7 +585,9 @@ export const DiskAnalyzerView: React.FC<Props> = ({ lang, onSystemUpdated }) => 
     return findNodeByPath(report.tree, selectedPath) || report.tree;
   }, [report, selectedPath]);
 
-  const activeDisplayNode = hoveredLeaf?.node || selectedNode;
+  const revealPath = (path: string) => {
+    void api.revealInExplorer(path).catch((error) => setErrorMsg(String(error)));
+  };
 
   const prepareRecycle = async (path: string, isDir: boolean, scanStartedAt: string) => {
     if (scan.active || recycling) return;
@@ -1213,6 +900,7 @@ export const DiskAnalyzerView: React.FC<Props> = ({ lang, onSystemUpdated }) => 
                             key={`${row.node.path}-${row.depth}-${row.node.name}`}
                             ref={(el) => {
                               if (el) rowRefs.current.set(row.node.path, el);
+                              else rowRefs.current.delete(row.node.path);
                             }}
                             className={`${styles.gridRow} ${styles.treeGridCols} ${
                               isSel ? styles.gridRowSelected : ''
@@ -1378,7 +1066,7 @@ export const DiskAnalyzerView: React.FC<Props> = ({ lang, onSystemUpdated }) => 
                               title={lang === 'zh' ? '在资源管理器中定位' : 'Reveal'}
                               onClick={(e) => {
                                 e.stopPropagation();
-                                api.revealInExplorer(lf.path);
+                                revealPath(lf.path);
                               }}
                             />
                             <Button
@@ -1601,7 +1289,7 @@ export const DiskAnalyzerView: React.FC<Props> = ({ lang, onSystemUpdated }) => 
                                 size="small"
                                 appearance="subtle"
                                 icon={<FolderOpen16Regular />}
-                                onClick={() => api.revealInExplorer(od.path)}
+                                onClick={() => revealPath(od.path)}
                               />
                               <Button
                                 size="small"
@@ -1796,48 +1484,29 @@ export const DiskAnalyzerView: React.FC<Props> = ({ lang, onSystemUpdated }) => 
                 </div>
               </div>
 
-              <div ref={canvasWrapRef} className={styles.canvasWrap}>
-                <canvas
-                  ref={canvasRef}
-                  style={{ width: '100%', height: '100%', display: 'block', cursor: 'crosshair' }}
-                  onMouseMove={(e) => setHoveredLeaf(hitTest(e.clientX, e.clientY))}
-                  onMouseLeave={() => setHoveredLeaf(null)}
-                  onClick={handleCanvasClick}
-                  onDoubleClick={handleCanvasDoubleClick}
-                />
-              </div>
+              <TreemapCanvas
+                className={styles.canvasWrap}
+                root={zoomRootNode}
+                activeExt={activeExt}
+                selectedPath={selectedPath}
+                extColorMap={extColorMap}
+                visible={visible}
+                hover={treemapHover}
+                onSelect={handleCanvasClick}
+                onZoom={handleCanvasDoubleClick}
+              />
             </div>
           </div>
 
           {/* Bottom Status Bar */}
           <div className={styles.statusBar}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0, flex: 1 }}>
-              {activeDisplayNode ? (
-                <>
-                  <Text
-                    size={200}
-                    truncate
-                    style={{ fontFamily: 'Consolas, monospace', color: tokens.colorNeutralForeground1 }}
-                    title={activeDisplayNode.path}
-                  >
-                    {activeDisplayNode.path}
-                  </Text>
-                  <Badge size="small" appearance="tint" color="brand">
-                    {logicalSizeLabel} · {formatBytes(activeDisplayNode.size_bytes)}
-                  </Badge>
-                  {activeDisplayNode.ext && extDescMap.get(activeDisplayNode.ext) && (
-                    <Text size={100} style={{ color: tokens.colorNeutralForeground3 }}>
-                      {extDescMap.get(activeDisplayNode.ext)}
-                    </Text>
-                  )}
-                </>
-              ) : (
-                <Text size={200} style={{ color: tokens.colorNeutralForeground3 }}>
-                  {lang === 'zh' ? '就绪' : 'Ready'}
-                </Text>
-              )}
-            </div>
-
+            <TreemapReadout
+              hover={treemapHover}
+              selectedNode={selectedNode}
+              logicalSizeLabel={logicalSizeLabel}
+              extDescMap={extDescMap}
+              lang={lang}
+            />
             {selectedNode && !selectedNode.is_aggregate && (
               <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
                 <Button
@@ -1862,7 +1531,7 @@ export const DiskAnalyzerView: React.FC<Props> = ({ lang, onSystemUpdated }) => 
                   size="small"
                   appearance="outline"
                   icon={<FolderOpen16Regular />}
-                  onClick={() => api.revealInExplorer(selectedNode.path)}
+                  onClick={() => revealPath(selectedNode.path)}
                 >
                   {lang === 'zh' ? '在资源管理器中定位' : 'Reveal'}
                 </Button>
@@ -1882,7 +1551,7 @@ export const DiskAnalyzerView: React.FC<Props> = ({ lang, onSystemUpdated }) => 
       )}
 
       <Dialog
-        open={Boolean(recycleConfirmTarget)}
+        open={visible && Boolean(recycleConfirmTarget)}
         onOpenChange={(_, d) => {
           if (!d.open && !recycling) setRecycleConfirmTarget(null);
         }}

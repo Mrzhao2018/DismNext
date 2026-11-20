@@ -4,7 +4,7 @@ use super::{
     SystemInfo, TargetKey,
 };
 use crate::drivers::compute_drivers_uncached;
-use crate::duplicate_recycle::move_to_recycle_bin;
+use crate::recycle_bin::move_to_recycle_bin;
 use crate::file_stamp::{delete_open_target, open_for_verification, TargetStamp};
 use crate::systasks::compute_orphaned_installer_files_uncached;
 use std::cmp::Reverse;

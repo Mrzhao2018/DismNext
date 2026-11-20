@@ -342,7 +342,7 @@ pub fn tool_definitions() -> Vec<Value> {
         }),
         json!({
             "name": "dismnext_find_duplicates",
-            "description": "Three-stage parallel duplicate file detector (size grouping, partial fingerprint, full SHA-256 verification) returning duplicate groups and potential wasted bytes.",
+            "description": "Three-stage parallel duplicate file detector (size grouping, hard-link deduplication, partial fingerprint, full BLAKE3 verification) returning duplicate groups and potential wasted bytes.",
             "inputSchema": {
                 "type": "object",
                 "properties": {

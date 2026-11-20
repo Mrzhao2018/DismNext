@@ -337,20 +337,7 @@ pub fn read_file_version(path: &Path) -> Option<String> {
 }
 
 pub(crate) fn read_file_version_uncached(path: &Path) -> Option<String> {
-    if !path.exists() {
-        return None;
-    }
-    let wide: Vec<u16> = OsStr::new(path).encode_wide().chain(Some(0)).collect();
-    let mut handle: u32 = 0;
-    let size = unsafe { GetFileVersionInfoSizeW(wide.as_ptr(), &mut handle) };
-    if size == 0 {
-        return None;
-    }
-    let mut buf = vec![0u8; size as usize];
-    let ok = unsafe { GetFileVersionInfoW(wide.as_ptr(), 0, size, buf.as_mut_ptr() as *mut _) };
-    if ok == 0 {
-        return None;
-    }
+    let buf = read_version_resource(path)?;
     let sub_block: Vec<u16> = OsStr::new("\\").encode_wide().chain(Some(0)).collect();
     let mut ptr: *mut core::ffi::c_void = std::ptr::null_mut();
     let mut len: u32 = 0;
@@ -364,6 +351,21 @@ pub(crate) fn read_file_version_uncached(path: &Path) -> Option<String> {
     let build = (info.dwFileVersionLS >> 16) & 0xffff;
     let rev = info.dwFileVersionLS & 0xffff;
     Some(format!("{}.{}.{}.{}", major, minor, build, rev))
+}
+
+pub(crate) fn read_version_resource(path: &Path) -> Option<Vec<u8>> {
+    if !path.exists() {
+        return None;
+    }
+    let wide: Vec<_> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+    let mut reserved = 0;
+    let size = unsafe { GetFileVersionInfoSizeW(wide.as_ptr(), &mut reserved) };
+    if size == 0 {
+        return None;
+    }
+    let mut resource = vec![0; size as usize];
+    let ok = unsafe { GetFileVersionInfoW(wide.as_ptr(), 0, size, resource.as_mut_ptr().cast()) };
+    (ok != 0).then_some(resource)
 }
 
 pub fn read_ini_value(path: &Path, section: &str, key: &str) -> Option<String> {

@@ -1,5 +1,5 @@
 use crate::diskmap::{invalidate_orphans_cache, is_protected_recycle_target};
-use crate::duplicate_recycle::move_to_recycle_bin;
+use crate::recycle_bin::{move_batch, move_to_recycle_bin, RecycleRequest, Verified};
 use crate::file_stamp::{open_for_verification, read_basic_info, TargetStamp};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -38,7 +38,7 @@ pub enum RecycleSkipReason {
     Unverifiable,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct RecycleTarget {
     pub path: PathBuf,
     pub stamp: String,
@@ -116,11 +116,7 @@ pub fn review_recycle_path(path: &Path, is_dir: bool, scan_started_at: i64) -> R
 }
 
 pub fn recycle_reviewed_path(target: &RecycleTarget) -> RecycleItem {
-    let result = recycle_one(target, None, move_to_recycle_bin);
-    if matches!(result.outcome, RecycleOutcome::Recycled { .. }) {
-        invalidate_orphans_cache();
-    }
-    result
+    recycle_paths(std::slice::from_ref(target), None).pop().unwrap()
 }
 
 pub(crate) fn recycle_path_immediately(path: &Path) -> anyhow::Result<u64> {
@@ -289,7 +285,7 @@ pub(crate) fn recycle_paths(
     targets: &[RecycleTarget],
     expected_dir: Option<bool>,
 ) -> Vec<RecycleItem> {
-    let results = recycle_with(targets, expected_dir, move_to_recycle_bin);
+    let results = recycle_with(targets, expected_dir, move_batch);
     if results
         .iter()
         .any(|item| matches!(item.outcome, RecycleOutcome::Recycled { .. }))
@@ -299,49 +295,61 @@ pub(crate) fn recycle_paths(
     results
 }
 
+#[derive(Debug)]
+struct VerificationError(RecycleSkipReason);
+
+impl std::fmt::Display for VerificationError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "Could not verify recycle target: {:?}", self.0)
+    }
+}
+
+impl std::error::Error for VerificationError {}
+
 fn recycle_with(
     targets: &[RecycleTarget],
     expected_dir: Option<bool>,
-    mut recycle: impl FnMut(&Path) -> anyhow::Result<()>,
+    recycle: impl FnOnce(Vec<RecycleRequest<PathSnapshot>>) -> Vec<anyhow::Result<PathSnapshot>>,
 ) -> Vec<RecycleItem> {
     let mut seen = HashSet::new();
-    targets
-        .iter()
-        .filter(|target| seen.insert(&target.path))
-        .map(|target| recycle_one(target, expected_dir, &mut recycle))
-        .collect()
-}
-
-fn recycle_one(
-    target: &RecycleTarget,
-    expected_dir: Option<bool>,
-    recycle: impl FnOnce(&Path) -> anyhow::Result<()>,
-) -> RecycleItem {
-    let outcome = match PathSnapshot::capture(&target.path, expected_dir) {
-        Err(reason) => RecycleOutcome::Skipped { reason },
-        Ok(snapshot) if snapshot.stamp != target.stamp => RecycleOutcome::Skipped {
-            reason: RecycleSkipReason::Changed,
-        },
-        Ok(snapshot) => match recycle(&snapshot.path) {
-            Ok(()) => RecycleOutcome::Recycled {
+    let selected: Vec<_> = targets.iter().filter(|target| seen.insert(&target.path)).collect();
+    let requests = selected.iter().map(|target| {
+        let target = (*target).clone();
+        RecycleRequest {
+            path: target.path.clone(),
+            verify: Box::new(move || {
+                let snapshot = PathSnapshot::capture(&target.path, expected_dir).map_err(VerificationError)?;
+                if snapshot.stamp != target.stamp {
+                    return Err(VerificationError(RecycleSkipReason::Changed).into());
+                }
+                Ok(Verified { value: snapshot, hold: None })
+            }),
+        }
+    }).collect();
+    selected.into_iter().zip(recycle(requests)).map(|(target, result)| {
+        let outcome = match result {
+            Ok(snapshot) => RecycleOutcome::Recycled {
                 size_bytes: snapshot.size_bytes,
                 file_count: snapshot.file_count,
                 dir_count: snapshot.dir_count,
             },
-            Err(error) => RecycleOutcome::Failed {
-                error: error.to_string(),
+            Err(error) => match error.downcast::<VerificationError>() {
+                Ok(verification) => RecycleOutcome::Skipped { reason: verification.0 },
+                Err(error) => RecycleOutcome::Failed { error: error.to_string() },
             },
-        },
-    };
-    RecycleItem {
-        path: target.path.clone(),
-        outcome,
-    }
+        };
+        RecycleItem { path: target.path.clone(), outcome }
+    }).collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::recycle_bin::test_move_batch;
+
+    fn recycle_test(targets: &[RecycleTarget], expected_dir: Option<bool>, recycle: impl FnMut(&Path) -> anyhow::Result<()>) -> Vec<RecycleItem> {
+        recycle_with(targets, expected_dir, |requests| test_move_batch(requests, recycle))
+    }
     use std::fs;
 
     #[test]
@@ -372,7 +380,7 @@ mod tests {
         fs::write(candidates.join("replaced/subdir/sample.txt"), b"old").unwrap();
         fs::rename(candidates.join("moves"), scratch.join("moved-directory")).unwrap();
 
-        let results = recycle_with(&targets, Some(true), |path| {
+        let results = recycle_test(&targets, Some(true), |path| {
             let name = path.file_name().unwrap();
             anyhow::ensure!(name != "fails", "simulated Shell error");
             fs::rename(path, bin.join(name))?;
@@ -415,7 +423,7 @@ mod tests {
         assert!(bin.join("first/subdir/sample.txt").exists());
         assert!(bin.join("last/subdir/sample.txt").exists());
 
-        let retry = recycle_with(&targets[3..4], Some(true), |path| {
+        let retry = recycle_test(&targets[3..4], Some(true), |path| {
             fs::rename(path, bin.join("fails"))?;
             Ok(())
         });
@@ -486,9 +494,9 @@ mod tests {
                 stamp: folder_stamp,
             },
         ] {
-            let item = recycle_one(&target, None, |_| {
+            let item = recycle_test(&[target], None, |_| {
                 panic!("changed targets must not reach Shell")
-            });
+            }).pop().unwrap();
             assert!(matches!(
                 item.outcome,
                 RecycleOutcome::Skipped {

@@ -15,6 +15,9 @@ use winreg::enums::{
 };
 use winreg::{RegKey, RegValue, HKEY};
 
+mod native;
+use native::{compute_scheduled_tasks_uncached, inspect_launch_file};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum StartupScope {
@@ -298,72 +301,6 @@ fn inspection_command_path(command: &str) -> Option<String> {
     Path::new(path).is_absolute().then(|| path.to_string())
 }
 
-fn inspect_launch_file(path: String) -> StartupTargetInspection {
-    // Use a fixed script and pass the observed path as data, even if it contains shell syntax.
-    const SCRIPT: &str = r#"
-$ErrorActionPreference = 'Stop'
-[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
-$target = $env:DISMNEXT_STARTUP_INSPECT_PATH
-$result = @{ path = $target; signature = 'unavailable'; signer = $null; company = $null }
-function Test-LocalPath($candidate) {
-    return $candidate -match '^[A-Za-z]:[\\/]' -and
-        [IO.DriveInfo]::new($candidate.Substring(0, 3)).DriveType -ne 'Network'
-}
-
-try {
-    if ((Test-LocalPath $target) -and [IO.Path]::GetExtension($target) -ieq '.lnk') {
-        $null = Get-Item -LiteralPath $target -Force
-        $shell = New-Object -ComObject WScript.Shell
-        $link = $shell.CreateShortcut($target)
-        $target = [Environment]::ExpandEnvironmentVariables($link.TargetPath)
-        $result.path = $target
-    }
-
-    if (!(Test-LocalPath $target)) {
-        $result.signature = 'unresolved_target'
-    } else {
-        $file = Get-Item -LiteralPath $target -Force
-        if ($file.PSIsContainer) {
-            $result.signature = 'unsupported'
-        } else {
-            try { $result.company = $file.VersionInfo.CompanyName } catch {}
-            $signature = Microsoft.PowerShell.Security\Get-AuthenticodeSignature -LiteralPath $target
-            $result.signature = switch ($signature.Status.ToString()) {
-                'Valid' { 'valid' }
-                'NotSigned' { 'unsigned' }
-                'NotTrusted' { 'untrusted' }
-                'HashMismatch' { 'hash_mismatch' }
-                'NotSupportedFileFormat' { 'unsupported' }
-                default { 'unavailable' }
-            }
-            if ($signature.SignerCertificate) {
-                $result.signer = $signature.SignerCertificate.GetNameInfo('SimpleName', $false)
-            }
-        }
-    }
-} catch [System.Management.Automation.ItemNotFoundException] {
-    $result.signature = 'missing_target'
-} catch {}
-
-$result | ConvertTo-Json -Compress
-"#;
-
-    let output = crate::system_tools::powershell_command().and_then(|mut command| {
-        command
-            .creation_flags(CREATE_NO_WINDOW)
-            .args(["-NoProfile", "-NonInteractive", "-Command", SCRIPT])
-            .env("DISMNEXT_STARTUP_INSPECT_PATH", &path)
-            .output()
-    });
-    output
-        .ok()
-        .filter(|output| output.status.success())
-        .and_then(|output| serde_json::from_slice(&output.stdout).ok())
-        .unwrap_or_else(|| {
-            StartupTargetInspection::without_signature(Some(path), StartupSignature::Unavailable)
-        })
-}
-
 /// Non-destructively enables or disables a startup item by writing Windows `StartupApproved` 12-byte status.
 pub fn set_startup_enabled(id: &str, enable: bool) -> Result<StartupItem> {
     let (src, name) = startup_source(id)?;
@@ -637,8 +574,7 @@ pub fn invalidate_tasks_cache() {
     }
 }
 
-/// Enumerates non-Windows Scheduled Tasks outside `\Microsoft\Windows` via `Schedule.Service` COM
-/// using lightweight XML regex parsing and a 60-second in-memory cache.
+/// Enumerates tasks outside `\Microsoft\Windows` through the Task Scheduler COM API.
 pub fn list_scheduled_tasks() -> Vec<ScheduledTaskItem> {
     let cache = TASKS_CACHE.get_or_init(|| RwLock::new(None));
     if let Ok(guard) = cache.read() {
@@ -654,85 +590,6 @@ pub fn list_scheduled_tasks() -> Vec<ScheduledTaskItem> {
         *w = Some((Instant::now(), computed.clone()));
     }
     computed
-}
-
-fn compute_scheduled_tasks_uncached() -> Vec<ScheduledTaskItem> {
-    let ps_script = r#"
-$svc = New-Object -ComObject Schedule.Service
-$svc.Connect()
-function Walk-Tasks($folder) {
-  foreach ($t in $folder.GetTasks(1)) {
-    $x = $t.Xml
-    $c = if ($x -match '<Command>([^<]+)</Command>') { $Matches[1] } else { '' }
-    $a = if ($x -match '<Arguments>([^<]+)</Arguments>') { $Matches[1] } else { '' }
-    $cmd = ($c + ' ' + $a).Trim()
-    $st = switch ($t.State) { 1 {'Disabled'} 2 {'Queued'} 3 {'Ready'} 4 {'Running'} default {'Unknown'} }
-    [PSCustomObject]@{ path=$t.Path; name=$t.Name; enabled=[bool]$t.Enabled; state=$st; command=$cmd }
-  }
-  foreach ($sub in $folder.GetFolders(0)) {
-    if ($sub.Path -ne '\Microsoft\Windows') { Walk-Tasks $sub }
-  }
-}
-$items = @(Walk-Tasks ($svc.GetFolder('\')))
-$items | ConvertTo-Json -Compress
-"#;
-
-    let Ok(output) = crate::system_tools::powershell_command().and_then(|mut command| {
-        command
-            .creation_flags(CREATE_NO_WINDOW)
-            .args(["-NoProfile", "-NonInteractive", "-Command", ps_script])
-            .output()
-    }) else {
-        return Vec::new();
-    };
-
-    if !output.status.success() {
-        return Vec::new();
-    }
-    let raw = crate::systasks::decode_cmd_output(&output.stdout)
-        .trim()
-        .to_string();
-    if raw.is_empty() || raw == "null" {
-        return Vec::new();
-    }
-
-    let Ok(val) = serde_json::from_str::<serde_json::Value>(&raw) else {
-        return Vec::new();
-    };
-    let arr = match val {
-        serde_json::Value::Array(a) => a,
-        obj @ serde_json::Value::Object(_) => vec![obj],
-        _ => return Vec::new(),
-    };
-
-    let mut items = Vec::new();
-    for v in arr {
-        let path = v.get("path").and_then(|x| x.as_str()).unwrap_or("").to_string();
-        let name = v.get("name").and_then(|x| x.as_str()).unwrap_or("").to_string();
-        let command = v.get("command").and_then(|x| x.as_str()).unwrap_or("").to_string();
-        let enabled = v.get("enabled").and_then(|x| x.as_bool()).unwrap_or(false);
-        let state = v
-            .get("state")
-            .and_then(|x| x.as_str())
-            .unwrap_or("Unknown")
-            .to_string();
-        if !path.is_empty() {
-            items.push(ScheduledTaskItem {
-                path,
-                name,
-                command,
-                enabled,
-                state,
-            });
-        }
-    }
-
-    items.sort_by(|a, b| {
-        b.enabled
-            .cmp(&a.enabled)
-            .then_with(|| a.name.to_ascii_lowercase().cmp(&b.name.to_ascii_lowercase()))
-    });
-    items
 }
 
 /// Enables or disables a third-party scheduled task via `schtasks.exe /Change`.

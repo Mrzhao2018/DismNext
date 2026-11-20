@@ -47,6 +47,7 @@ import {
 } from '../api';
 
 interface Props {
+  visible: boolean;
   lang: Lang;
   entries: CleanupRuleEntry[];
   summary: CleanupScanSummary | null;
@@ -320,6 +321,7 @@ const CleanupDetails: React.FC<{
 };
 
 export const SpaceRecycleView: React.FC<Props> = ({
+  visible,
   lang,
   entries,
   summary,
@@ -1138,7 +1140,7 @@ export const SpaceRecycleView: React.FC<Props> = ({
       </div>
 
       <Dialog
-        open={confirmation !== null}
+        open={visible && confirmation !== null}
         onOpenChange={(_, d) => {
           if (!d.open && !cleanupPhase) dismissConfirmation();
         }}
@@ -1175,7 +1177,7 @@ export const SpaceRecycleView: React.FC<Props> = ({
         </DialogSurface>
       </Dialog>
 
-      <Dialog open={reportOpen} onOpenChange={(_, d) => setReportOpen(d.open)}>
+      <Dialog open={visible && reportOpen} onOpenChange={(_, d) => setReportOpen(d.open)}>
         <DialogSurface style={{ maxWidth: 720 }}>
           <DialogBody>
             <DialogTitle>
@@ -1196,7 +1198,7 @@ export const SpaceRecycleView: React.FC<Props> = ({
       </Dialog>
 
       <Dialog
-        open={Boolean(pendingSysTask)}
+        open={visible && Boolean(pendingSysTask)}
         onOpenChange={(_, d) => {
           if (!d.open) setPendingSysTask(null);
         }}
@@ -1222,7 +1224,7 @@ export const SpaceRecycleView: React.FC<Props> = ({
         </DialogSurface>
       </Dialog>
 
-      <Dialog open={customModalOpen} onOpenChange={(_, d) => setCustomModalOpen(d.open)}>
+      <Dialog open={visible && customModalOpen} onOpenChange={(_, d) => setCustomModalOpen(d.open)}>
         <DialogSurface style={{ maxWidth: 640 }}>
           <DialogBody>
             <DialogTitle>
