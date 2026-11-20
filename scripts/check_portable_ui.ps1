@@ -16,6 +16,51 @@ function Invoke-CleanupPost([string] $Uri, [hashtable] $Body, [int] $ExpectedSta
     return $response
 }
 
+function Test-EmbeddedEncoding([string] $Uri) {
+    $handler = [Net.Http.HttpClientHandler]::new()
+    $handler.AutomaticDecompression = [Net.DecompressionMethods]::None
+    $client = [Net.Http.HttpClient]::new($handler)
+    $client.Timeout = [TimeSpan]::FromSeconds(5)
+    try {
+        $client.DefaultRequestHeaders.AcceptEncoding.ParseAdd('gzip')
+        $compressed = $client.GetAsync($Uri).GetAwaiter().GetResult()
+        $null = $compressed.EnsureSuccessStatusCode()
+        if ($compressed.Content.Headers.ContentEncoding -notcontains 'gzip' -or
+            $compressed.Headers.Vary -notcontains 'Accept-Encoding') {
+            throw 'The embedded JavaScript response did not advertise gzip and Vary.'
+        }
+        $gzipBytes = $compressed.Content.ReadAsByteArrayAsync().GetAwaiter().GetResult()
+
+        $client.DefaultRequestHeaders.AcceptEncoding.Clear()
+        $client.DefaultRequestHeaders.AcceptEncoding.ParseAdd('gzip;q=0, identity')
+        $identity = $client.GetAsync($Uri).GetAwaiter().GetResult()
+        $null = $identity.EnsureSuccessStatusCode()
+        if ($identity.Content.Headers.ContentEncoding.Count -ne 0 -or
+            $identity.Headers.Vary -notcontains 'Accept-Encoding') {
+            throw 'The embedded JavaScript response did not respect gzip;q=0.'
+        }
+        $plainBytes = $identity.Content.ReadAsByteArrayAsync().GetAwaiter().GetResult()
+        $inputStream = [IO.MemoryStream]::new($gzipBytes)
+        $decoder = [IO.Compression.GZipStream]::new($inputStream, [IO.Compression.CompressionMode]::Decompress)
+        $decoded = [IO.MemoryStream]::new()
+        try {
+            $decoder.CopyTo($decoded)
+            if ($gzipBytes.Length -ge $plainBytes.Length -or
+                [Convert]::ToBase64String($decoded.ToArray()) -cne [Convert]::ToBase64String($plainBytes)) {
+                throw 'The compressed JavaScript must be smaller and decode to the same asset.'
+            }
+        } finally {
+            $decoded.Dispose()
+            $decoder.Dispose()
+        }
+    } finally {
+        if ($compressed) { $compressed.Dispose() }
+        if ($identity) { $identity.Dispose() }
+        $client.Dispose()
+    }
+    Write-Output 'Portable JavaScript served equivalent gzip and identity responses.'
+}
+
 function Test-CleanupReview([string] $BaseUrl, [string] $Scratch, [hashtable] $Files) {
     $api = "$BaseUrl/api/cleanup"
     $rules = (Invoke-RestMethod -Uri "$api/rules" -Headers $sessionHeaders -TimeoutSec 10).items.rule
@@ -137,6 +182,7 @@ try {
     Copy-Item -LiteralPath $source -Destination $portable
     $start = [Diagnostics.ProcessStartInfo]::new($portable)
     $start.WorkingDirectory = $scratch
+    $start.Environment['LOCALAPPDATA'] = (Join-Path $scratch 'profile')
     $start.UseShellExecute = $false
     $start.CreateNoWindow = $true
     $start.RedirectStandardOutput = $true
@@ -174,10 +220,12 @@ try {
         $index.Content -notmatch '<script\b[^>]*\bsrc="(?<entry>/assets/[^"<>]+\.js)"') {
         throw 'The portable EXE did not serve its embedded DismNext HTML and JavaScript entry.'
     }
-    $entry = Invoke-WebRequest -Uri "$baseUrl$($Matches.entry)" -TimeoutSec 5
+    $entryUrl = "$baseUrl$($Matches.entry)"
+    $entry = Invoke-WebRequest -Uri $entryUrl -TimeoutSec 5
     if ($entry.Headers['Content-Type'] -notmatch 'javascript' -or $entry.RawContentLength -le 0) {
         throw 'The portable EXE did not serve the embedded JavaScript asset.'
     }
+    Test-EmbeddedEncoding $entryUrl
     foreach ($headers in @(
         @{},
         @{ 'X-DismNext-Token' = ('0' * 64) },

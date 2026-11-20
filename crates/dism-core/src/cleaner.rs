@@ -581,8 +581,11 @@ fn cleanup_report(mut outcomes: Vec<RuleCleanOutcome>, dry_run: bool) -> Cleanup
         total_skipped_files: outcomes
             .iter()
             .map(|o| {
-                o.skipped_locked_files + o.skipped_protected_files
-                    + o.review.as_ref().map_or(0, |r| r.skipped_changed + r.skipped_missing)
+                o.skipped_locked_files
+                    + o.skipped_protected_files
+                    + o.review
+                        .as_ref()
+                        .map_or(0, |r| r.skipped_changed + r.skipped_missing)
             })
             .sum(),
         outcomes,
@@ -606,7 +609,10 @@ struct CleanupPath {
 
 impl CleanupPath {
     fn lock_version(&self) -> Result<Option<std::fs::File>, ()> {
-        self.version_guard.as_ref().map(|guard| guard.lock().ok_or(())).transpose()
+        self.version_guard
+            .as_ref()
+            .map(|guard| guard.lock().ok_or(()))
+            .transpose()
     }
 
     fn retain_filters(&mut self, other: Self) {
@@ -614,7 +620,10 @@ impl CleanupPath {
             self.version_guard = other.version_guard;
         }
         if let Some(cutoff) = other.modified_before {
-            self.modified_before = Some(self.modified_before.map_or(cutoff, |existing| existing.min(cutoff)));
+            self.modified_before = Some(
+                self.modified_before
+                    .map_or(cutoff, |existing| existing.min(cutoff)),
+            );
         }
     }
 }
@@ -630,7 +639,11 @@ fn plan_cleanup(
     wanted: &HashSet<&str>,
     sys: &SystemInfo,
     include_dirs: bool,
-) -> (Vec<RuleCleanOutcome>, Vec<PlannedTarget>, Vec<(usize, CleanupPath)>) {
+) -> (
+    Vec<RuleCleanOutcome>,
+    Vec<PlannedTarget>,
+    Vec<(usize, CleanupPath)>,
+) {
     let mut outcomes = Vec::new();
     let mut targets: Vec<PlannedTarget> = Vec::new();
     let mut by_key = HashMap::<TargetKey, usize>::new();
@@ -793,7 +806,9 @@ fn collect_scan_targets<'a>(
                 }
                 files.modified_before = match min_age_days {
                     Some(days) => {
-                        let Some(cutoff) = scan_time.checked_sub(Duration::from_secs(u64::from(*days) * 86_400)) else {
+                        let Some(cutoff) =
+                            scan_time.checked_sub(Duration::from_secs(u64::from(*days) * 86_400))
+                        else {
                             continue;
                         };
                         Some(cutoff)
@@ -815,7 +830,10 @@ fn collect_scan_targets<'a>(
                 files.modified_before = None;
                 files.directory_markers.clear();
             }
-            Action::VersionedDirectory { root_path, version_file } => {
+            Action::VersionedDirectory {
+                root_path,
+                version_file,
+            } => {
                 versions::collect_versioned_directories(
                     root_path,
                     version_file,
@@ -910,9 +928,10 @@ fn collect_general_action(
         let Some(mut expanded_exclusions) = excluded
             .iter()
             .map(|ex| expand_expression(ex, Some(&root_str)))
-            .collect::<Option<Vec<_>>>() else {
-                continue;
-            };
+            .collect::<Option<Vec<_>>>()
+        else {
+            continue;
+        };
         expanded_exclusions.retain(|path| !path.trim().is_empty());
 
         if effective_queries.is_empty() {
@@ -1020,13 +1039,21 @@ fn has_directory_markers(path: &Path, meta: &std::fs::Metadata, markers: &[Strin
         && markers.iter().all(|marker| {
             let marker_name = marker.trim_end_matches(['\\', '/']);
             let mut components = Path::new(marker_name).components();
-            if !matches!(components.next(), Some(Component::Normal(_))) || components.next().is_some() {
+            if !matches!(components.next(), Some(Component::Normal(_)))
+                || components.next().is_some()
+            {
                 return false;
             }
-            path.join(marker_name).symlink_metadata().is_ok_and(|entry| {
-                entry.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT == 0
-                    && if marker.ends_with(['\\', '/']) { entry.is_dir() } else { entry.is_file() }
-            })
+            path.join(marker_name)
+                .symlink_metadata()
+                .is_ok_and(|entry| {
+                    entry.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT == 0
+                        && if marker.ends_with(['\\', '/']) {
+                            entry.is_dir()
+                        } else {
+                            entry.is_file()
+                        }
+                })
         })
 }
 
@@ -1709,17 +1736,29 @@ mod tests {
         fs::create_dir_all(root.join("old_empty")).unwrap();
         fs::create_dir(root.join("will_fill")).unwrap();
         fs::create_dir(root.join("will_replace")).unwrap();
-        for name in ["ready.tmp", "replaced.tmp", "changed.tmp", "missing.tmp", "locked.tmp", "unlocks.tmp"] {
+        for name in [
+            "ready.tmp",
+            "replaced.tmp",
+            "changed.tmp",
+            "missing.tmp",
+            "locked.tmp",
+            "unlocks.tmp",
+        ] {
             fs::write(root.join(name), b"old").unwrap();
         }
         let ready = root.join("ready.tmp");
         let mut permissions = fs::metadata(&ready).unwrap().permissions();
         permissions.set_readonly(true);
         fs::set_permissions(&ready, permissions).unwrap();
-        let unlocks = fs::OpenOptions::new().read(true).share_mode(0).open(root.join("unlocks.tmp")).unwrap();
+        let unlocks = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(root.join("unlocks.tmp"))
+            .unwrap();
 
         let rules = [test_rule("test", &root, &[])];
-        let (plan, review) = ReviewedCleanup::prepare(&rules, &["test".into()], &SystemInfo::collect());
+        let (plan, review) =
+            ReviewedCleanup::prepare(&rules, &["test".into()], &SystemInfo::collect());
         assert!(review.dry_run);
         assert_eq!(review.total_deleted_files, 5);
         assert_eq!(review.outcomes[0].review.as_ref().unwrap().directories, 3);
@@ -1732,17 +1771,31 @@ mod tests {
         let original_time = fs::metadata(&replaced).unwrap().modified().unwrap();
         fs::rename(&replaced, root.join("moved.tmp")).unwrap();
         fs::write(&replaced, b"new").unwrap();
-        File::options().write(true).open(&replaced).unwrap().set_modified(original_time).unwrap();
+        File::options()
+            .write(true)
+            .open(&replaced)
+            .unwrap()
+            .set_modified(original_time)
+            .unwrap();
         fs::write(&replacement, b"new").unwrap();
         let changed = root.join("changed.tmp");
         let changed_time = fs::metadata(&changed).unwrap().modified().unwrap();
         fs::write(&changed, b"new").unwrap();
-        File::options().write(true).open(&changed).unwrap().set_modified(changed_time).unwrap();
+        File::options()
+            .write(true)
+            .open(&changed)
+            .unwrap()
+            .set_modified(changed_time)
+            .unwrap();
         fs::remove_file(root.join("missing.tmp")).unwrap();
         fs::write(root.join("will_fill/new.tmp"), b"new").unwrap();
         fs::rename(root.join("will_replace"), root.join("moved_dir")).unwrap();
         fs::create_dir(root.join("will_replace")).unwrap();
-        let locked = fs::OpenOptions::new().read(true).share_mode(0).open(root.join("locked.tmp")).unwrap();
+        let locked = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(root.join("locked.tmp"))
+            .unwrap();
 
         let result = plan.execute();
         drop(locked);
@@ -1758,8 +1811,21 @@ mod tests {
         assert_eq!(outcome.failed_files, 0, "{outcome:?}");
         assert!(!ready.exists());
         assert!(!root.join("old_empty").exists());
-        for name in ["new.tmp", "moved.tmp", "replaced.tmp", "changed.tmp", "locked.tmp", "unlocks.tmp", "will_fill/new.tmp", "will_replace", "moved_dir"] {
-            assert!(root.join(name).exists(), "Target should have survived: {name}");
+        for name in [
+            "new.tmp",
+            "moved.tmp",
+            "replaced.tmp",
+            "changed.tmp",
+            "locked.tmp",
+            "unlocks.tmp",
+            "will_fill/new.tmp",
+            "will_replace",
+            "moved_dir",
+        ] {
+            assert!(
+                root.join(name).exists(),
+                "Target should have survived: {name}"
+            );
         }
         fs::remove_dir_all(root).unwrap();
     }
@@ -1787,17 +1853,21 @@ mod tests {
             fs::write(dir.join(version).join("data.tmp"), b"data").unwrap();
         }
         let mut rule = test_rule("browser", &root, &[]);
-        rule.scans[0].actions = [&installed, &unverified].into_iter().map(|dir| {
-            Action::VersionedDirectory {
+        rule.scans[0].actions = [&installed, &unverified]
+            .into_iter()
+            .map(|dir| Action::VersionedDirectory {
                 root_path: dir.to_string_lossy().into_owned(),
                 version_file: "browser.exe".into(),
-            }
-        }).collect();
+            })
+            .collect();
         let ids = [rule.id.clone()];
         let sys = SystemInfo::collect();
         let scan = scan_rule(&rule, &sys);
         assert_eq!(scan.cleanable_count, 1);
-        assert_eq!(Path::new(&scan.preview_files[0].path), installed.join(old).join("data.tmp"));
+        assert_eq!(
+            Path::new(&scan.preview_files[0].path),
+            installed.join(old).join("data.tmp")
+        );
         fs::write(unverified.join("browser.exe"), b"no version resource").unwrap();
         assert_eq!(scan_rule(&rule, &sys).cleanable_count, 1);
         fs::copy(&executable, unverified.join("browser.exe")).unwrap();
@@ -1810,7 +1880,10 @@ mod tests {
         fs::copy(&moved, &executable).unwrap();
         let result = plan.execute();
         assert_eq!(result.total_deleted_files, 0);
-        assert_eq!(result.outcomes[0].review.as_ref().unwrap().skipped_changed, 2);
+        assert_eq!(
+            result.outcomes[0].review.as_ref().unwrap().skipped_changed,
+            2
+        );
         assert!(installed.join(old).join("data.tmp").exists());
 
         let result = execute_cleanup(&[rule], &ids, &sys, false);
@@ -1825,15 +1898,20 @@ mod tests {
 
     #[test]
     fn rule_filters_keep_recent_files_and_unrecognized_driver_directories() {
-        let root = std::env::temp_dir().join(format!("dismnext_rule_filters_{}", std::process::id()));
+        let root =
+            std::env::temp_dir().join(format!("dismnext_rule_filters_{}", std::process::id()));
         let temp = root.join("temp");
         let drivers = root.join("drivers");
         fs::create_dir_all(&temp).unwrap();
         let aged = temp.join("old.tmp");
         fs::write(&aged, b"old").unwrap();
         fs::write(temp.join("recent.tmp"), b"recent").unwrap();
-        File::options().write(true).open(&aged).unwrap()
-            .set_modified(SystemTime::now() - Duration::from_secs(8 * 86_400)).unwrap();
+        File::options()
+            .write(true)
+            .open(&aged)
+            .unwrap()
+            .set_modified(SystemTime::now() - Duration::from_secs(8 * 86_400))
+            .unwrap();
         let marked = drivers.join("extracted");
         let unmarked = drivers.join("personal");
         fs::create_dir_all(marked.join("Display.Driver")).unwrap();
@@ -1843,15 +1921,25 @@ mod tests {
         fs::write(unmarked.join("document.txt"), b"keep").unwrap();
 
         let mut temp_rule = test_rule("temp", &temp, &[]);
-        let Action::General { min_age_days, .. } = &mut temp_rule.scans[0].actions[0] else { unreachable!() };
+        let Action::General { min_age_days, .. } = &mut temp_rule.scans[0].actions[0] else {
+            unreachable!()
+        };
         *min_age_days = Some(7);
         let mut driver_rule = test_rule("drivers", &drivers, &[]);
-        let Action::General { queries, directory_markers, .. } = &mut driver_rule.scans[0].actions[0] else { unreachable!() };
+        let Action::General {
+            queries,
+            directory_markers,
+            ..
+        } = &mut driver_rule.scans[0].actions[0]
+        else {
+            unreachable!()
+        };
         queries.push("*".into());
         directory_markers.extend(["setup.exe".into(), "Display.Driver\\".into()]);
 
         let ids = [temp_rule.id.clone(), driver_rule.id.clone()];
-        let (plan, preview) = ReviewedCleanup::prepare(&[temp_rule, driver_rule], &ids, &SystemInfo::collect());
+        let (plan, preview) =
+            ReviewedCleanup::prepare(&[temp_rule, driver_rule], &ids, &SystemInfo::collect());
         assert_eq!(preview.total_deleted_files, 2);
         assert_eq!(plan.execute().total_deleted_files, 2);
         assert!(!aged.exists());
@@ -1910,7 +1998,12 @@ mod tests {
         assert_eq!(scan_res.cleanable_count, 2);
         assert_eq!(scan_res.cleanable_bytes, 16);
 
-        let dry = execute_cleanup(&[rule.clone()], &["test-001".to_string()], &sys, true);
+        let dry = execute_cleanup(
+            std::slice::from_ref(&rule),
+            &["test-001".to_string()],
+            &sys,
+            true,
+        );
         assert!(dry.dry_run);
         assert_eq!(dry.total_deleted_files, 2);
         assert!(junk_a.exists() && junk_b.exists() && keep_file.exists());

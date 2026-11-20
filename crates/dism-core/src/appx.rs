@@ -9,8 +9,7 @@ use winreg::enums::{HKEY_CURRENT_USER, KEY_READ};
 use winreg::RegKey;
 
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-const PACKAGES_SUBKEY: &str =
-    r"Software\Classes\Local Settings\Software\Microsoft\Windows\CurrentVersion\AppModel\Repository\Packages";
+const PACKAGES_SUBKEY: &str = r"Software\Classes\Local Settings\Software\Microsoft\Windows\CurrentVersion\AppModel\Repository\Packages";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -191,7 +190,12 @@ pub fn parse_package_full_name(full: &str) -> (String, String, String, String) {
             parts.last().copied().unwrap_or("").to_string(),
         )
     } else {
-        (full.to_string(), String::new(), String::new(), String::new())
+        (
+            full.to_string(),
+            String::new(),
+            String::new(),
+            String::new(),
+        )
     }
 }
 
@@ -316,48 +320,248 @@ fn resolve_friendly_meta(
     cat: AppxCategory,
 ) -> (LocalizedText, LocalizedText) {
     let known = match name.to_ascii_lowercase().as_str() {
-        "clipchamp.clipchamp" => Some(("Clipchamp 视频编辑器", "Microsoft Clipchamp", "微软预装视频剪辑应用", "Preinstalled video editor")),
-        "microsoft.bingnews" => Some(("Microsoft 资讯", "Microsoft News", "微软新闻资讯聚合", "Bing News aggregator")),
-        "microsoft.bingweather" => Some(("MSN 天气", "MSN Weather", "预装天气应用", "Preinstalled weather app")),
-        "microsoft.bingsearch" => Some(("Bing 搜索组件", "Microsoft Bing Search", "系统内嵌 Bing 搜索组件", "Integrated Bing Search component")),
-        "microsoft.gethelp" => Some(("获取帮助", "Get Help", "微软在线客服与排障助手", "Microsoft support assistant")),
-        "microsoft.getstarted" => Some(("入门提示 (Tips)", "Microsoft Tips", "Windows 新手引导应用", "Windows getting started tips")),
-        "microsoft.microsoftofficehub" => Some(("Microsoft 365 (Office) 入口", "Microsoft 365 (Office)", "Office 在线推广与启动器", "Microsoft 365 hub launcher")),
-        "microsoft.microsoftsolitairecollection" => Some(("微软纸牌合集", "Microsoft Solitaire Collection", "预装休闲纸牌游戏", "Preinstalled solitaire game")),
-        "microsoft.people" => Some(("人脉 (People)", "Microsoft People", "已停止主推的联系人应用", "Legacy contacts app")),
-        "microsoft.powerautomatedesktop" => Some(("Power Automate 桌面版", "Power Automate Desktop", "预装 RPA 自动化工具", "Preinstalled automation tool")),
-        "microsoft.todos" => Some(("Microsoft To Do", "Microsoft To Do", "微软待办事项应用", "To Do task manager")),
-        "microsoft.windowsfeedbackhub" => Some(("反馈中心", "Feedback Hub", "Windows Insider 反馈工具", "Windows Feedback Hub")),
-        "microsoft.windowsmaps" => Some(("Windows 地图", "Windows Maps", "离线/在线地图应用", "Preinstalled maps app")),
-        "microsoft.yourphone" => Some(("手机连接 (Phone Link)", "Phone Link", "手机与电脑互联同步应用", "Android/iOS sync companion")),
-        "microsoft.zunemusic" => Some(("媒体播放器 (Media Player)", "Windows Media Player", "音乐与媒体播放器", "Preinstalled media player")),
-        "microsoft.zunevideo" => Some(("电影和电视", "Movies & TV", "视频播放与商店入口", "Preinstalled video app")),
-        "microsoft.gamingapp" => Some(("Xbox 主应用", "Xbox App", "Xbox Game Pass 游戏中心", "Xbox gaming launcher")),
-        "microsoft.xboxgamingoverlay" | "microsoft.xboxgameoverlay" => Some(("Xbox Game Bar 覆盖层", "Xbox Game Bar", "游戏录屏与性能浮窗", "Gaming overlay & capture")),
-        "microsoft.xboxidentityprovider" | "microsoft.xboxspeechtotextoverlay" | "microsoft.xbox.tcui" => {
-            Some(("Xbox 平台服务组件", "Xbox Platform Component", "Xbox 登录与界面依赖组件", "Xbox sign-in/UI component"))
-        }
-        "microsoft.549981c3f5f10" => Some(("Cortana (小娜)", "Cortana", "已退役的旧版语音助手", "Deprecated Cortana assistant")),
-        "microsoftteams" | "msteams" => Some(("Microsoft Teams (个人版)", "Microsoft Teams", "预装聊天与视频会议工具", "Preinstalled chat client")),
-        "microsoft.outlookforwindows" => Some(("新版 Outlook", "Outlook for Windows", "基于 Web 的新版邮件客户端", "New web-based Outlook client")),
-        "microsoft.windows.devhome" => Some(("Dev Home (开发者主页)", "Dev Home", "开发者仪表盘与配置工具", "Developer dashboard app")),
-        "microsoft.windowscommunicationsapps" => Some(("邮件和日历 (旧版)", "Mail and Calendar", "旧版 UWP 邮件与日历", "Legacy UWP Mail & Calendar")),
-        "microsoft.mixedreality.portal" => Some(("混合现实门户", "Mixed Reality Portal", "WMR 头显管理（微软已停更）", "Windows Mixed Reality portal")),
-        "microsoft.microsoft3dviewer" | "microsoft.3dbuilder" => Some(("3D 查看器 / 建模", "3D Viewer", "预装 3D 模型查看器", "Preinstalled 3D viewer")),
-        "microsoftcorporationii.quickassist" => Some(("快速助手", "Quick Assist", "远程桌面协助工具", "Remote assistance tool")),
-        "microsoft.microsoftstickynotes" => Some(("便笺 (Sticky Notes)", "Sticky Notes", "桌面便签工具", "Desktop sticky notes")),
-        "microsoft.copilot" | "microsoft.windows.ai.copilot.provider" => Some(("Microsoft Copilot", "Microsoft Copilot", "预装 AI 助手组件", "Preinstalled AI assistant")),
-        "microsoft.windowssoundrecorder" => Some(("录音机 (Sound Recorder)", "Windows Sound Recorder", "预装音频录制应用", "Preinstalled audio recorder")),
-        "microsoft.windowsalarms" => Some(("时钟 (Alarms & Clock)", "Windows Clock", "预装闹钟、计时器与世界时钟", "Preinstalled clock & alarms")),
-        "microsoft.windowscamera" => Some(("相机 (Windows Camera)", "Windows Camera", "预装摄像头拍照与录像应用", "Preinstalled camera app")),
-        "microsoft.windowsstore" => Some(("Microsoft Store (应用商店)", "Microsoft Store", "核心应用商店（受保护）", "Core Windows Store (Protected)")),
-        "microsoft.desktopappinstaller" => Some(("应用安装程序 (winget)", "App Installer (winget)", "MSIX 安装器与 winget CLI（受保护）", "Core MSIX & winget installer")),
-        "microsoft.sechealthui" => Some(("Windows 安全中心", "Windows Security", "系统防病毒与安全界面（受保护）", "Core Windows Security UI")),
-        "microsoft.windowsterminal" => Some(("Windows 终端", "Windows Terminal", "现代命令行终端（受保护）", "Core Windows Terminal")),
-        "microsoft.windowscalculator" => Some(("计算器", "Windows Calculator", "系统基础工具（受保护）", "System Calculator")),
-        "microsoft.windowsnotepad" => Some(("记事本", "Windows Notepad", "系统基础工具（受保护）", "System Notepad")),
-        "microsoft.paint" => Some(("画图", "Microsoft Paint", "系统基础工具（受保护）", "System Paint")),
-        "microsoft.screensketch" => Some(("截图工具", "Snipping Tool", "系统截图与录屏工具（受保护）", "System Snipping Tool")),
+        "clipchamp.clipchamp" => Some((
+            "Clipchamp 视频编辑器",
+            "Microsoft Clipchamp",
+            "微软预装视频剪辑应用",
+            "Preinstalled video editor",
+        )),
+        "microsoft.bingnews" => Some((
+            "Microsoft 资讯",
+            "Microsoft News",
+            "微软新闻资讯聚合",
+            "Bing News aggregator",
+        )),
+        "microsoft.bingweather" => Some((
+            "MSN 天气",
+            "MSN Weather",
+            "预装天气应用",
+            "Preinstalled weather app",
+        )),
+        "microsoft.bingsearch" => Some((
+            "Bing 搜索组件",
+            "Microsoft Bing Search",
+            "系统内嵌 Bing 搜索组件",
+            "Integrated Bing Search component",
+        )),
+        "microsoft.gethelp" => Some((
+            "获取帮助",
+            "Get Help",
+            "微软在线客服与排障助手",
+            "Microsoft support assistant",
+        )),
+        "microsoft.getstarted" => Some((
+            "入门提示 (Tips)",
+            "Microsoft Tips",
+            "Windows 新手引导应用",
+            "Windows getting started tips",
+        )),
+        "microsoft.microsoftofficehub" => Some((
+            "Microsoft 365 (Office) 入口",
+            "Microsoft 365 (Office)",
+            "Office 在线推广与启动器",
+            "Microsoft 365 hub launcher",
+        )),
+        "microsoft.microsoftsolitairecollection" => Some((
+            "微软纸牌合集",
+            "Microsoft Solitaire Collection",
+            "预装休闲纸牌游戏",
+            "Preinstalled solitaire game",
+        )),
+        "microsoft.people" => Some((
+            "人脉 (People)",
+            "Microsoft People",
+            "已停止主推的联系人应用",
+            "Legacy contacts app",
+        )),
+        "microsoft.powerautomatedesktop" => Some((
+            "Power Automate 桌面版",
+            "Power Automate Desktop",
+            "预装 RPA 自动化工具",
+            "Preinstalled automation tool",
+        )),
+        "microsoft.todos" => Some((
+            "Microsoft To Do",
+            "Microsoft To Do",
+            "微软待办事项应用",
+            "To Do task manager",
+        )),
+        "microsoft.windowsfeedbackhub" => Some((
+            "反馈中心",
+            "Feedback Hub",
+            "Windows Insider 反馈工具",
+            "Windows Feedback Hub",
+        )),
+        "microsoft.windowsmaps" => Some((
+            "Windows 地图",
+            "Windows Maps",
+            "离线/在线地图应用",
+            "Preinstalled maps app",
+        )),
+        "microsoft.yourphone" => Some((
+            "手机连接 (Phone Link)",
+            "Phone Link",
+            "手机与电脑互联同步应用",
+            "Android/iOS sync companion",
+        )),
+        "microsoft.zunemusic" => Some((
+            "媒体播放器 (Media Player)",
+            "Windows Media Player",
+            "音乐与媒体播放器",
+            "Preinstalled media player",
+        )),
+        "microsoft.zunevideo" => Some((
+            "电影和电视",
+            "Movies & TV",
+            "视频播放与商店入口",
+            "Preinstalled video app",
+        )),
+        "microsoft.gamingapp" => Some((
+            "Xbox 主应用",
+            "Xbox App",
+            "Xbox Game Pass 游戏中心",
+            "Xbox gaming launcher",
+        )),
+        "microsoft.xboxgamingoverlay" | "microsoft.xboxgameoverlay" => Some((
+            "Xbox Game Bar 覆盖层",
+            "Xbox Game Bar",
+            "游戏录屏与性能浮窗",
+            "Gaming overlay & capture",
+        )),
+        "microsoft.xboxidentityprovider"
+        | "microsoft.xboxspeechtotextoverlay"
+        | "microsoft.xbox.tcui" => Some((
+            "Xbox 平台服务组件",
+            "Xbox Platform Component",
+            "Xbox 登录与界面依赖组件",
+            "Xbox sign-in/UI component",
+        )),
+        "microsoft.549981c3f5f10" => Some((
+            "Cortana (小娜)",
+            "Cortana",
+            "已退役的旧版语音助手",
+            "Deprecated Cortana assistant",
+        )),
+        "microsoftteams" | "msteams" => Some((
+            "Microsoft Teams (个人版)",
+            "Microsoft Teams",
+            "预装聊天与视频会议工具",
+            "Preinstalled chat client",
+        )),
+        "microsoft.outlookforwindows" => Some((
+            "新版 Outlook",
+            "Outlook for Windows",
+            "基于 Web 的新版邮件客户端",
+            "New web-based Outlook client",
+        )),
+        "microsoft.windows.devhome" => Some((
+            "Dev Home (开发者主页)",
+            "Dev Home",
+            "开发者仪表盘与配置工具",
+            "Developer dashboard app",
+        )),
+        "microsoft.windowscommunicationsapps" => Some((
+            "邮件和日历 (旧版)",
+            "Mail and Calendar",
+            "旧版 UWP 邮件与日历",
+            "Legacy UWP Mail & Calendar",
+        )),
+        "microsoft.mixedreality.portal" => Some((
+            "混合现实门户",
+            "Mixed Reality Portal",
+            "WMR 头显管理（微软已停更）",
+            "Windows Mixed Reality portal",
+        )),
+        "microsoft.microsoft3dviewer" | "microsoft.3dbuilder" => Some((
+            "3D 查看器 / 建模",
+            "3D Viewer",
+            "预装 3D 模型查看器",
+            "Preinstalled 3D viewer",
+        )),
+        "microsoftcorporationii.quickassist" => Some((
+            "快速助手",
+            "Quick Assist",
+            "远程桌面协助工具",
+            "Remote assistance tool",
+        )),
+        "microsoft.microsoftstickynotes" => Some((
+            "便笺 (Sticky Notes)",
+            "Sticky Notes",
+            "桌面便签工具",
+            "Desktop sticky notes",
+        )),
+        "microsoft.copilot" | "microsoft.windows.ai.copilot.provider" => Some((
+            "Microsoft Copilot",
+            "Microsoft Copilot",
+            "预装 AI 助手组件",
+            "Preinstalled AI assistant",
+        )),
+        "microsoft.windowssoundrecorder" => Some((
+            "录音机 (Sound Recorder)",
+            "Windows Sound Recorder",
+            "预装音频录制应用",
+            "Preinstalled audio recorder",
+        )),
+        "microsoft.windowsalarms" => Some((
+            "时钟 (Alarms & Clock)",
+            "Windows Clock",
+            "预装闹钟、计时器与世界时钟",
+            "Preinstalled clock & alarms",
+        )),
+        "microsoft.windowscamera" => Some((
+            "相机 (Windows Camera)",
+            "Windows Camera",
+            "预装摄像头拍照与录像应用",
+            "Preinstalled camera app",
+        )),
+        "microsoft.windowsstore" => Some((
+            "Microsoft Store (应用商店)",
+            "Microsoft Store",
+            "核心应用商店（受保护）",
+            "Core Windows Store (Protected)",
+        )),
+        "microsoft.desktopappinstaller" => Some((
+            "应用安装程序 (winget)",
+            "App Installer (winget)",
+            "MSIX 安装器与 winget CLI（受保护）",
+            "Core MSIX & winget installer",
+        )),
+        "microsoft.sechealthui" => Some((
+            "Windows 安全中心",
+            "Windows Security",
+            "系统防病毒与安全界面（受保护）",
+            "Core Windows Security UI",
+        )),
+        "microsoft.windowsterminal" => Some((
+            "Windows 终端",
+            "Windows Terminal",
+            "现代命令行终端（受保护）",
+            "Core Windows Terminal",
+        )),
+        "microsoft.windowscalculator" => Some((
+            "计算器",
+            "Windows Calculator",
+            "系统基础工具（受保护）",
+            "System Calculator",
+        )),
+        "microsoft.windowsnotepad" => Some((
+            "记事本",
+            "Windows Notepad",
+            "系统基础工具（受保护）",
+            "System Notepad",
+        )),
+        "microsoft.paint" => Some((
+            "画图",
+            "Microsoft Paint",
+            "系统基础工具（受保护）",
+            "System Paint",
+        )),
+        "microsoft.screensketch" => Some((
+            "截图工具",
+            "Snipping Tool",
+            "系统截图与录屏工具（受保护）",
+            "System Snipping Tool",
+        )),
         _ => None,
     };
 
@@ -380,14 +584,20 @@ fn resolve_friendly_meta(
     {
         raw_display.to_string()
     } else {
-        name.split('.').last().unwrap_or(name).to_string()
+        name.split('.').next_back().unwrap_or(name).to_string()
     };
 
     let (dzh, den) = match cat {
         AppxCategory::Bloatware => ("可安全精简的预装组件", "Optional preinstalled component"),
         AppxCategory::UserApp => ("用户安装或第三方现代应用", "User / Store application"),
-        AppxCategory::Framework => ("应用运行时依赖框架（建议保留）", "Shared runtime framework (Protected)"),
-        AppxCategory::SystemCore => ("Windows 系统核心体验组件（受保护）", "Core Windows system component (Protected)"),
+        AppxCategory::Framework => (
+            "应用运行时依赖框架（建议保留）",
+            "Shared runtime framework (Protected)",
+        ),
+        AppxCategory::SystemCore => (
+            "Windows 系统核心体验组件（受保护）",
+            "Core Windows system component (Protected)",
+        ),
     };
 
     (
@@ -419,11 +629,17 @@ mod tests {
             AppxCategory::Bloatware
         );
         assert_eq!(
-            classify_appx("Microsoft.WindowsStore", r"C:\Program Files\WindowsApps\Store"),
+            classify_appx(
+                "Microsoft.WindowsStore",
+                r"C:\Program Files\WindowsApps\Store"
+            ),
             AppxCategory::SystemCore
         );
         assert_eq!(
-            classify_appx("Microsoft.VCLibs.140.00", r"C:\Program Files\WindowsApps\VCLibs"),
+            classify_appx(
+                "Microsoft.VCLibs.140.00",
+                r"C:\Program Files\WindowsApps\VCLibs"
+            ),
             AppxCategory::Framework
         );
     }

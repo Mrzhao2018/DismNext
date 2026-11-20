@@ -1,5 +1,6 @@
 use crate::diskmap::{invalidate_orphans_cache, is_protected_recycle_target, measure_dir_stats};
 use crate::path_recycle::{recycle_paths, PathSnapshot};
+use crate::ttl_cache::TtlCache;
 use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -7,8 +8,7 @@ use std::os::windows::fs::MetadataExt;
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ExitStatus};
-use std::sync::{OnceLock, RwLock};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use winreg::enums::{
     HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ, KEY_WOW64_32KEY, KEY_WOW64_64KEY,
 };
@@ -99,33 +99,16 @@ enum UninstallProcess {
     Exited(ExitStatus),
 }
 
-static WIN32_APPS_CACHE: OnceLock<RwLock<Option<(Instant, Vec<Win32AppInfo>)>>> = OnceLock::new();
+static WIN32_APPS_CACHE: TtlCache<Vec<Win32AppInfo>> = TtlCache::new(Duration::from_secs(30));
 
 pub fn invalidate_win32_apps_cache() {
-    if let Some(lock) = WIN32_APPS_CACHE.get() {
-        if let Ok(mut w) = lock.write() {
-            *w = None;
-        }
-    }
+    WIN32_APPS_CACHE.invalidate();
     invalidate_orphans_cache();
 }
 
 /// Enumerates traditional Win32 / MSI applications registered under HKLM (x64 & x86) and HKCU Uninstall keys.
 pub fn list_win32_apps() -> Vec<Win32AppInfo> {
-    let cache = WIN32_APPS_CACHE.get_or_init(|| RwLock::new(None));
-    if let Ok(guard) = cache.read() {
-        if let Some((ts, ref items)) = *guard {
-            if ts.elapsed() < Duration::from_secs(30) {
-                return items.clone();
-            }
-        }
-    }
-
-    let computed = collect_win32_apps();
-    if let Ok(mut w) = cache.write() {
-        *w = Some((Instant::now(), computed.clone()));
-    }
-    computed
+    WIN32_APPS_CACHE.get_or_load(collect_win32_apps)
 }
 
 fn uninstall_sources() -> [(RegKey, u32, &'static str, &'static str); 3] {
@@ -142,12 +125,7 @@ fn uninstall_sources() -> [(RegKey, u32, &'static str, &'static str); 3] {
             "hklm32",
             "system_x86",
         ),
-        (
-            RegKey::predef(HKEY_CURRENT_USER),
-            KEY_READ,
-            "hkcu",
-            "user",
-        ),
+        (RegKey::predef(HKEY_CURRENT_USER), KEY_READ, "hkcu", "user"),
     ]
 }
 
@@ -246,8 +224,8 @@ fn collect_win32_apps() -> Vec<Win32AppInfo> {
                 .to_string();
             let estimated_kib: u32 = sk.get_value::<u32, _>("EstimatedSize").unwrap_or(0);
             let windows_installer: u32 = sk.get_value::<u32, _>("WindowsInstaller").unwrap_or(0);
-            let is_msi = windows_installer == 1
-                || uninstall_string.to_ascii_lowercase().contains("msiexec");
+            let is_msi =
+                windows_installer == 1 || uninstall_string.to_ascii_lowercase().contains("msiexec");
 
             items.push(Win32AppInfo {
                 id: format!("{}::{}", prefix, key_name),
@@ -269,7 +247,11 @@ fn collect_win32_apps() -> Vec<Win32AppInfo> {
     items.sort_by(|a, b| {
         b.estimated_size_bytes
             .cmp(&a.estimated_size_bytes)
-            .then_with(|| a.display_name.to_ascii_lowercase().cmp(&b.display_name.to_ascii_lowercase()))
+            .then_with(|| {
+                a.display_name
+                    .to_ascii_lowercase()
+                    .cmp(&b.display_name.to_ascii_lowercase())
+            })
     });
     items
 }
@@ -317,7 +299,9 @@ fn scan_leftovers(
                 Ok(snapshot) => (
                     snapshot.size_bytes,
                     snapshot.file_count,
-                    Some(LeftoverReview::Ready { stamp: snapshot.stamp }),
+                    Some(LeftoverReview::Ready {
+                        stamp: snapshot.stamp,
+                    }),
                 ),
                 Err(reason) => (0, 0, Some(LeftoverReview::Blocked { reason })),
             }
@@ -414,7 +398,7 @@ fn scan_leftovers(
         }
     }
 
-    results.sort_by(|a, b| b.size_bytes.cmp(&a.size_bytes));
+    results.sort_by_key(|entry| std::cmp::Reverse(entry.size_bytes));
     results
 }
 
@@ -582,7 +566,10 @@ pub fn launch_win32_uninstaller(app_id: &str, use_quiet: bool) -> Result<Win32Un
 impl Win32Uninstall {
     pub fn status(&mut self) -> Result<UninstallStatus<'_>> {
         if let UninstallProcess::Running(child) = &mut self.process {
-            if let Some(exit) = child.try_wait().context("Checking the uninstaller process")? {
+            if let Some(exit) = child
+                .try_wait()
+                .context("Checking the uninstaller process")?
+            {
                 self.process = UninstallProcess::Exited(exit);
             }
         }
@@ -701,7 +688,9 @@ mod tests {
 
         // Generic vendor/framework words must be excluded from leftover folder matching
         let toks = extract_safe_app_tokens("Microsoft Visual C++ 2022 Redistributable (x64)");
-        assert!(!toks.iter().any(|t| t == "microsoft" || t == "redistributable" || t == "x64"));
+        assert!(!toks
+            .iter()
+            .any(|t| t == "microsoft" || t == "redistributable" || t == "x64"));
 
         // Distinct product name tokens must survive
         let custom_toks = extract_safe_app_tokens("Acme SuperTool 2026");

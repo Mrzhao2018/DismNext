@@ -334,6 +334,7 @@ mod tests {
         {
             let mut f = OpenOptions::new()
                 .create(true)
+                .truncate(true)
                 .write(true)
                 .share_mode(0)
                 .open(&p)

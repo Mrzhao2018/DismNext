@@ -21,7 +21,7 @@ DismNext 是面向 Windows 11 的本地系统维护工具。你可以用它找�
 
 ### 从源码构建
 
-准备 Windows、Rust stable（MSVC 工具链）、带 Windows SDK 的 Visual Studio C++ Build Tools，以及 Node.js 22。然后在仓库根目录运行以下命令。
+准备 Windows、Rust stable（MSVC 工具链）、带 Windows SDK 的 Visual Studio C++ Build Tools，以及 Node.js 22.13 或更新的 22.x 版本。然后在仓库根目录运行以下命令。
 
 ```powershell
 Push-Location ui
@@ -113,16 +113,20 @@ $cli = '.\target\release\dism-cli.exe'
 | [`ui`](ui) | 使用 React、TypeScript、Fluent UI 9 和 Vite 构建的中英双语界面。 |
 | [`catalog/rules.json`](catalog/rules.json) | 构建时嵌入的清理与优化规则。 |
 
-桌面版和 CLI 将注册表快照保存在运行时工作目录下的 `data/snapshots/`。自定义清理规则保存在 `data/custom_rules.json`，应用会在工作目录和 EXE 所在目录查找该文件。
+注册表快照保存在数据目录下的 `snapshots/`，自定义清理规则保存在 `custom_rules.json`。应用优先沿用工作目录或 EXE 所在目录下已有的可写 `data/`。新安装默认在 EXE 旁写入，便携位置不可写时使用 `%LOCALAPPDATA%\DismNext`。应用仍会查找旧位置中的已有数据。
 
 完成前端和发布构建后，可在仓库根目录运行本地验证。
 
 ```powershell
+npm --prefix ui run lint
+npm --prefix ui test
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo test --workspace --locked
 .\scripts\check_portable_ui.ps1 -Executable .\target\release\dism-app.exe
 ```
 
-[Windows CI](.github/workflows/windows-ci.yml) 在推送和 Pull Request 时构建、打包并检查发布文件。打包检查会在临时目录运行桌面版和 CLI，验证清理范围、计划取消与单次执行、内置规则的预设等级、MCP 握手以及 v2.0.0 数据兼容性。Rust 测试单独覆盖清理计划的过期边界。推送到 `main` 后，检查通过的文件会保存在该次 CI 的 `dismnext-windows-x64` 产物中。
+[Windows CI](.github/workflows/windows-ci.yml) 在推送和 Pull Request 时检查代码风格、运行单元测试并校验内置规则库。打包检查会在临时目录运行桌面版和 CLI，验证内嵌界面的 gzip 响应、清理计划、MCP 握手和 v2.0.0 数据兼容性。推送到 `main` 后，检查通过的文件会保存在该次 CI 的 `dismnext-windows-x64` 产物中。
 
 完成发布构建后，可在 Windows x64 上用 PowerShell 7 打包和检查。将示例路径中的版本号替换为当前构建版本。
 

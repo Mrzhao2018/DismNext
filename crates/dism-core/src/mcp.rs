@@ -158,10 +158,7 @@ pub fn handle_mcp_request(req: &Value, catalog: &Catalog) -> Option<Value> {
     let id_val = req.get("id");
 
     // JSON-RPC notifications do not receive a response.
-    if id_val.is_none()
-        || method.starts_with("notifications/")
-        || method == "initialized"
-    {
+    if id_val.is_none() || method.starts_with("notifications/") || method == "initialized" {
         return None;
     }
 
@@ -218,10 +215,7 @@ pub fn handle_mcp_request(req: &Value, catalog: &Catalog) -> Option<Value> {
             }
         })),
         "tools/call" => {
-            let name = params
-                .get("name")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
+            let name = params.get("name").and_then(|v| v.as_str()).unwrap_or("");
             let args = params
                 .get("arguments")
                 .cloned()
@@ -594,7 +588,10 @@ fn dispatch_tool_call(name: &str, args: &Value, catalog: &Catalog) -> Result<Val
             if rule_ids.is_empty() {
                 return Err(anyhow!("'rule_ids' must contain at least one rule ID"));
             }
-            let dry_run = args.get("dry_run").and_then(|v| v.as_bool()).unwrap_or(true);
+            let dry_run = args
+                .get("dry_run")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true);
             let report = execute_cleanup(&catalog.cleanup_rules, &rule_ids, &sys, dry_run);
             Ok(serde_json::to_value(report)?)
         }
@@ -703,7 +700,10 @@ fn dispatch_tool_call(name: &str, args: &Value, catalog: &Catalog) -> Result<Val
             out.insert("category".to_string(), json!(cat));
             match cat.as_str() {
                 "run" => {
-                    out.insert("run_items".to_string(), serde_json::to_value(list_startup_items())?);
+                    out.insert(
+                        "run_items".to_string(),
+                        serde_json::to_value(list_startup_items())?,
+                    );
                 }
                 "services" => {
                     out.insert(
@@ -718,7 +718,10 @@ fn dispatch_tool_call(name: &str, args: &Value, catalog: &Catalog) -> Result<Val
                     );
                 }
                 _ => {
-                    out.insert("run_items".to_string(), serde_json::to_value(list_startup_items())?);
+                    out.insert(
+                        "run_items".to_string(),
+                        serde_json::to_value(list_startup_items())?,
+                    );
                     out.insert(
                         "services".to_string(),
                         serde_json::to_value(list_third_party_services())?,
@@ -789,12 +792,14 @@ fn dispatch_tool_call(name: &str, args: &Value, catalog: &Catalog) -> Result<Val
             Ok(payload)
         }
         "dismnext_list_snapshots" => {
-            let dir = resolve_snapshot_dir();
-            let mgr = SnapshotManager::new(dir.clone());
+            let mut mgr = SnapshotManager::user_default();
+            if let Some(legacy) = legacy_snapshot_dir() {
+                mgr.add_legacy_directory(legacy);
+            }
             let list = mgr.list()?;
             let summaries: Vec<SnapshotSummary> = list.iter().map(snapshot_summary).collect();
             Ok(json!({
-                "snapshot_dir": dir.to_string_lossy(),
+                "snapshot_dir": mgr.directory().to_string_lossy(),
                 "count": summaries.len(),
                 "snapshots": summaries
             }))
@@ -886,20 +891,15 @@ fn dispatch_tool_call(name: &str, args: &Value, catalog: &Catalog) -> Result<Val
     }
 }
 
-fn resolve_snapshot_dir() -> PathBuf {
-    let cwd_dir = SnapshotManager::default_dir();
-    if cwd_dir.exists() {
-        return cwd_dir;
+fn legacy_snapshot_dir() -> Option<PathBuf> {
+    if Path::new("data").join("snapshots").is_dir() {
+        return None;
     }
-    if let Ok(exe) = std::env::current_exe() {
-        for ancestor in exe.ancestors().skip(1) {
-            let candidate = ancestor.join("data").join("snapshots");
-            if candidate.exists() {
-                return candidate;
-            }
-        }
-    }
-    cwd_dir
+    let exe = std::env::current_exe().ok()?;
+    exe.ancestors()
+        .skip(1)
+        .map(|ancestor| ancestor.join("data").join("snapshots"))
+        .find(|candidate| candidate.is_dir())
 }
 
 #[cfg(test)]
@@ -992,7 +992,12 @@ mod tests {
             .expect("content text");
         let parsed: Value = serde_json::from_str(text).expect("valid JSON tool payload");
         assert!(parsed["catalog"]["cleanup_rules"].as_u64().unwrap() >= 93);
-        assert!(parsed["system"]["system_disk"]["total_bytes"].as_u64().unwrap() > 0);
+        assert!(
+            parsed["system"]["system_disk"]["total_bytes"]
+                .as_u64()
+                .unwrap()
+                > 0
+        );
 
         let snap_req = json!({
             "jsonrpc": "2.0",

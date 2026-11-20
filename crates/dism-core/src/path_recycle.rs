@@ -1,6 +1,6 @@
 use crate::diskmap::{invalidate_orphans_cache, is_protected_recycle_target};
-use crate::recycle_bin::{move_batch, move_to_recycle_bin, RecycleRequest, Verified};
 use crate::file_stamp::{open_for_verification, read_basic_info, TargetStamp};
+use crate::recycle_bin::{move_batch, move_to_recycle_bin, RecycleRequest, Verified};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::hash::{BuildHasher, Hash, Hasher, RandomState};
@@ -116,7 +116,9 @@ pub fn review_recycle_path(path: &Path, is_dir: bool, scan_started_at: i64) -> R
 }
 
 pub fn recycle_reviewed_path(target: &RecycleTarget) -> RecycleItem {
-    recycle_paths(std::slice::from_ref(target), None).pop().unwrap()
+    recycle_paths(std::slice::from_ref(target), None)
+        .pop()
+        .unwrap()
 }
 
 pub(crate) fn recycle_path_immediately(path: &Path) -> anyhow::Result<u64> {
@@ -312,34 +314,55 @@ fn recycle_with(
     recycle: impl FnOnce(Vec<RecycleRequest<PathSnapshot>>) -> Vec<anyhow::Result<PathSnapshot>>,
 ) -> Vec<RecycleItem> {
     let mut seen = HashSet::new();
-    let selected: Vec<_> = targets.iter().filter(|target| seen.insert(&target.path)).collect();
-    let requests = selected.iter().map(|target| {
-        let target = (*target).clone();
-        RecycleRequest {
-            path: target.path.clone(),
-            verify: Box::new(move || {
-                let snapshot = PathSnapshot::capture(&target.path, expected_dir).map_err(VerificationError)?;
-                if snapshot.stamp != target.stamp {
-                    return Err(VerificationError(RecycleSkipReason::Changed).into());
-                }
-                Ok(Verified { value: snapshot, hold: None })
-            }),
-        }
-    }).collect();
-    selected.into_iter().zip(recycle(requests)).map(|(target, result)| {
-        let outcome = match result {
-            Ok(snapshot) => RecycleOutcome::Recycled {
-                size_bytes: snapshot.size_bytes,
-                file_count: snapshot.file_count,
-                dir_count: snapshot.dir_count,
-            },
-            Err(error) => match error.downcast::<VerificationError>() {
-                Ok(verification) => RecycleOutcome::Skipped { reason: verification.0 },
-                Err(error) => RecycleOutcome::Failed { error: error.to_string() },
-            },
-        };
-        RecycleItem { path: target.path.clone(), outcome }
-    }).collect()
+    let selected: Vec<_> = targets
+        .iter()
+        .filter(|target| seen.insert(&target.path))
+        .collect();
+    let requests = selected
+        .iter()
+        .map(|target| {
+            let target = (*target).clone();
+            RecycleRequest {
+                path: target.path.clone(),
+                verify: Box::new(move || {
+                    let snapshot = PathSnapshot::capture(&target.path, expected_dir)
+                        .map_err(VerificationError)?;
+                    if snapshot.stamp != target.stamp {
+                        return Err(VerificationError(RecycleSkipReason::Changed).into());
+                    }
+                    Ok(Verified {
+                        value: snapshot,
+                        hold: None,
+                    })
+                }),
+            }
+        })
+        .collect();
+    selected
+        .into_iter()
+        .zip(recycle(requests))
+        .map(|(target, result)| {
+            let outcome = match result {
+                Ok(snapshot) => RecycleOutcome::Recycled {
+                    size_bytes: snapshot.size_bytes,
+                    file_count: snapshot.file_count,
+                    dir_count: snapshot.dir_count,
+                },
+                Err(error) => match error.downcast::<VerificationError>() {
+                    Ok(verification) => RecycleOutcome::Skipped {
+                        reason: verification.0,
+                    },
+                    Err(error) => RecycleOutcome::Failed {
+                        error: error.to_string(),
+                    },
+                },
+            };
+            RecycleItem {
+                path: target.path.clone(),
+                outcome,
+            }
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -347,8 +370,14 @@ mod tests {
     use super::*;
     use crate::recycle_bin::test_move_batch;
 
-    fn recycle_test(targets: &[RecycleTarget], expected_dir: Option<bool>, recycle: impl FnMut(&Path) -> anyhow::Result<()>) -> Vec<RecycleItem> {
-        recycle_with(targets, expected_dir, |requests| test_move_batch(requests, recycle))
+    fn recycle_test(
+        targets: &[RecycleTarget],
+        expected_dir: Option<bool>,
+        recycle: impl FnMut(&Path) -> anyhow::Result<()>,
+    ) -> Vec<RecycleItem> {
+        recycle_with(targets, expected_dir, |requests| {
+            test_move_batch(requests, recycle)
+        })
     }
     use std::fs;
 
@@ -496,7 +525,9 @@ mod tests {
         ] {
             let item = recycle_test(&[target], None, |_| {
                 panic!("changed targets must not reach Shell")
-            }).pop().unwrap();
+            })
+            .pop()
+            .unwrap();
             assert!(matches!(
                 item.outcome,
                 RecycleOutcome::Skipped {

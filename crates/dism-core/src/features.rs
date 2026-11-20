@@ -5,8 +5,7 @@ use serde::{Deserialize, Serialize};
 use winreg::enums::{HKEY_LOCAL_MACHINE, KEY_READ};
 use winreg::RegKey;
 
-const CBS_FEATURES_KEY: &str =
-    r"SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\Notifications\OptionalFeatures";
+const CBS_FEATURES_KEY: &str = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\Notifications\OptionalFeatures";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -69,7 +68,11 @@ pub fn list_optional_features() -> Vec<WindowsFeatureInfo> {
         a.0.cmp(&b.0)
             .then_with(|| cat_order(a.1.category).cmp(&cat_order(b.1.category)))
             .then_with(|| b.1.enabled.cmp(&a.1.enabled))
-            .then_with(|| a.1.name.to_ascii_lowercase().cmp(&b.1.name.to_ascii_lowercase()))
+            .then_with(|| {
+                a.1.name
+                    .to_ascii_lowercase()
+                    .cmp(&b.1.name.to_ascii_lowercase())
+            })
     });
 
     features.into_iter().map(|(_, f)| f).collect()
@@ -372,8 +375,13 @@ mod tests {
     #[test]
     fn test_list_optional_features_from_cbs_registry() {
         let list = list_optional_features();
-        assert!(!list.is_empty(), "Expected CBS OptionalFeatures keys on Windows");
-        assert!(list.iter().any(|f| f.name == "NetFx3" || f.name == "TelnetClient"));
+        assert!(
+            !list.is_empty(),
+            "Expected CBS OptionalFeatures keys on Windows"
+        );
+        assert!(list
+            .iter()
+            .any(|f| f.name == "NetFx3" || f.name == "TelnetClient"));
     }
 
     #[test]

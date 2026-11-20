@@ -1,11 +1,11 @@
 use crate::evaluator::{expand_env_vars, reg_value_to_string};
+use crate::ttl_cache::TtlCache;
 use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::sync::{OnceLock, RwLock};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 const SERVICES_KEY: &str = r"SYSTEM\CurrentControlSet\Services";
@@ -40,8 +40,13 @@ pub struct StartupItem {
 #[derive(Debug, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum StartupOrigin {
-    Registry { key_path: String, value_name: String },
-    StartupFolder { path: String },
+    Registry {
+        key_path: String,
+        value_name: String,
+    },
+    StartupFolder {
+        path: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -150,8 +155,7 @@ const SOURCES: &[StartupSourceDef] = &[
         kind: SourceKind::StartupFolder,
         hive: HKEY_CURRENT_USER,
         run_subkey: "",
-        approved_subkey:
-            r"Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\StartupFolder",
+        approved_subkey: r"Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\StartupFolder",
         sam: KEY_WOW64_64KEY,
     },
     StartupSourceDef {
@@ -161,8 +165,7 @@ const SOURCES: &[StartupSourceDef] = &[
         kind: SourceKind::StartupFolder,
         hive: HKEY_LOCAL_MACHINE,
         run_subkey: "",
-        approved_subkey:
-            r"SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\StartupFolder",
+        approved_subkey: r"SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\StartupFolder",
         sam: KEY_WOW64_64KEY,
     },
 ];
@@ -242,9 +245,11 @@ pub fn list_startup_items() -> Vec<StartupItem> {
     }
 
     items.sort_by(|a, b| {
-        b.enabled
-            .cmp(&a.enabled)
-            .then_with(|| a.name.to_ascii_lowercase().cmp(&b.name.to_ascii_lowercase()))
+        b.enabled.cmp(&a.enabled).then_with(|| {
+            a.name
+                .to_ascii_lowercase()
+                .cmp(&b.name.to_ascii_lowercase())
+        })
     });
     items
 }
@@ -360,7 +365,9 @@ pub fn build_startup_approved_bytes(enable: bool) -> Vec<u8> {
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
-        let filetime: u64 = secs.saturating_mul(10_000_000).saturating_add(116_444_736_000_000_000);
+        let filetime: u64 = secs
+            .saturating_mul(10_000_000)
+            .saturating_add(116_444_736_000_000_000);
         let mut buf = vec![0x03, 0, 0, 0];
         buf.extend_from_slice(&filetime.to_le_bytes());
         buf
@@ -515,7 +522,10 @@ pub fn list_third_party_services() -> Vec<ThirdPartyServiceItem> {
 }
 
 /// Changes a third-party service startup mode (`auto`, `manual`, `disabled`) via `sc.exe config`.
-pub fn set_service_start_mode(service_name: &str, start_mode: &str) -> Result<ThirdPartyServiceItem> {
+pub fn set_service_start_mode(
+    service_name: &str,
+    start_mode: &str,
+) -> Result<ThirdPartyServiceItem> {
     let trimmed = service_name.trim();
     if trimmed.is_empty() || trimmed.contains(['\\', '/', '"', '\0']) {
         return Err(anyhow!("Invalid service name '{}'", trimmed));
@@ -553,7 +563,9 @@ pub fn set_service_start_mode(service_name: &str, start_mode: &str) -> Result<Th
 
     let stdout = crate::systasks::decode_cmd_output(&output.stdout);
     let stderr = crate::systasks::decode_cmd_output(&output.stderr);
-    let combined = format!("{}\n{}", stdout.trim(), stderr.trim()).trim().to_string();
+    let combined = format!("{}\n{}", stdout.trim(), stderr.trim())
+        .trim()
+        .to_string();
     if !output.status.success() {
         return Err(anyhow!("sc.exe config failed: {}", combined));
     }
@@ -564,32 +576,15 @@ pub fn set_service_start_mode(service_name: &str, start_mode: &str) -> Result<Th
         .ok_or_else(|| anyhow!("Service '{}' not found after update", trimmed))
 }
 
-static TASKS_CACHE: OnceLock<RwLock<Option<(Instant, Vec<ScheduledTaskItem>)>>> = OnceLock::new();
+static TASKS_CACHE: TtlCache<Vec<ScheduledTaskItem>> = TtlCache::new(Duration::from_secs(60));
 
 pub fn invalidate_tasks_cache() {
-    if let Some(lock) = TASKS_CACHE.get() {
-        if let Ok(mut w) = lock.write() {
-            *w = None;
-        }
-    }
+    TASKS_CACHE.invalidate();
 }
 
 /// Enumerates tasks outside `\Microsoft\Windows` through the Task Scheduler COM API.
 pub fn list_scheduled_tasks() -> Vec<ScheduledTaskItem> {
-    let cache = TASKS_CACHE.get_or_init(|| RwLock::new(None));
-    if let Ok(guard) = cache.read() {
-        if let Some((ts, ref list)) = *guard {
-            if ts.elapsed() < Duration::from_secs(60) {
-                return list.clone();
-            }
-        }
-    }
-
-    let computed = compute_scheduled_tasks_uncached();
-    if let Ok(mut w) = cache.write() {
-        *w = Some((Instant::now(), computed.clone()));
-    }
-    computed
+    TASKS_CACHE.get_or_load(compute_scheduled_tasks_uncached)
 }
 
 /// Enables or disables a third-party scheduled task via `schtasks.exe /Change`.
@@ -616,7 +611,9 @@ pub fn set_scheduled_task_enabled(task_path: &str, enabled: bool) -> Result<()> 
 
     let stdout = crate::systasks::decode_cmd_output(&output.stdout);
     let stderr = crate::systasks::decode_cmd_output(&output.stderr);
-    let combined = format!("{}\n{}", stdout.trim(), stderr.trim()).trim().to_string();
+    let combined = format!("{}\n{}", stdout.trim(), stderr.trim())
+        .trim()
+        .to_string();
     if !output.status.success() {
         return Err(anyhow!("schtasks /Change failed: {}", combined));
     }
@@ -694,9 +691,13 @@ mod tests {
 
     #[test]
     fn test_startup_approved_encoding_and_target_extraction() {
-        assert!(is_startup_approved_enabled(&[0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]));
+        assert!(is_startup_approved_enabled(&[
+            0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+        ]));
         assert!(is_startup_approved_enabled(&[0x06, 0, 0, 0]));
-        assert!(!is_startup_approved_enabled(&[0x03, 0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8]));
+        assert!(!is_startup_approved_enabled(&[
+            0x03, 0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8
+        ]));
 
         let en = build_startup_approved_bytes(true);
         assert_eq!(en.len(), 12);
@@ -725,14 +726,19 @@ mod tests {
             r"HKEY_LOCAL_MACHINE\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Run"
         );
         assert_eq!(
-            startup_source("hkcu_run:Example").unwrap().0.registry_path(),
+            startup_source("hkcu_run:Example")
+                .unwrap()
+                .0
+                .registry_path(),
             r"HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Run"
         );
         for path in [
             r#""C:\Program Files\Example\update.exe" C:\Other\tool.exe"#,
             r"C:\Apps\update.exe C:\Other\tool.exe",
         ] {
-            assert!(inspection_command_path(path).unwrap().ends_with(r"\update.exe"));
+            assert!(inspection_command_path(path)
+                .unwrap()
+                .ends_with(r"\update.exe"));
         }
         assert!(inspection_command_path(r"C:\Program Files\Example\update.exe").is_none());
         assert!(inspection_command_path("cmd.exe /c update.cmd").is_none());

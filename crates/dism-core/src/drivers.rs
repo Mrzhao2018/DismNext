@@ -1,3 +1,4 @@
+use crate::ttl_cache::TtlCache;
 use anyhow::{anyhow, Context, Result};
 use chrono::DateTime;
 use rayon::prelude::*;
@@ -8,8 +9,7 @@ use std::os::windows::ffi::OsStrExt;
 use std::os::windows::fs::MetadataExt;
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::sync::{OnceLock, RwLock};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use winreg::enums::{HKEY_LOCAL_MACHINE, KEY_READ};
 use winreg::RegKey;
 
@@ -67,32 +67,16 @@ struct RawDriverMeta {
     hw_descriptors: HashSet<String>,
 }
 
-static DRIVERS_CACHE: OnceLock<RwLock<Option<(Instant, Vec<DriverPackageInfo>)>>> = OnceLock::new();
+static DRIVERS_CACHE: TtlCache<Vec<DriverPackageInfo>> = TtlCache::new(Duration::from_secs(30));
 
 pub fn invalidate_drivers_cache() {
-    if let Some(lock) = DRIVERS_CACHE.get() {
-        if let Ok(mut w) = lock.write() {
-            *w = None;
-        }
-    }
+    DRIVERS_CACHE.invalidate();
 }
 
 /// Lists all third-party (`oem*.inf`) driver packages registered in Windows DriverDatabase
 /// and detects older duplicate versions superseded by newer packages.
 pub fn list_drivers() -> Vec<DriverPackageInfo> {
-    let cache = DRIVERS_CACHE.get_or_init(|| RwLock::new(None));
-    if let Ok(guard) = cache.read() {
-        if let Some((ts, ref list)) = *guard {
-            if ts.elapsed() < Duration::from_secs(30) {
-                return list.clone();
-            }
-        }
-    }
-    let computed = compute_drivers_uncached();
-    if let Ok(mut w) = cache.write() {
-        *w = Some((Instant::now(), computed.clone()));
-    }
-    computed
+    DRIVERS_CACHE.get_or_load(compute_drivers_uncached)
 }
 
 pub(crate) fn compute_drivers_uncached() -> Vec<DriverPackageInfo> {
@@ -118,9 +102,13 @@ pub(crate) fn compute_drivers_uncached() -> Vec<DriverPackageInfo> {
             continue;
         };
 
-        let original_name = sk
-            .get_value::<String, _>("InfName")
-            .unwrap_or_else(|_| repo_folder.split('_').next().unwrap_or(&repo_folder).to_string());
+        let original_name = sk.get_value::<String, _>("InfName").unwrap_or_else(|_| {
+            repo_folder
+                .split('_')
+                .next()
+                .unwrap_or(&repo_folder)
+                .to_string()
+        });
         let provider = sk
             .get_value::<String, _>("Provider")
             .unwrap_or_else(|_| "Unknown".to_string());
@@ -201,7 +189,9 @@ pub(crate) fn compute_drivers_uncached() -> Vec<DriverPackageInfo> {
 /// Returns a sensible default backup directory under Desktop or C:\DriverBackup.
 pub fn default_backup_dir() -> String {
     if let Ok(profile) = std::env::var("USERPROFILE") {
-        let desktop = PathBuf::from(profile).join("Desktop").join("DismNext_DriverBackup");
+        let desktop = PathBuf::from(profile)
+            .join("Desktop")
+            .join("DismNext_DriverBackup");
         return desktop.to_string_lossy().into_owned();
     }
     r"C:\DismNext_DriverBackup".to_string()
@@ -224,7 +214,10 @@ pub fn export_drivers(
             if names.is_empty() {
                 return Err(anyhow!("No driver packages selected for backup"));
             }
-            let wanted: HashSet<String> = names.iter().map(|s| s.trim().to_ascii_lowercase()).collect();
+            let wanted: HashSet<String> = names
+                .iter()
+                .map(|s| s.trim().to_ascii_lowercase())
+                .collect();
             all_drivers
                 .into_iter()
                 .filter(|d| wanted.contains(&d.published_name.to_ascii_lowercase()))
@@ -233,7 +226,9 @@ pub fn export_drivers(
     };
 
     if selected.is_empty() {
-        return Err(anyhow!("No matching third-party driver packages found to export"));
+        return Err(anyhow!(
+            "No matching third-party driver packages found to export"
+        ));
     }
 
     fs::create_dir_all(target_dir)
@@ -265,8 +260,13 @@ pub fn export_drivers(
             sanitize_component(pub_stem)
         );
         let dest_pkg_dir = target_dir.join(&folder_name);
-        let copied = copy_dir_recursive(src, &dest_pkg_dir)
-            .with_context(|| format!("Failed copying driver {} from {}", drv.published_name, src.display()))?;
+        let copied = copy_dir_recursive(src, &dest_pkg_dir).with_context(|| {
+            format!(
+                "Failed copying driver {} from {}",
+                drv.published_name,
+                src.display()
+            )
+        })?;
 
         exported_count += 1;
         total_bytes += copied;
@@ -333,7 +333,9 @@ pub fn delete_driver(published_name: &str) -> Result<String> {
 
     let stdout = crate::systasks::decode_cmd_output(&output.stdout);
     let stderr = crate::systasks::decode_cmd_output(&output.stderr);
-    let combined = format!("{}\n{}", stdout.trim(), stderr.trim()).trim().to_string();
+    let combined = format!("{}\n{}", stdout.trim(), stderr.trim())
+        .trim()
+        .to_string();
 
     if !output.status.success() {
         return Err(anyhow!(
@@ -395,15 +397,19 @@ fn mark_outdated_duplicates(items: &mut [DriverPackageInfo]) {
         });
 
         let newest_idx = sorted[0];
-        let newest_key = (items[newest_idx].version_rank, items[newest_idx].date_filetime);
+        let newest_key = (
+            items[newest_idx].version_rank,
+            items[newest_idx].date_filetime,
+        );
         let newest_label = if items[newest_idx].date.is_empty() {
-            format!("{} ({})", items[newest_idx].version, items[newest_idx].published_name)
+            format!(
+                "{} ({})",
+                items[newest_idx].version, items[newest_idx].published_name
+            )
         } else {
             format!(
                 "{} ({}, {})",
-                items[newest_idx].version,
-                items[newest_idx].published_name,
-                items[newest_idx].date
+                items[newest_idx].version, items[newest_idx].published_name, items[newest_idx].date
             )
         };
 
@@ -467,10 +473,8 @@ fn decode_driver_version_blob(bytes: &[u8]) -> (String, u64, String, u64, String
         let build = u16::from_le_bytes([bytes[34], bytes[35]]);
         let minor = u16::from_le_bytes([bytes[36], bytes[37]]);
         let major = u16::from_le_bytes([bytes[38], bytes[39]]);
-        let rank = ((major as u64) << 48)
-            | ((minor as u64) << 32)
-            | ((build as u64) << 16)
-            | (rev as u64);
+        let rank =
+            ((major as u64) << 48) | ((minor as u64) << 32) | ((build as u64) << 16) | (rev as u64);
         (rank, format!("{}.{}.{}.{}", major, minor, build, rev))
     } else {
         (0, "0.0.0.0".to_string())
@@ -601,6 +605,7 @@ fn _to_wide(s: &Path) -> Vec<u16> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Instant;
 
     #[test]
     fn test_decode_driver_version_blob_known_sample() {
@@ -626,8 +631,8 @@ mod tests {
 
         // Some Windows runner images have no third-party driver packages to export.
         if let Some(smallest) = drivers.iter().min_by_key(|d| d.size_bytes) {
-            let temp_dir = std::env::temp_dir()
-                .join(format!("dismnext_drv_backup_{}", std::process::id()));
+            let temp_dir =
+                std::env::temp_dir().join(format!("dismnext_drv_backup_{}", std::process::id()));
             let _ = fs::remove_dir_all(&temp_dir);
             let names = vec![smallest.published_name.clone()];
             let report = export_drivers(&temp_dir, Some(&names)).unwrap();
@@ -659,34 +664,59 @@ mod tests {
 
     #[test]
     fn test_outdated_duplicate_requires_provider_and_descriptor_coverage() {
-        let make_drv = |pub_name: &str, provider: &str, ver: &str, rank: u64, hw: &[&str]| DriverPackageInfo {
-            published_name: pub_name.to_string(),
-            original_name: "usbdev.inf".to_string(),
-            provider: provider.to_string(),
-            class_name: "USB".to_string(),
-            class_guid: "{36fc9e60-c465-11cf-8056-444553540000}".to_string(),
-            version: ver.to_string(),
-            date: "2026-01-01".to_string(),
-            signer_name: provider.to_string(),
-            repo_folder: pub_name.to_string(),
-            repo_path: pub_name.to_string(),
-            size_bytes: 1024,
-            is_outdated_duplicate: false,
-            newer_version: None,
-            version_rank: rank,
-            date_filetime: 100,
-            published_num: 1,
-            hw_descriptors: hw.iter().map(|s| s.to_string()).collect(),
-        };
+        let make_drv =
+            |pub_name: &str, provider: &str, ver: &str, rank: u64, hw: &[&str]| DriverPackageInfo {
+                published_name: pub_name.to_string(),
+                original_name: "usbdev.inf".to_string(),
+                provider: provider.to_string(),
+                class_name: "USB".to_string(),
+                class_guid: "{36fc9e60-c465-11cf-8056-444553540000}".to_string(),
+                version: ver.to_string(),
+                date: "2026-01-01".to_string(),
+                signer_name: provider.to_string(),
+                repo_folder: pub_name.to_string(),
+                repo_path: pub_name.to_string(),
+                size_bytes: 1024,
+                is_outdated_duplicate: false,
+                newer_version: None,
+                version_rank: rank,
+                date_filetime: 100,
+                published_num: 1,
+                hw_descriptors: hw.iter().map(|s| s.to_string()).collect(),
+            };
 
         let mut list = vec![
-            make_drv("oem10.inf", "VendorA", "2.0.0.0", 2, &["usb\\vid_1111&pid_0001"]),
+            make_drv(
+                "oem10.inf",
+                "VendorA",
+                "2.0.0.0",
+                2,
+                &["usb\\vid_1111&pid_0001"],
+            ),
             // Same provider, covered HWID -> should be marked outdated
-            make_drv("oem11.inf", "VendorA", "1.0.0.0", 1, &["usb\\vid_1111&pid_0001"]),
+            make_drv(
+                "oem11.inf",
+                "VendorA",
+                "1.0.0.0",
+                1,
+                &["usb\\vid_1111&pid_0001"],
+            ),
             // Same provider, extra HWID not in oem10 -> must NOT be marked outdated
-            make_drv("oem12.inf", "VendorA", "1.0.0.0", 1, &["usb\\vid_1111&pid_0002"]),
+            make_drv(
+                "oem12.inf",
+                "VendorA",
+                "1.0.0.0",
+                1,
+                &["usb\\vid_1111&pid_0002"],
+            ),
             // Different provider with same INF name -> must NOT be marked outdated
-            make_drv("oem13.inf", "VendorB", "1.0.0.0", 1, &["usb\\vid_1111&pid_0001"]),
+            make_drv(
+                "oem13.inf",
+                "VendorB",
+                "1.0.0.0",
+                1,
+                &["usb\\vid_1111&pid_0001"],
+            ),
         ];
 
         mark_outdated_duplicates(&mut list);

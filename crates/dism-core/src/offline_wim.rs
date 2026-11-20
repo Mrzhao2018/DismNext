@@ -209,7 +209,7 @@ fn read_images(library: &ImagingLibrary, path: &Path) -> Result<Vec<WimImage>> {
     }
     let length = length as usize;
     ensure!(
-        !buffer.0.is_null() && (2..=MAX_XML_BYTES).contains(&length) && length % 2 == 0,
+        !buffer.0.is_null() && (2..=MAX_XML_BYTES).contains(&length) && length.is_multiple_of(2),
         "Windows returned invalid WIM metadata"
     );
     let utf16 = unsafe { std::slice::from_raw_parts(buffer.0.cast::<u16>(), length / 2) };

@@ -11,3 +11,11 @@ version = "2.1.1"
 edition = "2021"
 license = "MIT"
 authors = ["DismNext Contributors"]
+
+[workspace.dependencies]
+flate2 = "1.1"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"

@@ -6,7 +6,8 @@ use crate::evaluator::{
     reg_value_to_u32, reg_value_to_u64, wow64_sam_list,
 };
 use crate::snapshot::{
-    read_tree_recursive, split_parent_leaf, write_tree_recursive, RegistrySnapshot, ShellRefresh, SnapshotManager,
+    read_tree_recursive, split_parent_leaf, write_tree_recursive, RegistrySnapshot, ShellRefresh,
+    SnapshotManager,
 };
 use crate::sysinfo::SystemInfo;
 use anyhow::{anyhow, Context, Result};
@@ -256,7 +257,10 @@ pub fn export_optimization_profile(
 
     for grp in evaluated {
         for it in grp.items {
-            for (scope, st_opt) in [(ScopeName::Current, &it.current), (ScopeName::System, &it.system)] {
+            for (scope, st_opt) in [
+                (ScopeName::Current, &it.current),
+                (ScopeName::System, &it.system),
+            ] {
                 let Some(st) = st_opt else {
                     continue;
                 };
@@ -331,15 +335,10 @@ pub fn evaluate_all_groups(
 
 fn eval_scope(scope: &OptimizationScope, sys: &SystemInfo) -> ScopeStatus {
     match scope {
-        OptimizationScope::CheckBox {
-            state,
-            true_warning,
-            false_warning,
-            ..
-        } => ScopeStatus::CheckBox(ScopeCheckBoxStatus {
-            enabled: eval_condition(state, sys),
-            true_warning: true_warning.clone(),
-            false_warning: false_warning.clone(),
+        OptimizationScope::CheckBox(scope) => ScopeStatus::CheckBox(ScopeCheckBoxStatus {
+            enabled: eval_condition(&scope.state, sys),
+            true_warning: scope.true_warning.clone(),
+            false_warning: scope.false_warning.clone(),
         }),
         OptimizationScope::Combo { dropdowns } => {
             let mut selected_index = None;
@@ -403,13 +402,10 @@ fn item_requires_interaction(item: &OptimizationItem) -> bool {
     .into_iter()
     .flatten()
     .any(|scope| match scope {
-        OptimizationScope::CheckBox {
-            true_actions,
-            false_actions,
-            ..
-        } => true_actions
+        OptimizationScope::CheckBox(scope) => scope
+            .true_actions
             .iter()
-            .chain(false_actions)
+            .chain(&scope.false_actions)
             .any(interactive_action),
         OptimizationScope::Combo { dropdowns } => dropdowns
             .iter()
@@ -437,20 +433,19 @@ fn resolve_apply<'a>(
     .ok_or_else(|| anyhow!("Item '{}' does not support scope {:?}", item_id, scope))?;
 
     let (actions, restart_hint, action_summary) = match (scope_def, value) {
-        (
-            OptimizationScope::CheckBox {
-                true_actions,
-                true_restart,
-                false_actions,
-                false_restart,
-                ..
-            },
-            ApplyValue::Bool(enable),
-        ) => {
+        (OptimizationScope::CheckBox(scope), ApplyValue::Bool(enable)) => {
             if *enable {
-                (true_actions.as_slice(), true_restart.clone(), "Enable".to_string())
+                (
+                    scope.true_actions.as_slice(),
+                    scope.true_restart.clone(),
+                    "Enable".to_string(),
+                )
             } else {
-                (false_actions.as_slice(), false_restart.clone(), "Disable".to_string())
+                (
+                    scope.false_actions.as_slice(),
+                    scope.false_restart.clone(),
+                    "Disable".to_string(),
+                )
             }
         }
         (OptimizationScope::Combo { dropdowns }, ApplyValue::Index(idx)) => {
@@ -530,7 +525,10 @@ fn apply_captured_actions(
 }
 
 fn find_item<'a>(groups: &'a [OptimizationGroup], id: &str) -> Option<&'a OptimizationItem> {
-    groups.iter().flat_map(|g| g.items.iter()).find(|i| i.id == id)
+    groups
+        .iter()
+        .flat_map(|g| g.items.iter())
+        .find(|i| i.id == id)
 }
 
 pub fn execute_action(action: &Action) -> Result<()> {
@@ -575,7 +573,10 @@ pub fn execute_action(action: &Action) -> Result<()> {
             wow64.as_deref(),
         ),
         Action::SetServiceStart { name, start_type } => {
-            let svc_key = format!(r"HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Services\{}", name);
+            let svc_key = format!(
+                r"HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Services\{}",
+                name
+            );
             let hex = format!("{:X}", start_type);
             exec_reg_write(
                 &svc_key,
@@ -602,7 +603,9 @@ pub fn execute_action(action: &Action) -> Result<()> {
             cmd.as_deref(),
         ),
         Action::FileCreateByZIP { path, .. } => exec_create_blank_ico(path),
-        Action::General { .. } | Action::VersionedDirectory { .. } | Action::Custom { .. } => Ok(()),
+        Action::General { .. } | Action::VersionedDirectory { .. } | Action::Custom { .. } => {
+            Ok(())
+        }
     }
 }
 
@@ -621,7 +624,8 @@ fn exec_reg_write(
             data.unwrap_or("")
         ));
     }
-    let (hive, sub) = parse_reg_path(key).ok_or_else(|| anyhow!("Invalid registry key: {}", key))?;
+    let (hive, sub) =
+        parse_reg_path(key).ok_or_else(|| anyhow!("Invalid registry key: {}", key))?;
     let root = RegKey::predef(hive);
 
     for sam in wow64_sam_list(wow64) {
@@ -722,7 +726,8 @@ fn exec_reg_delete(
     skip_error: Option<i32>,
     wow64: Option<&str>,
 ) -> Result<()> {
-    let (hive, sub) = parse_reg_path(key).ok_or_else(|| anyhow!("Invalid registry key: {}", key))?;
+    let (hive, sub) =
+        parse_reg_path(key).ok_or_else(|| anyhow!("Invalid registry key: {}", key))?;
     let root = RegKey::predef(hive);
 
     for sam in wow64_sam_list(wow64) {
@@ -779,34 +784,39 @@ fn exec_reg_move(
                 match src_root.open_subkey_with_flags(&src_sub, KEY_ALL_ACCESS | sam) {
                     Ok(sk) => match sk.get_raw_value(vname) {
                         Ok(rv) => {
-                            let (dk, _) = dst_root.create_subkey_with_flags(&dst_sub, KEY_ALL_ACCESS | sam)?;
+                            let (dk, _) = dst_root
+                                .create_subkey_with_flags(&dst_sub, KEY_ALL_ACCESS | sam)?;
                             dk.set_raw_value(dst_vname, &rv)?;
                             let _ = sk.delete_value(vname);
                         }
-                        Err(e) if e.kind() == std::io::ErrorKind::NotFound || skip_error == Some(2) => {}
+                        Err(e)
+                            if e.kind() == std::io::ErrorKind::NotFound
+                                || skip_error == Some(2) => {}
                         Err(e) => return Err(e.into()),
                     },
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound || skip_error == Some(2) => {}
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound || skip_error == Some(2) => {
+                    }
                     Err(e) => return Err(e.into()),
                 }
             }
-            None => {
-                match src_root.open_subkey_with_flags(&src_sub, KEY_READ | sam) {
-                    Ok(sk) => {
-                        let tree = read_tree_recursive(&sk, sam)?;
-                        drop(sk);
-                        let (dk, _) = dst_root.create_subkey_with_flags(&dst_sub, KEY_ALL_ACCESS | sam)?;
-                        write_tree_recursive(&dk, &tree, sam)?;
-                        if let Some((parent_sub, leaf)) = split_parent_leaf(&src_sub) {
-                            if let Ok(pk) = src_root.open_subkey_with_flags(&parent_sub, KEY_ALL_ACCESS | sam) {
-                                let _ = pk.delete_subkey_all(&leaf);
-                            }
+            None => match src_root.open_subkey_with_flags(&src_sub, KEY_READ | sam) {
+                Ok(sk) => {
+                    let tree = read_tree_recursive(&sk, sam)?;
+                    drop(sk);
+                    let (dk, _) =
+                        dst_root.create_subkey_with_flags(&dst_sub, KEY_ALL_ACCESS | sam)?;
+                    write_tree_recursive(&dk, &tree, sam)?;
+                    if let Some((parent_sub, leaf)) = split_parent_leaf(&src_sub) {
+                        if let Ok(pk) =
+                            src_root.open_subkey_with_flags(&parent_sub, KEY_ALL_ACCESS | sam)
+                        {
+                            let _ = pk.delete_subkey_all(&leaf);
                         }
                     }
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound || skip_error == Some(2) => {}
-                    Err(e) => return Err(e.into()),
                 }
-            }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound || skip_error == Some(2) => {}
+                Err(e) => return Err(e.into()),
+            },
         }
     }
     Ok(())
@@ -843,7 +853,12 @@ fn exec_explorer_notify(
     match notify_type.trim() {
         "AssocChanged" => {
             unsafe {
-                SHChangeNotify(SHCNE_ASSOCCHANGED as i32, SHCNF_IDLIST, std::ptr::null(), std::ptr::null());
+                SHChangeNotify(
+                    SHCNE_ASSOCCHANGED as i32,
+                    SHCNF_IDLIST,
+                    std::ptr::null(),
+                    std::ptr::null(),
+                );
             }
             Ok(())
         }
@@ -937,7 +952,7 @@ fn exec_create_blank_ico(path_tmpl: &str) -> Result<()> {
     let img_size: u32 = 40 + 16 * 16 * 4 + 16 * 4;
     ico.extend_from_slice(&img_size.to_le_bytes());
     ico.extend_from_slice(&22u32.to_le_bytes()); // offset
-    // BITMAPINFOHEADER
+                                                 // BITMAPINFOHEADER
     ico.extend_from_slice(&40u32.to_le_bytes());
     ico.extend_from_slice(&16i32.to_le_bytes());
     ico.extend_from_slice(&32i32.to_le_bytes()); // 2x height
@@ -945,7 +960,7 @@ fn exec_create_blank_ico(path_tmpl: &str) -> Result<()> {
     ico.extend_from_slice(&32u16.to_le_bytes());
     ico.extend_from_slice(&[0u8; 24]);
     ico.extend_from_slice(&vec![0u8; 16 * 16 * 4]); // transparent RGBA
-    ico.extend_from_slice(&vec![0xFFu8; 16 * 4]); // AND mask = all transparent
+    ico.extend_from_slice(&[0xFFu8; 16 * 4]); // AND mask = all transparent
     std::fs::write(target, ico)?;
     Ok(())
 }
@@ -970,7 +985,8 @@ mod tests {
             k.set_value("MaskVal", &0x10u32).unwrap();
         }
 
-        let snap_dir = std::env::temp_dir().join(format!("dismnext_snap_test_{}", std::process::id()));
+        let snap_dir =
+            std::env::temp_dir().join(format!("dismnext_snap_test_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&snap_dir);
         let snap_mgr = SnapshotManager::new(snap_dir.clone());
 
@@ -983,62 +999,64 @@ mod tests {
             item_type: "CheckBox".to_string(),
             source: "test".to_string(),
             applicable: Condition::True,
-            current: Some(OptimizationScope::CheckBox {
-                state: Condition::And {
-                    children: vec![
-                        Condition::RegExist {
+            current: Some(OptimizationScope::CheckBox(Box::new(
+                crate::catalog::OptimizationCheckBox {
+                    state: Condition::And {
+                        children: vec![
+                            Condition::RegExist {
+                                key: test_key.to_string(),
+                                value: Some("FlagVal".to_string()),
+                                reg_type: Some("REG_DWORD".to_string()),
+                                data: Some("2".to_string()),
+                                compare: None,
+                                wow64: None,
+                            },
+                            Condition::RegExist {
+                                key: test_key.to_string(),
+                                value: Some("MaskVal".to_string()),
+                                reg_type: Some("REG_DWORD".to_string()),
+                                data: Some("100000".to_string()),
+                                compare: Some("&".to_string()),
+                                wow64: None,
+                            },
+                        ],
+                    },
+                    true_actions: vec![
+                        Action::RegWrite {
                             key: test_key.to_string(),
                             value: Some("FlagVal".to_string()),
                             reg_type: Some("REG_DWORD".to_string()),
                             data: Some("2".to_string()),
-                            compare: None,
+                            operator: "=".to_string(),
                             wow64: None,
+                            fun: false,
                         },
-                        Condition::RegExist {
+                        Action::RegWrite {
                             key: test_key.to_string(),
                             value: Some("MaskVal".to_string()),
                             reg_type: Some("REG_DWORD".to_string()),
                             data: Some("100000".to_string()),
-                            compare: Some("&".to_string()),
+                            operator: "|".to_string(),
                             wow64: None,
+                            fun: false,
+                        },
+                        Action::RegWrite {
+                            key: test_key.to_string(),
+                            value: Some("NewVal".to_string()),
+                            reg_type: Some("REG_SZ".to_string()),
+                            data: Some("hello".to_string()),
+                            operator: "=".to_string(),
+                            wow64: None,
+                            fun: false,
                         },
                     ],
+                    true_warning: None,
+                    true_restart: None,
+                    false_actions: Vec::new(),
+                    false_warning: None,
+                    false_restart: None,
                 },
-                true_actions: vec![
-                    Action::RegWrite {
-                        key: test_key.to_string(),
-                        value: Some("FlagVal".to_string()),
-                        reg_type: Some("REG_DWORD".to_string()),
-                        data: Some("2".to_string()),
-                        operator: "=".to_string(),
-                        wow64: None,
-                        fun: false,
-                    },
-                    Action::RegWrite {
-                        key: test_key.to_string(),
-                        value: Some("MaskVal".to_string()),
-                        reg_type: Some("REG_DWORD".to_string()),
-                        data: Some("100000".to_string()),
-                        operator: "|".to_string(),
-                        wow64: None,
-                        fun: false,
-                    },
-                    Action::RegWrite {
-                        key: test_key.to_string(),
-                        value: Some("NewVal".to_string()),
-                        reg_type: Some("REG_SZ".to_string()),
-                        data: Some("hello".to_string()),
-                        operator: "=".to_string(),
-                        wow64: None,
-                        fun: false,
-                    },
-                ],
-                true_warning: None,
-                true_restart: None,
-                false_actions: Vec::new(),
-                false_warning: None,
-                false_restart: None,
-            }),
+            ))),
             default: None,
             system: None,
         };
@@ -1123,15 +1141,17 @@ mod tests {
             item_type: "CheckBox".into(),
             source: "test".into(),
             applicable: Condition::True,
-            current: Some(OptimizationScope::CheckBox {
-                state: Condition::True,
-                true_actions: vec![on],
-                false_actions: vec![off],
-                true_warning: None,
-                false_warning: None,
-                true_restart: None,
-                false_restart: None,
-            }),
+            current: Some(OptimizationScope::CheckBox(Box::new(
+                crate::catalog::OptimizationCheckBox {
+                    state: Condition::True,
+                    true_actions: vec![on],
+                    false_actions: vec![off],
+                    true_warning: None,
+                    false_warning: None,
+                    true_restart: None,
+                    false_restart: None,
+                },
+            ))),
             default: None,
             system: None,
         };
@@ -1189,7 +1209,7 @@ mod tests {
 
     #[test]
     fn built_in_presets_only_use_batch_actions() {
-        let catalog = crate::Catalog::load(None).unwrap();
+        let catalog = crate::catalog::parse_embedded_catalog().unwrap();
         for preset in get_optimization_presets() {
             for entry in preset.entries {
                 let (_, actions, _, _) = resolve_apply(
@@ -1202,5 +1222,28 @@ mod tests {
                 assert!(actions.iter().all(is_batch_action), "{}", entry.item_id);
             }
         }
+    }
+
+    #[test]
+    fn catalog_dialog_item_is_hidden_and_cannot_open_through_apply() {
+        let catalog = crate::catalog::parse_embedded_catalog().unwrap();
+        let item = find_item(&catalog.optimization_groups, "opt-015").unwrap();
+        assert!(item_requires_interaction(item));
+        let mut always_applicable = item.clone();
+        always_applicable.applicable = crate::catalog::Condition::True;
+        let groups = [OptimizationGroup {
+            id: "interaction-test".into(),
+            name: item.name.clone(),
+            applicable: crate::catalog::Condition::True,
+            items: vec![always_applicable],
+        }];
+        assert!(evaluate_all_groups(&groups, &SystemInfo::collect()).is_empty());
+        assert!(resolve_apply(
+            &groups,
+            &item.id,
+            ScopeName::Current,
+            &ApplyValue::Bool(true)
+        )
+        .is_err());
     }
 }

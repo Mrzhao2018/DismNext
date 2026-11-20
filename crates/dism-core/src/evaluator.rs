@@ -68,8 +68,11 @@ pub fn parse_hex_u64(s: &str) -> Option<u64> {
 }
 
 pub fn parse_hex_bytes(s: &str) -> Option<Vec<u8>> {
-    let cleaned: String = s.chars().filter(|c| !c.is_whitespace() && *c != ',').collect();
-    if cleaned.len() % 2 != 0 {
+    let cleaned: String = s
+        .chars()
+        .filter(|c| !c.is_whitespace() && *c != ',')
+        .collect();
+    if !cleaned.len().is_multiple_of(2) {
         return None;
     }
     let mut out = Vec::with_capacity(cleaned.len() / 2);
@@ -86,7 +89,9 @@ pub fn reg_value_to_string(val: &RegValue) -> String {
     }
     let u16s: Vec<u16> = val
         .bytes
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|c| u16::from_le_bytes([c[0], c[1]]))
         .take_while(|&w| w != 0)
         .collect();
@@ -131,22 +136,8 @@ pub fn expand_expression(input: &str, root_ctx: Option<&str>) -> Option<String> 
         {
             expanded.push('\\');
         }
-        let call = &rest[start + 1..];
-        let (name, body) = call.split_once('(')?;
-        let mut depth = 0;
-        let close = body.char_indices().find_map(|(index, ch)| match ch {
-            '(' => {
-                depth += 1;
-                None
-            }
-            ')' if depth == 0 => Some(index),
-            ')' => {
-                depth -= 1;
-                None
-            }
-            _ => None,
-        })?;
-        let args: Vec<_> = body[..close]
+        let (name, body, tail) = split_inline_call(&rest[start..])?;
+        let args: Vec<_> = body
             .split(',')
             .map(|arg| expand_env_vars(arg.trim(), root_ctx))
             .collect();
@@ -156,7 +147,7 @@ pub fn expand_expression(input: &str, root_ctx: Option<&str>) -> Option<String> 
             return None;
         }
         expanded.push_str(&value);
-        rest = &body[close + 1..];
+        rest = tail;
     }
     expanded.push_str(&expand_env_vars(rest, root_ctx));
     Some(expanded)
@@ -174,6 +165,36 @@ fn find_inline_func_start(s: &str) -> Option<usize> {
     .iter()
     .filter_map(|prefix| s.find(prefix))
     .min()
+}
+
+fn split_inline_call(call: &str) -> Option<(&str, &str, &str)> {
+    let call = call.strip_prefix('?')?;
+    let (name, body) = call.split_once('(')?;
+    let mut depth = 0;
+    let close = body.char_indices().find_map(|(index, ch)| match ch {
+        '(' => {
+            depth += 1;
+            None
+        }
+        ')' if depth == 0 => Some(index),
+        ')' => {
+            depth -= 1;
+            None
+        }
+        _ => None,
+    })?;
+    Some((name, &body[..close], &body[close + 1..]))
+}
+
+#[cfg(test)]
+pub(crate) fn has_balanced_inline_calls(mut value: &str) -> bool {
+    while let Some(start) = find_inline_func_start(value) {
+        let Some((_, _, tail)) = split_inline_call(&value[start..]) else {
+            return false;
+        };
+        value = tail;
+    }
+    true
 }
 
 fn eval_inline_func(name: &str, args: &[&str]) -> Option<String> {
@@ -224,7 +245,9 @@ fn newest_version_child(dir: &Path) -> Option<String> {
         }
         let is_newer = match &best {
             None => true,
-            Some((best_parts, best_name)) => (parts.as_slice(), &name) > (best_parts.as_slice(), best_name),
+            Some((best_parts, best_name)) => {
+                (parts.as_slice(), &name) > (best_parts.as_slice(), best_name)
+            }
         };
         if is_newer {
             best = Some((parts, name));
@@ -247,7 +270,11 @@ pub fn expand_env_vars(input: &str, root_ctx: Option<&str>) -> String {
                     if var.eq_ignore_ascii_case("Root") {
                         let next_ch = chars.get(i + 1 + rel_end + 1).copied();
                         if let Some(nc) = next_ch {
-                            if nc != '\\' && nc != '/' && !val.ends_with('\\') && !val.ends_with('/') {
+                            if nc != '\\'
+                                && nc != '/'
+                                && !val.ends_with('\\')
+                                && !val.ends_with('/')
+                            {
                                 out.push('\\');
                             }
                         }
@@ -341,7 +368,14 @@ pub(crate) fn read_file_version_uncached(path: &Path) -> Option<String> {
     let sub_block: Vec<u16> = OsStr::new("\\").encode_wide().chain(Some(0)).collect();
     let mut ptr: *mut core::ffi::c_void = std::ptr::null_mut();
     let mut len: u32 = 0;
-    let queried = unsafe { VerQueryValueW(buf.as_ptr() as *const _, sub_block.as_ptr(), &mut ptr, &mut len) };
+    let queried = unsafe {
+        VerQueryValueW(
+            buf.as_ptr() as *const _,
+            sub_block.as_ptr(),
+            &mut ptr,
+            &mut len,
+        )
+    };
     if queried == 0 || ptr.is_null() || (len as usize) < std::mem::size_of::<VS_FIXEDFILEINFO>() {
         return None;
     }
@@ -372,7 +406,9 @@ pub fn read_ini_value(path: &Path, section: &str, key: &str) -> Option<String> {
     let bytes = std::fs::read(path).ok()?;
     let text = if bytes.starts_with(&[0xFF, 0xFE]) {
         let u16s: Vec<u16> = bytes[2..]
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|c| u16::from_le_bytes([c[0], c[1]]))
             .collect();
         String::from_utf16_lossy(&u16s)
@@ -508,7 +544,10 @@ fn compare_version_parts(actual: &[u32], target_str: &str, op: &str) -> bool {
 
 fn wow64_path_variant(path: &str) -> Option<String> {
     let lower = path.to_ascii_lowercase();
-    if let (Ok(pf64), Ok(pf86)) = (std::env::var("ProgramW6432"), std::env::var("ProgramFiles(x86)")) {
+    if let (Ok(pf64), Ok(pf86)) = (
+        std::env::var("ProgramW6432"),
+        std::env::var("ProgramFiles(x86)"),
+    ) {
         let pf64_l = pf64.to_ascii_lowercase();
         if lower.starts_with(&pf64_l) {
             return Some(format!("{}{}", pf86, &path[pf64.len()..]));
@@ -539,7 +578,9 @@ pub(crate) fn resolve_wildcard_roots_until(
     fixed_drives: &[String],
     cancelled: &impl Fn() -> bool,
 ) -> Vec<PathBuf> {
-    if cancelled() { return Vec::new(); }
+    if cancelled() {
+        return Vec::new();
+    }
     let norm = pattern.replace('/', "\\");
     let trimmed = norm.trim();
     if trimmed.is_empty() {
@@ -551,7 +592,11 @@ pub(crate) fn resolve_wildcard_roots_until(
         let mut results = Vec::new();
         for drv in fixed_drives {
             let candidate = format!("{}{}", drv, rest);
-            results.extend(resolve_wildcard_roots_until(&candidate, fixed_drives, cancelled));
+            results.extend(resolve_wildcard_roots_until(
+                &candidate,
+                fixed_drives,
+                cancelled,
+            ));
         }
         return results;
     }
@@ -608,7 +653,9 @@ pub(crate) fn resolve_wildcard_roots_until(
         }
         let has_wild = seg.contains('*') || seg.contains('?');
         for dir in current {
-            if cancelled() { return Vec::new(); }
+            if cancelled() {
+                return Vec::new();
+            }
             if !has_wild {
                 let candidate = dir.join(seg);
                 if candidate.exists() {
@@ -616,7 +663,9 @@ pub(crate) fn resolve_wildcard_roots_until(
                 }
             } else if let Ok(rd) = std::fs::read_dir(&dir) {
                 for entry in rd.flatten() {
-                    if cancelled() { return Vec::new(); }
+                    if cancelled() {
+                        return Vec::new();
+                    }
                     let name = entry.file_name();
                     let name_str = name.to_string_lossy();
                     if wildcard_match_ci(seg, &name_str) {
@@ -880,7 +929,8 @@ mod tests {
 
     #[test]
     fn test_get_newest_child_picks_highest_semantic_version() {
-        let base = std::env::temp_dir().join(format!("dismnext_newest_child_{}", std::process::id()));
+        let base =
+            std::env::temp_dir().join(format!("dismnext_newest_child_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
         for ver in ["2.1.90", "2.1.286", "2.1.299", "not-a-version"] {
             std::fs::create_dir_all(base.join(ver)).unwrap();

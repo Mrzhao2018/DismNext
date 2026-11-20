@@ -1,17 +1,18 @@
 use crate::maintenance::{run_system_command, MaintenanceProgress};
+use crate::ttl_cache::TtlCache;
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::fs;
 use std::os::windows::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
-use std::sync::{OnceLock, RwLock};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use winreg::enums::{HKEY_LOCAL_MACHINE, HKEY_USERS, KEY_READ, KEY_WOW64_32KEY, KEY_WOW64_64KEY};
 use winreg::RegKey;
 
 const COMPACT_OS_KEY: &str = r"SYSTEM\Setup";
-const INSTALLER_USERDATA_KEY: &str = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Installer\UserData";
+const INSTALLER_USERDATA_KEY: &str =
+    r"SOFTWARE\Microsoft\Windows\CurrentVersion\Installer\UserData";
 
 #[link(name = "kernel32")]
 extern "system" {
@@ -52,10 +53,10 @@ pub fn decode_cmd_output(bytes: &[u8]) -> String {
     if let Some(rest) = bytes.strip_prefix(b"\xff\xfe") {
         return decode_utf16le(rest);
     }
-    if bytes.len() >= 4 && bytes.len() % 2 == 0 {
-        let pairs = bytes.chunks_exact(2);
-        let high_zeroes = pairs.clone().filter(|pair| pair[1] == 0).count();
-        let low_zeroes = pairs.filter(|pair| pair[0] == 0).count();
+    if bytes.len() >= 4 && bytes.len().is_multiple_of(2) {
+        let pairs = bytes.as_chunks::<2>().0;
+        let high_zeroes = pairs.iter().filter(|pair| pair[1] == 0).count();
+        let low_zeroes = pairs.iter().filter(|pair| pair[0] == 0).count();
         if high_zeroes > low_zeroes && high_zeroes * 4 >= bytes.len() / 2 {
             return decode_utf16le(bytes);
         }
@@ -67,7 +68,14 @@ pub fn decode_cmd_output(bytes: &[u8]) -> String {
     // CP_OEMCP = 1; fallback to CP_ACP = 0
     for cp in [1u32, 0u32] {
         let len = unsafe {
-            MultiByteToWideChar(cp, 0, bytes.as_ptr(), bytes.len() as i32, std::ptr::null_mut(), 0)
+            MultiByteToWideChar(
+                cp,
+                0,
+                bytes.as_ptr(),
+                bytes.len() as i32,
+                std::ptr::null_mut(),
+                0,
+            )
         };
         if len > 0 {
             let mut wide = vec![0u16; len as usize];
@@ -91,45 +99,25 @@ pub fn decode_cmd_output(bytes: &[u8]) -> String {
 
 pub(crate) fn decode_utf16le(bytes: &[u8]) -> String {
     let units: Vec<_> = bytes
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
         .collect();
     String::from_utf16_lossy(&units)
 }
 
-static COMPACT_OS_CACHE: OnceLock<RwLock<Option<(Instant, (bool, String))>>> = OnceLock::new();
-static ORPHAN_INST_CACHE: OnceLock<RwLock<Option<(Instant, Vec<(PathBuf, u64)>)>>> =
-    OnceLock::new();
+static COMPACT_OS_CACHE: TtlCache<(bool, String)> = TtlCache::new(Duration::from_secs(30));
+static ORPHAN_INST_CACHE: TtlCache<Vec<(PathBuf, u64)>> = TtlCache::new(Duration::from_secs(30));
 
 pub fn invalidate_systasks_cache() {
-    if let Some(lock) = COMPACT_OS_CACHE.get() {
-        if let Ok(mut w) = lock.write() {
-            *w = None;
-        }
-    }
-    if let Some(lock) = ORPHAN_INST_CACHE.get() {
-        if let Ok(mut w) = lock.write() {
-            *w = None;
-        }
-    }
+    COMPACT_OS_CACHE.invalidate();
+    ORPHAN_INST_CACHE.invalidate();
 }
 
 /// Reads the Windows CompactOS state (cached for 30 seconds).
 pub fn query_compact_os() -> (bool, String) {
-    let cache = COMPACT_OS_CACHE.get_or_init(|| RwLock::new(None));
-    if let Ok(guard) = cache.read() {
-        if let Some((ts, ref val)) = *guard {
-            if ts.elapsed() < Duration::from_secs(30) {
-                return val.clone();
-            }
-        }
-    }
-
-    let val = query_compact_os_uncached();
-    if let Ok(mut w) = cache.write() {
-        *w = Some((Instant::now(), val.clone()));
-    }
-    val
+    COMPACT_OS_CACHE.get_or_load(query_compact_os_uncached)
 }
 
 fn query_compact_os_uncached() -> (bool, String) {
@@ -184,20 +172,7 @@ fn query_compact_os_uncached() -> (bool, String) {
 /// Finds orphaned `.msi` and `.msp` packages inside `%SystemRoot%\Installer` (cached 30s)
 /// that have zero references across Installer registry databases.
 pub fn find_orphaned_installer_files() -> Vec<(PathBuf, u64)> {
-    let cache = ORPHAN_INST_CACHE.get_or_init(|| RwLock::new(None));
-    if let Ok(guard) = cache.read() {
-        if let Some((ts, ref val)) = *guard {
-            if ts.elapsed() < Duration::from_secs(30) {
-                return val.clone();
-            }
-        }
-    }
-
-    let val = compute_orphaned_installer_files_uncached();
-    if let Ok(mut w) = cache.write() {
-        *w = Some((Instant::now(), val.clone()));
-    }
-    val
+    ORPHAN_INST_CACHE.get_or_load(compute_orphaned_installer_files_uncached)
 }
 
 pub(crate) fn compute_orphaned_installer_files_uncached() -> Vec<(PathBuf, u64)> {
@@ -239,7 +214,7 @@ pub(crate) fn compute_orphaned_installer_files_uncached() -> Vec<(PathBuf, u64)>
             orphans.push((p, meta.len()));
         }
     }
-    orphans.sort_by(|a, b| b.1.cmp(&a.1));
+    orphans.sort_by_key(|entry| std::cmp::Reverse(entry.1));
     orphans
 }
 
@@ -468,9 +443,15 @@ fn run_system_task_impl(
                     match crate::drivers::delete_driver(&drv.published_name) {
                         Ok(msg) => logs.push(format!(
                             "Deleted {} ({} v{}): {}",
-                            drv.published_name, drv.original_name, drv.version, msg.replace('\n', " ")
+                            drv.published_name,
+                            drv.original_name,
+                            drv.version,
+                            msg.replace('\n', " ")
                         )),
-                        Err(e) => logs.push(format!("Skipped {} ({}): {}", drv.published_name, drv.original_name, e)),
+                        Err(e) => logs.push(format!(
+                            "Skipped {} ({}): {}",
+                            drv.published_name, drv.original_name, e
+                        )),
                     }
                 }
                 logs.join("\n")
@@ -527,7 +508,10 @@ mod tests {
         assert!(!raw.is_empty());
 
         let referenced = collect_referenced_installer_packages();
-        assert!(referenced.len() >= 10, "Expected referenced MSI/MSP packages in Installer\\UserData");
+        assert!(
+            referenced.len() >= 10,
+            "Expected referenced MSI/MSP packages in Installer\\UserData"
+        );
         let _orphans = find_orphaned_installer_files();
     }
 }

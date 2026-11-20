@@ -77,6 +77,13 @@ $snapshots = Join-Path $data 'snapshots'
 $customRules = Join-Path $data 'custom_rules.json'
 $snapshot = Join-Path $snapshots 'release-smoke-snapshot.json'
 $fixtures = Join-Path $PSScriptRoot 'fixtures/v2.0.0'
+$fallbackInstall = Join-Path $scratch 'blocked-portable'
+$fallbackCli = Join-Path $fallbackInstall $cliName
+$blockedData = Join-Path $fallbackInstall 'data'
+$profile = Join-Path $scratch 'profile'
+$profileData = Join-Path $profile 'DismNext'
+$profileSnapshots = Join-Path $profileData 'snapshots'
+$profileSnapshot = Join-Path $profileSnapshots 'release-smoke-snapshot.json'
 try {
     [IO.Directory]::CreateDirectory($snapshots) | Out-Null
     [IO.Directory]::CreateDirectory($inputDir) | Out-Null
@@ -85,8 +92,10 @@ try {
     Copy-Item -LiteralPath (Join-Path $fixtures 'release-smoke-snapshot.json') -Destination $snapshot
     [IO.File]::WriteAllText($inputFile, 'Release smoke test file')
 
+    $originalLocalAppData = $env:LOCALAPPDATA
     Push-Location -LiteralPath $scratch
     try {
+        $env:LOCALAPPDATA = $profile
         $cliVersion = & $cli --version
         if ($LASTEXITCODE -ne 0 -or $cliVersion -cne "dism-cli $version") {
             throw 'The CLI version differs from its release filename.'
@@ -118,14 +127,32 @@ try {
             throw 'The packaged CLI failed the MCP initialize or tools/list check.'
         }
     } finally {
+        $env:LOCALAPPDATA = $originalLocalAppData
+        Pop-Location
+    }
+
+    [IO.Directory]::CreateDirectory($fallbackInstall) | Out-Null
+    [IO.Directory]::CreateDirectory($profileSnapshots) | Out-Null
+    Copy-Item -LiteralPath $cli -Destination $fallbackCli
+    Copy-Item -LiteralPath $snapshot -Destination $profileSnapshot
+    [IO.File]::WriteAllText($blockedData, 'Portable data directory unavailable.')
+    Push-Location -LiteralPath $fallbackInstall
+    try {
+        $env:LOCALAPPDATA = $profile
+        $history = @(& $fallbackCli snapshot list --json | ConvertFrom-Json)
+        if ($LASTEXITCODE -ne 0 -or $history.Count -ne 1 -or $history[0].id -cne 'release-smoke-snapshot') {
+            throw 'The standalone CLI did not fall back to the user data directory.'
+        }
+    } finally {
+        $env:LOCALAPPDATA = $originalLocalAppData
         Pop-Location
     }
     Write-Output "Verified DismNext v$version release files, CLI, MCP, and v2.0.0 data."
 } finally {
-    foreach ($file in @($cli, $inputFile, $customRules, $snapshot)) {
+    foreach ($file in @($cli, $inputFile, $customRules, $snapshot, $fallbackCli, $blockedData, $profileSnapshot)) {
         if ([IO.File]::Exists($file)) { [IO.File]::Delete($file) }
     }
-    foreach ($dir in @($inputDir, $snapshots, $data, $scratch)) {
+    foreach ($dir in @($inputDir, $snapshots, $data, $fallbackInstall, $profileSnapshots, $profileData, $profile, $scratch)) {
         if ([IO.Directory]::Exists($dir)) { [IO.Directory]::Delete($dir, $false) }
     }
 }

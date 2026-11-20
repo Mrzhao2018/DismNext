@@ -85,7 +85,7 @@ pub fn list_restore_points() -> Vec<RestorePointInfo> {
             event_type: "MODIFY_SETTINGS".to_string(),
         });
     }
-    points.sort_by(|a, b| b.sequence_number.cmp(&a.sequence_number));
+    points.sort_by_key(|entry| std::cmp::Reverse(entry.sequence_number));
     points
 }
 
@@ -104,7 +104,10 @@ pub fn create_restore_point(description: &str) -> Result<String> {
         .take(96)
         .collect();
     let final_desc = if clean_desc.is_empty() {
-        format!("DismNext Checkpoint {}", chrono::Local::now().format("%Y-%m-%d %H:%M"))
+        format!(
+            "DismNext Checkpoint {}",
+            chrono::Local::now().format("%Y-%m-%d %H:%M")
+        )
     } else {
         clean_desc
     };
@@ -121,7 +124,9 @@ pub fn create_restore_point(description: &str) -> Result<String> {
 
     let stdout = crate::systasks::decode_cmd_output(&output.stdout);
     let stderr = crate::systasks::decode_cmd_output(&output.stderr);
-    let combined = format!("{}\n{}", stdout.trim(), stderr.trim()).trim().to_string();
+    let combined = format!("{}\n{}", stdout.trim(), stderr.trim())
+        .trim()
+        .to_string();
     if !output.status.success() {
         return Err(anyhow!(
             "Checkpoint-Computer failed (ensure System Protection is enabled on C: or wait for Windows restore frequency cooldown): {}",
@@ -199,7 +204,10 @@ fn run_rescue_action_impl(
             if sys.is_admin {
                 logs.push(exec_simple("netsh.exe", &["winsock", "reset"], progress)?);
             } else {
-                logs.push("Skipped `netsh winsock reset` (standard user mode; DNS cache flushed).".to_string());
+                logs.push(
+                    "Skipped `netsh winsock reset` (standard user mode; DNS cache flushed)."
+                        .to_string(),
+                );
             }
             Ok(RescueActionOutcome {
                 action_id: action_id.to_string(),
@@ -387,7 +395,10 @@ mod tests {
 
     #[test]
     fn test_rescue_validation_and_wmi_time_format() {
-        assert_eq!(format_wmi_time("20261119051022.000000+480"), "2026-11-19 05:10");
+        assert_eq!(
+            format_wmi_time("20261119051022.000000+480"),
+            "2026-11-19 05:10"
+        );
         assert!(run_rescue_action("unknown_action").is_err());
     }
 

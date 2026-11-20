@@ -241,7 +241,7 @@ fn catalog_signature(file: &File, path: &[u16], algorithm: &str) -> Option<(i32,
 pub(super) fn file_company(path: &Path) -> Option<String> {
     let bytes = crate::evaluator::read_version_resource(path)?;
     let translations = query_version::<u8>(&bytes, r"\VarFileInfo\Translation").unwrap_or_default();
-    let languages = translations.chunks_exact(4).map(|language| {
+    let languages = translations.as_chunks::<4>().0.iter().map(|language| {
         (
             u16::from_le_bytes([language[0], language[1]]),
             u16::from_le_bytes([language[2], language[3]]),

@@ -1,71 +1,51 @@
+use flate2::{write::GzEncoder, Compression};
 use std::env;
 use std::fs;
-use std::io::Write;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
-fn collect_files(base: &Path, dir: &Path, out: &mut Vec<PathBuf>) {
-    let Ok(entries) = fs::read_dir(dir) else {
-        return;
-    };
-    let mut sorted: Vec<PathBuf> = entries.flatten().map(|e| e.path()).collect();
-    sorted.sort();
-    for path in sorted {
-        if path.is_dir() {
-            collect_files(base, &path, out);
-        } else if path.is_file() {
-            out.push(path);
+fn collect_files(dir: &Path, files: &mut Vec<PathBuf>) -> io::Result<()> {
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let kind = entry.file_type()?;
+        if kind.is_dir() {
+            collect_files(&entry.path(), files)?;
+        } else if kind.is_file() {
+            files.push(entry.path());
         }
     }
+    Ok(())
 }
 
-fn mime_for(path: &Path) -> &'static str {
-    match path.extension().and_then(|e| e.to_str()).unwrap_or("") {
-        "html" => "text/html; charset=utf-8",
-        "js" | "mjs" => "application/javascript; charset=utf-8",
-        "css" => "text/css; charset=utf-8",
-        "json" => "application/json; charset=utf-8",
-        "svg" => "image/svg+xml",
-        "png" => "image/png",
-        "ico" => "image/x-icon",
-        "woff2" => "font/woff2",
-        _ => "application/octet-stream",
+fn main() -> io::Result<()> {
+    let manifest_dir = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").unwrap());
+    let dist = manifest_dir.join("../../ui/dist");
+    let out = PathBuf::from(env::var_os("OUT_DIR").unwrap());
+    let packed = out.join("assets");
+    let mut source = fs::File::create(out.join("embedded_ui.rs"))?;
+    println!("cargo:rerun-if-changed={}", dist.display());
+    writeln!(source, "static EMBEDDED_UI_ASSETS: &[EmbeddedAsset] = &[")?;
+
+    let mut files = Vec::new();
+    if dist.is_dir() {
+        collect_files(&dist, &mut files)?;
     }
-}
-
-fn main() {
-    let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
-    let dist_dir = manifest_dir.join("..").join("..").join("ui").join("dist");
-    let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
-    let out_file = out_dir.join("embedded_ui.rs");
-
-    println!("cargo:rerun-if-changed={}", dist_dir.display());
-
-    let mut f = fs::File::create(&out_file).expect("failed to create embedded_ui.rs");
-    writeln!(f, "pub static EMBEDDED_UI_ASSETS: &[(&str, &str, &[u8])] = &[").unwrap();
-
-    if dist_dir.is_dir() {
-        let mut files = Vec::new();
-        collect_files(&dist_dir, &dist_dir, &mut files);
-        for file in files {
-            println!("cargo:rerun-if-changed={}", file.display());
-            if let Ok(rel) = file.strip_prefix(&dist_dir) {
-                let rel_slash = rel.to_string_lossy().replace('\\', "/");
-                let route_path = format!("/{}", rel_slash.trim_start_matches('/'));
-                let abs_path = fs::canonicalize(&file).unwrap_or(file.clone());
-                let abs_clean = abs_path
-                    .to_string_lossy()
-                    .trim_start_matches(r"\\?\")
-                    .to_string();
-                let mime = mime_for(&file);
-                writeln!(
-                    f,
-                    "    ({:?}, {:?}, include_bytes!({:?})),",
-                    route_path, mime, abs_clean
-                )
-                .unwrap();
-            }
-        }
+    files.sort_unstable();
+    for file in files {
+        let relative = file.strip_prefix(&dist).unwrap();
+        let route = format!("/{}", relative.to_string_lossy().replace('\\', "/"));
+        let bytes = fs::read(&file)?;
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::best());
+        encoder.write_all(&bytes)?;
+        let gzip = encoder.finish()?;
+        let compressed = gzip.len() < bytes.len();
+        let bundled = packed.join(relative);
+        fs::create_dir_all(bundled.parent().unwrap())?;
+        fs::write(&bundled, if compressed { &gzip } else { &bytes })?;
+        writeln!(source,
+            "    EmbeddedAsset {{ route: {route:?}, bytes: include_bytes!({:?}), decoded_length: {:?} }},",
+            bundled.to_string_lossy(), compressed.then_some(bytes.len()),
+        )?;
     }
-
-    writeln!(f, "];").unwrap();
+    writeln!(source, "];")
 }

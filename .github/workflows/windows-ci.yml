@@ -16,15 +16,25 @@ jobs:
           node-version: '22'
           cache: npm
           cache-dependency-path: ui/package-lock.json
+      - name: Install frontend dependencies
+        working-directory: ui
+        run: npm ci --no-audit
+      - name: Lint frontend
+        working-directory: ui
+        run: npm run lint
+      - name: Test frontend
+        working-directory: ui
+        run: npm test
       - name: Build frontend
         working-directory: ui
-        run: |
-          npm ci --no-audit
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          npm run build
+        run: npm run build
       - name: Install stable Rust
-        run: rustup toolchain install stable --profile minimal
-      - name: Test Rust workspace
+        run: rustup toolchain install stable --profile minimal --component rustfmt --component clippy
+      - name: Check Rust formatting
+        run: cargo +stable fmt --all -- --check
+      - name: Lint Rust workspace
+        run: cargo +stable clippy --workspace --all-targets --locked -- -D warnings
+      - name: Test Rust workspace and validate catalog
         run: cargo +stable test --workspace --locked
       - name: Build release binaries
         run: cargo +stable build --release --workspace --locked

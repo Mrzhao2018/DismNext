@@ -4,6 +4,7 @@
 # Node / Vite frontend dependencies and build outputs
 /ui/node_modules/
 /ui/dist/
+/ui/*.tsbuildinfo
 
 # Runtime user data and registry snapshots
 /data/

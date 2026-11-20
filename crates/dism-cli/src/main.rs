@@ -1,20 +1,29 @@
 use anyhow::{anyhow, Result};
 use clap::{Parser, Subcommand};
 use dism_core::appx::{list_appx_packages, remove_appx_package, AppxCategory};
-use dism_core::cleaner::{execute_cleanup, scan_all, scan_all_with_summary, scan_rule_preview, FileStatus};
+use dism_core::cleaner::{
+    execute_cleanup, scan_all, scan_all_with_summary, scan_rule_preview, FileStatus,
+};
 use dism_core::diskmap::{analyze_path_with_options, DiskAllocation};
 use dism_core::drivers::{delete_driver, export_drivers, list_drivers};
 use dism_core::evaluator::eval_condition;
-use dism_core::offline_wim::{inspect_wim, WimMounts};
 use dism_core::features::{list_optional_features, set_feature_enabled, FeatureCategory};
+use dism_core::fmt_bytes;
 use dism_core::mcp::run_mcp_stdio;
-use dism_core::optimizer::{apply_optimization, evaluate_all_groups, ApplyValue, ScopeName, ScopeStatus};
+use dism_core::offline_wim::{inspect_wim, WimMounts};
+use dism_core::optimizer::{
+    apply_optimization, evaluate_all_groups, ApplyValue, ScopeName, ScopeStatus,
+};
 use dism_core::startup::{list_startup_items, set_startup_enabled};
 use dism_core::{Catalog, SnapshotManager, SystemInfo};
 use std::path::PathBuf;
 
 #[derive(Parser)]
-#[command(name = "dism-cli", version, about = "DismNext headless system cleanup & optimization CLI")]
+#[command(
+    name = "dism-cli",
+    version,
+    about = "DismNext headless system cleanup & optimization CLI"
+)]
 struct Cli {
     #[arg(long)]
     catalog: Option<PathBuf>,
@@ -199,7 +208,7 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     let catalog = Catalog::load(cli.catalog.as_deref())?;
     let sys = SystemInfo::collect();
-    let snap_mgr = SnapshotManager::new(SnapshotManager::default_dir());
+    let snap_mgr = SnapshotManager::user_default();
 
     match cli.command {
         Commands::Info { json } => {
@@ -249,8 +258,8 @@ fn main() -> Result<()> {
             } else {
                 let scan = scan_all_with_summary(&catalog.cleanup_rules, &sys);
                 println!(
-                    "{:<10} {:<4} {:>12} {:>8} {:>8}  {}",
-                    "ID", "Lv", "Cleanable", "Locked", "Prot", "Name"
+                    "{:<10} {:<4} {:>12} {:>8} {:>8}  Name",
+                    "ID", "Lv", "Cleanable", "Locked", "Prot"
                 );
                 println!("{}", "-".repeat(86));
                 for r in &scan.items {
@@ -406,16 +415,21 @@ fn main() -> Result<()> {
                     "current" => ScopeName::Current,
                     "default" => ScopeName::Default,
                     "system" => ScopeName::System,
-                    _ => return Err(anyhow!("Invalid scope '{}': expected current|default|system", scope)),
+                    _ => {
+                        return Err(anyhow!(
+                            "Invalid scope '{}': expected current|default|system",
+                            scope
+                        ))
+                    }
                 };
                 let val_enum = if value.eq_ignore_ascii_case("true") {
                     ApplyValue::Bool(true)
                 } else if value.eq_ignore_ascii_case("false") {
                     ApplyValue::Bool(false)
                 } else {
-                    let idx: usize = value
-                        .parse()
-                        .map_err(|_| anyhow!("Invalid value '{}': expected true|false|index", value))?;
+                    let idx: usize = value.parse().map_err(|_| {
+                        anyhow!("Invalid value '{}': expected true|false|index", value)
+                    })?;
                     ApplyValue::Index(idx)
                 };
                 let outcome = apply_optimization(
@@ -451,10 +465,18 @@ fn main() -> Result<()> {
             }
             SnapshotCommands::Restore { snapshot_id } => {
                 let restored = snap_mgr.restore(&snapshot_id)?;
-                println!("Restored snapshot {} ({})", restored.id, restored.item_name.zh);
+                println!(
+                    "Restored snapshot {} ({})",
+                    restored.id, restored.item_name.zh
+                );
             }
         },
-        Commands::Diskmap { path, depth, allocated, json } => {
+        Commands::Diskmap {
+            path,
+            depth,
+            allocated,
+            json,
+        } => {
             let target = match path {
                 Some(p) => p,
                 None => PathBuf::from(
@@ -523,10 +545,16 @@ fn main() -> Result<()> {
                 }
                 println!("\nLargest Files by Logical Size:");
                 for lf in report.largest_files.iter().take(10) {
-                    let allocation = lf.allocated_bytes
+                    let allocation = lf
+                        .allocated_bytes
                         .map(|bytes| format!(" (allocated {})", fmt_bytes(bytes)))
                         .unwrap_or_default();
-                    println!("  {:>10}  {}{}", fmt_bytes(lf.size_bytes), lf.path, allocation);
+                    println!(
+                        "  {:>10}  {}{}",
+                        fmt_bytes(lf.size_bytes),
+                        lf.path,
+                        allocation
+                    );
                 }
             }
         }
@@ -541,7 +569,10 @@ fn main() -> Result<()> {
                     let edition = image.edition.as_deref().unwrap_or("-");
                     let architecture = image.architecture.as_deref().unwrap_or("-");
                     let version = image.version.as_deref().unwrap_or("-");
-                    println!("  #{} {name} | {edition} | {architecture} | {version}", image.index);
+                    println!(
+                        "  #{} {name} | {edition} | {architecture} | {version}",
+                        image.index
+                    );
                     if let Some(description) = &image.description {
                         println!("    {description}");
                     }
@@ -553,7 +584,11 @@ fn main() -> Result<()> {
                     WimMounts::Available { entries } => {
                         println!("Windows WIM mounts");
                         for mount in entries {
-                            let access = if mount.read_write { "read/write" } else { "read-only" };
+                            let access = if mount.read_write {
+                                "read/write"
+                            } else {
+                                "read-only"
+                            };
                             println!(
                                 "  {} #{} -> {} | {:?} | {access}",
                                 mount.image_path, mount.index, mount.mount_path, mount.state
@@ -575,7 +610,7 @@ fn main() -> Result<()> {
                 if json {
                     println!("{}", serde_json::to_string_pretty(&items)?);
                 } else {
-                    println!("{:<6} {:<20} {:<28} {}", "State", "Location", "Name", "Command");
+                    println!("{:<6} {:<20} {:<28} Command", "State", "Location", "Name");
                     println!("{}", "-".repeat(90));
                     for it in &items {
                         println!(
@@ -628,7 +663,10 @@ fn main() -> Result<()> {
             }
         },
         Commands::Drivers { action } => match action {
-            DriversCommands::List { outdated_only, json } => {
+            DriversCommands::List {
+                outdated_only,
+                json,
+            } => {
                 let mut drivers = list_drivers();
                 if outdated_only {
                     drivers.retain(|d| d.is_outdated_duplicate);
@@ -637,8 +675,8 @@ fn main() -> Result<()> {
                     println!("{}", serde_json::to_string_pretty(&drivers)?);
                 } else {
                     println!(
-                        "{:<10} {:<24} {:<16} {:<14} {:>10}  {}",
-                        "OEM INF", "Original Name", "Provider", "Version", "Size", "Status"
+                        "{:<10} {:<24} {:<16} {:<14} {:>10}  Status",
+                        "OEM INF", "Original Name", "Provider", "Version", "Size"
                     );
                     println!("{}", "-".repeat(94));
                     let total_bytes: u64 = drivers.iter().map(|d| d.size_bytes).sum();
@@ -668,7 +706,11 @@ fn main() -> Result<()> {
                 }
             }
             DriversCommands::Export { target_dir, names } => {
-                let filter = if names.is_empty() { None } else { Some(names.as_slice()) };
+                let filter = if names.is_empty() {
+                    None
+                } else {
+                    Some(names.as_slice())
+                };
                 let report = export_drivers(&target_dir, filter)?;
                 println!(
                     "Backed up {} drivers ({}) to {}",
@@ -691,8 +733,12 @@ fn main() -> Result<()> {
                     features.retain(|f| match f.category {
                         FeatureCategory::Virtualization => target == "virtualization",
                         FeatureCategory::Developer => target == "developer",
-                        FeatureCategory::SecurityAi => target == "security_ai" || target == "security",
-                        FeatureCategory::NetworkSmb => target == "network_smb" || target == "network",
+                        FeatureCategory::SecurityAi => {
+                            target == "security_ai" || target == "security"
+                        }
+                        FeatureCategory::NetworkSmb => {
+                            target == "network_smb" || target == "network"
+                        }
                         FeatureCategory::PrintMedia => target == "print_media" || target == "print",
                         FeatureCategory::IisWeb => target == "iis_web" || target == "iis",
                     });
@@ -700,7 +746,7 @@ fn main() -> Result<()> {
                 if json {
                     println!("{}", serde_json::to_string_pretty(&features)?);
                 } else {
-                    println!("{:<6} {:<40} {}", "State", "Feature Name", "Display Name");
+                    println!("{:<6} {:<40} Display Name", "State", "Feature Name");
                     println!("{}", "-".repeat(90));
                     for f in &features {
                         println!(
@@ -735,21 +781,5 @@ fn fmt_scope(s: &Option<ScopeStatus>) -> String {
             .selected_index
             .map(|i| format!("#{}", i))
             .unwrap_or_else(|| "?".to_string()),
-    }
-}
-
-fn fmt_bytes(b: u64) -> String {
-    const KB: f64 = 1024.0;
-    const MB: f64 = KB * 1024.0;
-    const GB: f64 = MB * 1024.0;
-    let f = b as f64;
-    if f >= GB {
-        format!("{:.2} GB", f / GB)
-    } else if f >= MB {
-        format!("{:.2} MB", f / MB)
-    } else if f >= KB {
-        format!("{:.1} KB", f / KB)
-    } else {
-        format!("{} B", b)
     }
 }

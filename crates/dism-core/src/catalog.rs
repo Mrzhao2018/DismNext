@@ -5,7 +5,17 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-pub const EMBEDDED_CATALOG_JSON: &str = include_str!("../../../catalog/rules.json");
+const EMBEDDED_CATALOG: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/rules.json.gz"));
+
+pub(crate) fn parse_embedded_catalog() -> Result<Catalog> {
+    use std::io::Read;
+
+    let mut json = Vec::new();
+    flate2::read::GzDecoder::new(EMBEDDED_CATALOG)
+        .read_to_end(&mut json)
+        .context("Failed to decompress the embedded rule catalog")?;
+    serde_json::from_slice(&json).context("Failed to parse embedded catalog/rules.json")
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LocalizedText {
@@ -165,17 +175,20 @@ pub struct DropdownOption {
 #[serde(tag = "kind")]
 pub enum OptimizationScope {
     #[serde(rename = "checkbox")]
-    CheckBox {
-        state: Condition,
-        true_actions: Vec<Action>,
-        true_warning: Option<LocalizedText>,
-        true_restart: Option<String>,
-        false_actions: Vec<Action>,
-        false_warning: Option<LocalizedText>,
-        false_restart: Option<String>,
-    },
+    CheckBox(Box<OptimizationCheckBox>),
     #[serde(rename = "combo")]
     Combo { dropdowns: Vec<DropdownOption> },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OptimizationCheckBox {
+    pub state: Condition,
+    pub true_actions: Vec<Action>,
+    pub true_warning: Option<LocalizedText>,
+    pub true_restart: Option<String>,
+    pub false_actions: Vec<Action>,
+    pub false_warning: Option<LocalizedText>,
+    pub false_restart: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -230,8 +243,7 @@ impl Catalog {
             serde_json::from_str(&text)
                 .with_context(|| format!("Failed to parse catalog JSON at {}", p.display()))?
         } else {
-            serde_json::from_str(EMBEDDED_CATALOG_JSON)
-                .context("Failed to parse embedded catalog/rules.json")?
+            parse_embedded_catalog()?
         };
 
         let mut existing_ids: HashSet<String> =
@@ -247,23 +259,9 @@ impl Catalog {
 
     /// Resolves the path to user-defined cleanup rules (`data/custom_rules.json`).
     pub fn custom_rules_path() -> PathBuf {
-        let cwd_path = PathBuf::from("data").join("custom_rules.json");
-        if cwd_path.exists() {
-            return cwd_path;
-        }
-        if let Ok(exe) = std::env::current_exe() {
-            if let Some(dir) = exe.parent() {
-                let exe_data = dir.join("data").join("custom_rules.json");
-                if exe_data.exists() {
-                    return exe_data;
-                }
-                if Path::new("data").exists() {
-                    return cwd_path;
-                }
-                return exe_data;
-            }
-        }
-        cwd_path
+        crate::storage::data_directories()
+            .primary
+            .join("custom_rules.json")
     }
 
     /// Builds and safety-validates a `CleanupRule` from a user custom-rule form input.
@@ -384,21 +382,50 @@ impl Catalog {
     }
 
     pub fn load_custom_rules() -> Vec<CleanupRule> {
-        load_custom_rules_from(&Self::custom_rules_path())
+        let primary = Self::custom_rules_path();
+        let legacy = legacy_custom_rules_path();
+        load_custom_rules_from(custom_rules_source(&primary, legacy.as_deref()))
     }
 
     pub fn save_custom_rule(input: CustomRuleInput) -> Result<CleanupRule> {
-        save_custom_rule_to(&Self::custom_rules_path(), input)
+        save_custom_rule_to(
+            &Self::custom_rules_path(),
+            legacy_custom_rules_path().as_deref(),
+            input,
+        )
     }
 
     pub fn delete_custom_rule(rule_id: &str) -> Result<()> {
-        delete_custom_rule_from(&Self::custom_rules_path(), rule_id)
+        delete_custom_rule_from(
+            &Self::custom_rules_path(),
+            legacy_custom_rules_path().as_deref(),
+            rule_id,
+        )
+    }
+}
+
+fn legacy_custom_rules_path() -> Option<PathBuf> {
+    crate::storage::data_directories()
+        .legacy
+        .iter()
+        .map(|path| path.join("custom_rules.json"))
+        .find(|path| path.exists())
+}
+
+fn custom_rules_source<'a>(path: &'a Path, legacy: Option<&'a Path>) -> &'a Path {
+    if matches!(path.try_exists(), Ok(false)) {
+        legacy.unwrap_or(path)
+    } else {
+        path
     }
 }
 
 fn load_custom_rules_from(path: &Path) -> Vec<CleanupRule> {
     read_custom_rules(path)
-        .unwrap_or_default()
+        .unwrap_or_else(|error| {
+            eprintln!("Custom rules could not be loaded: {error:#}");
+            Vec::new()
+        })
         .into_iter()
         .filter(|rule| {
             rule.source == "custom"
@@ -426,34 +453,51 @@ fn read_custom_rules(path: &Path) -> Result<Vec<CleanupRule>> {
     }
 }
 
-fn save_custom_rule_to(path: &Path, input: CustomRuleInput) -> Result<CleanupRule> {
+fn save_custom_rule_to(
+    path: &Path,
+    legacy: Option<&Path>,
+    input: CustomRuleInput,
+) -> Result<CleanupRule> {
     let rule = Catalog::build_custom_rule(&input)?;
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let mut existing = read_custom_rules(path)?;
-    if let Some(pos) = existing.iter().position(|r| r.id == rule.id) {
-        existing[pos] = rule.clone();
-    } else {
-        existing.push(rule.clone());
-    }
-    std::fs::write(path, serde_json::to_string_pretty(&existing)?)?;
+    edit_custom_rules(path, legacy, |rules| {
+        if let Some(pos) = rules.iter().position(|r| r.id == rule.id) {
+            rules[pos] = rule.clone();
+        } else {
+            rules.push(rule.clone());
+        }
+        Ok(())
+    })?;
     Ok(rule)
 }
 
-fn delete_custom_rule_from(path: &Path, rule_id: &str) -> Result<()> {
+fn delete_custom_rule_from(path: &Path, legacy: Option<&Path>, rule_id: &str) -> Result<()> {
     validate_custom_id(rule_id)?;
-    let mut existing = read_custom_rules(path)?;
-    let before = existing.len();
-    existing.retain(|r| r.id != rule_id);
-    if existing.len() == before {
-        return Err(anyhow!("Custom rule '{}' not found", rule_id));
-    }
+    edit_custom_rules(path, legacy, |rules| {
+        let before = rules.len();
+        rules.retain(|r| r.id != rule_id);
+        ensure!(rules.len() != before, "Custom rule '{rule_id}' not found");
+        Ok(())
+    })
+}
+
+fn edit_custom_rules(
+    path: &Path,
+    legacy: Option<&Path>,
+    edit: impl FnOnce(&mut Vec<CleanupRule>) -> Result<()>,
+) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    std::fs::write(path, serde_json::to_string_pretty(&existing)?)?;
-    Ok(())
+    let lock = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(path.with_extension("lock"))?;
+    lock.lock()?;
+    let mut rules = read_custom_rules(custom_rules_source(path, legacy))?;
+    edit(&mut rules)?;
+    crate::storage::write_atomic(path, &serde_json::to_vec_pretty(&rules)?)
+        .with_context(|| format!("Failed to save custom rules at {}", path.display()))
 }
 
 fn validate_custom_id(id: &str) -> Result<()> {
@@ -506,10 +550,61 @@ fn validate_custom_action(root_path: &str, queries: &[String]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::evaluator::has_balanced_inline_calls;
+    use serde_json::Value;
+    use std::collections::HashSet;
+
+    #[test]
+    fn embedded_catalog_has_unique_ids_and_valid_inline_expressions() {
+        let catalog = parse_embedded_catalog().unwrap();
+        assert!(!catalog.cleanup_rules.is_empty());
+        assert!(!catalog.optimization_groups.is_empty());
+        let mut ids = HashSet::new();
+        for id in catalog.cleanup_rules.iter().map(|rule| &rule.id).chain(
+            catalog.optimization_groups.iter().flat_map(|group| {
+                std::iter::once(&group.id).chain(group.items.iter().map(|item| &item.id))
+            }),
+        ) {
+            assert!(
+                !id.is_empty() && ids.insert(id),
+                "Duplicate or empty ID: {id}"
+            );
+        }
+        validate_expressions(&serde_json::to_value(catalog).unwrap(), false);
+    }
+
+    fn validate_expressions(value: &Value, interactive_data: bool) {
+        match value {
+            Value::String(text) => {
+                assert!(
+                    has_balanced_inline_calls(text),
+                    "Unclosed inline call: {text}"
+                );
+                assert!(
+                    interactive_data || !text.contains("?ColorDialog("),
+                    "Unmarked dialog: {text}"
+                );
+            }
+            Value::Array(values) => {
+                for value in values {
+                    validate_expressions(value, false);
+                }
+            }
+            Value::Object(fields) => {
+                let interactive = fields.get("type").and_then(Value::as_str) == Some("RegWrite")
+                    && fields.get("fun").and_then(Value::as_bool) == Some(true);
+                for (name, value) in fields {
+                    validate_expressions(value, interactive && name == "data");
+                }
+            }
+            _ => {}
+        }
+    }
 
     #[test]
     fn test_custom_rule_validation_and_persistence_sandbox() {
-        let base = std::env::temp_dir().join(format!("dismnext_custom_rule_{}", std::process::id()));
+        let base =
+            std::env::temp_dir().join(format!("dismnext_custom_rule_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
         std::fs::create_dir_all(&base).unwrap();
         let file_path = base.join("custom_rules.json");
@@ -547,7 +642,7 @@ mod tests {
             excluded: vec!["keep.log".into()],
             flags: Some("File".into()),
         };
-        let saved = save_custom_rule_to(&file_path, ok_in).unwrap();
+        let saved = save_custom_rule_to(&file_path, None, ok_in.clone()).unwrap();
         assert_eq!(saved.id, "custom-test-01");
         assert_eq!(saved.source, "custom");
 
@@ -555,8 +650,19 @@ mod tests {
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].name.en, "Build Logs");
 
-        delete_custom_rule_from(&file_path, "custom-test-01").unwrap();
+        let legacy = base.join("legacy.json");
+        std::fs::rename(&file_path, &legacy).unwrap();
+        let original = std::fs::read(&legacy).unwrap();
+        assert_eq!(custom_rules_source(&file_path, Some(&legacy)), legacy);
+        delete_custom_rule_from(&file_path, Some(&legacy), "custom-test-01").unwrap();
         assert!(load_custom_rules_from(&file_path).is_empty());
+        assert_eq!(std::fs::read(&legacy).unwrap(), original);
+
+        let invalid_json = b"[corrupt data";
+        std::fs::write(&file_path, invalid_json).unwrap();
+        assert!(save_custom_rule_to(&file_path, Some(&legacy), ok_in).is_err());
+        assert!(delete_custom_rule_from(&file_path, Some(&legacy), "custom-test-01").is_err());
+        assert_eq!(std::fs::read(&file_path).unwrap(), invalid_json);
 
         let _ = std::fs::remove_dir_all(&base);
     }

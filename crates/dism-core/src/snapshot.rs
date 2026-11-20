@@ -4,7 +4,8 @@ use anyhow::{anyhow, Context, Result};
 use chrono::Local;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use std::io::{self, Write};
+use std::collections::HashSet;
+use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard};
@@ -122,19 +123,48 @@ pub struct SnapshotSummary {
 
 pub struct SnapshotManager {
     dir: PathBuf,
+    legacy_dirs: Vec<PathBuf>,
     mutation: Mutex<()>,
 }
 
 impl SnapshotManager {
     pub fn default_dir() -> PathBuf {
-        PathBuf::from("data").join("snapshots")
+        crate::storage::data_directories().primary.join("snapshots")
     }
 
     pub fn new(dir: PathBuf) -> Self {
         Self {
             dir,
+            legacy_dirs: Vec::new(),
             mutation: Mutex::new(()),
         }
+    }
+
+    pub fn user_default() -> Self {
+        let mut manager = Self::new(Self::default_dir());
+        for dir in &crate::storage::data_directories().legacy {
+            manager.add_legacy_directory(dir.join("snapshots"));
+        }
+        manager
+    }
+
+    pub(crate) fn directory(&self) -> &Path {
+        &self.dir
+    }
+
+    pub(crate) fn add_legacy_directory(&mut self, dir: PathBuf) {
+        if self.dir != dir && !self.legacy_dirs.contains(&dir) {
+            self.legacy_dirs.push(dir);
+        }
+    }
+
+    fn directories(&self) -> impl Iterator<Item = &Path> {
+        std::iter::once(self.dir.as_path()).chain(
+            self.legacy_dirs
+                .iter()
+                .map(PathBuf::as_path)
+                .filter(|dir| dir.is_dir()),
+        )
     }
 
     pub(crate) fn lock_mutation(&self) -> Result<MutexGuard<'_, ()>> {
@@ -157,10 +187,7 @@ impl SnapshotManager {
         for act in actions {
             match act {
                 Action::RegWrite {
-                    key,
-                    value,
-                    wow64,
-                    ..
+                    key, value, wow64, ..
                 } => {
                     for sam in wow64_sam_list(wow64.as_deref()) {
                         capture_missing_keys(&mut records, key, sam)?;
@@ -170,10 +197,7 @@ impl SnapshotManager {
                     }
                 }
                 Action::RegDelete {
-                    key,
-                    value,
-                    wow64,
-                    ..
+                    key, value, wow64, ..
                 } => {
                     for sam in wow64_sam_list(wow64.as_deref()) {
                         match value {
@@ -210,7 +234,10 @@ impl SnapshotManager {
                     }
                 }
                 Action::SetServiceStart { name, .. } => {
-                    let svc_key = format!(r"HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Services\{}", name);
+                    let svc_key = format!(
+                        r"HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Services\{}",
+                        name
+                    );
                     for sam in wow64_sam_list(None) {
                         capture_missing_keys(&mut records, &svc_key, sam)?;
                         records.push(capture_value_record(&svc_key, "Start", sam)?);
@@ -232,8 +259,9 @@ impl SnapshotManager {
         }
         records.extend(refresh.into_iter().map(SnapshotRecord::ShellRefresh));
 
-        std::fs::create_dir_all(&self.dir)
-            .with_context(|| format!("Failed to create snapshot directory {}", self.dir.display()))?;
+        std::fs::create_dir_all(&self.dir).with_context(|| {
+            format!("Failed to create snapshot directory {}", self.dir.display())
+        })?;
 
         let now = Local::now();
         let id = format!(
@@ -259,17 +287,21 @@ impl SnapshotManager {
     }
 
     pub fn list(&self) -> Result<Vec<RegistrySnapshot>> {
-        if !self.dir.exists() {
-            return Ok(Vec::new());
-        }
         let mut items = Vec::new();
-        for entry in std::fs::read_dir(&self.dir)? {
-            let entry = entry?;
-            let path = entry.path();
-            if path.extension().and_then(|s| s.to_str()) == Some("json") {
-                if let Ok(text) = std::fs::read_to_string(&path) {
-                    if let Ok(snap) = serde_json::from_str::<RegistrySnapshot>(&text) {
-                        items.push(snap);
+        let mut seen = HashSet::new();
+        for dir in self.directories() {
+            let Some(entries) = missing_is_none(std::fs::read_dir(dir))? else {
+                continue;
+            };
+            for entry in entries {
+                let path = entry?.path();
+                if path.extension().and_then(|s| s.to_str()) == Some("json") {
+                    if let Ok(text) = std::fs::read_to_string(&path) {
+                        if let Ok(snapshot) = serde_json::from_str::<RegistrySnapshot>(&text) {
+                            if seen.insert(snapshot.id.clone()) {
+                                items.push(snapshot);
+                            }
+                        }
                     }
                 }
             }
@@ -280,9 +312,15 @@ impl SnapshotManager {
 
     pub fn load(&self, id: &str) -> Result<RegistrySnapshot> {
         let path = self.snapshot_path(id);
-        let text = std::fs::read_to_string(&path)
-            .with_context(|| format!("Snapshot {} not found", id))?;
-        Ok(serde_json::from_str(&text)?)
+        let name = path
+            .file_name()
+            .expect("snapshot path always has a filename");
+        for dir in self.directories() {
+            if let Some(text) = missing_is_none(std::fs::read_to_string(dir.join(name)))? {
+                return Ok(serde_json::from_str(&text)?);
+            }
+        }
+        Err(anyhow!("Snapshot {} not found", id))
     }
 
     pub fn restore(&self, id: &str) -> Result<RegistrySnapshot> {
@@ -293,6 +331,9 @@ impl SnapshotManager {
                 "该快照包含系统级注册表项 (HKLM/HKU)，回滚需要管理员权限。请先点击顶部“一键提权为管理员”后再执行回滚。 / Restoring system-level registry snapshots requires Administrator privileges."
             ));
         }
+        std::fs::create_dir_all(&self.dir).with_context(|| {
+            format!("Failed to create snapshot directory {}", self.dir.display())
+        })?;
         self.restore_records(&snap)?;
         for record in &snap.records {
             if let SnapshotRecord::ShellRefresh(notification) = record {
@@ -354,18 +395,8 @@ fn unique_suffix() -> String {
 
 fn write_snapshot(path: &Path, snap: &RegistrySnapshot) -> Result<()> {
     let json = serde_json::to_vec_pretty(snap)?;
-    let temp_path = path.with_extension(format!("{}.tmp", unique_suffix()));
-    let mut file = std::fs::OpenOptions::new()
-        .create_new(true)
-        .write(true)
-        .open(&temp_path)?;
-    let result = file.write_all(&json).and_then(|()| file.sync_all());
-    drop(file);
-    let result = result.and_then(|()| std::fs::rename(&temp_path, path));
-    if result.is_err() {
-        let _ = std::fs::remove_file(&temp_path);
-    }
-    result.with_context(|| format!("Failed to persist snapshot {}", path.display()))
+    crate::storage::write_atomic(path, &json)
+        .with_context(|| format!("Failed to persist snapshot {}", path.display()))
 }
 
 fn missing_is_none<T>(result: io::Result<T>) -> io::Result<Option<T>> {
@@ -716,6 +747,41 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
         assert!(restore.is_err());
         assert!(!saved.restored);
+    }
+
+    #[test]
+    fn restoring_a_legacy_snapshot_preserves_it_and_prefers_the_updated_copy() {
+        let dir = std::env::temp_dir().join(format!("dismnext_snapshot_{}", unique_suffix()));
+        let mut manager = SnapshotManager::new(dir.join("current"));
+        let legacy = dir.join("legacy");
+        std::fs::create_dir_all(&legacy).unwrap();
+        manager.add_legacy_directory(legacy.clone());
+        let snapshot = RegistrySnapshot {
+            id: "legacy".into(),
+            created_at: Local::now().to_rfc3339(),
+            item_id: "test".into(),
+            item_name: LocalizedText {
+                en: "Test".into(),
+                zh: "测试".into(),
+            },
+            scope: "current".into(),
+            action_summary: "test".into(),
+            restored: false,
+            records: Vec::new(),
+        };
+        write_snapshot(&legacy.join("legacy.json"), &snapshot).unwrap();
+        assert!(!manager.list().unwrap()[0].restored);
+        assert!(manager.restore(&snapshot.id).unwrap().restored);
+        let snapshots = manager.list().unwrap();
+        assert_eq!(snapshots.len(), 1);
+        assert!(snapshots[0].restored);
+        assert!(
+            !SnapshotManager::new(legacy)
+                .load(&snapshot.id)
+                .unwrap()
+                .restored
+        );
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

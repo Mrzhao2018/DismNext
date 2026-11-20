@@ -1,3 +1,4 @@
+import { recyclePathKey, removeNodeFromTree, sameOrBelow } from '../diskAnalysis';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Badge,
@@ -269,59 +270,6 @@ function findNodeByPath(node: DiskTreeNode, targetPath: string): DiskTreeNode | 
     if (f) return f;
   }
   return null;
-}
-
-function recyclePathKey(path: string) {
-  return path.replace(/\//g, '\\').replace(/\\+$/, '').toLowerCase();
-}
-
-function sameOrBelow(path: string, parent: string) {
-  const key = recyclePathKey(path);
-  const parentKey = recyclePathKey(parent);
-  return key === parentKey || key.startsWith(`${parentKey}\\`);
-}
-
-function removeNodeFromTree(
-  node: DiskTreeNode,
-  targetPath: string
-): { updated: DiskTreeNode; removedBytes: number; removedFiles: number; removedDirs: number } {
-  let removedBytes = 0;
-  let removedFiles = 0;
-  let removedDirs = 0;
-  const nextChildren: DiskTreeNode[] = [];
-
-  for (const ch of node.children) {
-    if (!ch.is_aggregate && recyclePathKey(ch.path) === recyclePathKey(targetPath)) {
-      removedBytes += ch.size_bytes;
-      removedFiles += ch.file_count;
-      removedDirs += ch.dir_count + (ch.is_dir ? 1 : 0);
-      continue;
-    }
-    if (ch.is_dir && ch.children.length > 0) {
-      const sub = removeNodeFromTree(ch, targetPath);
-      if (sub.removedBytes > 0 || sub.removedFiles > 0 || sub.removedDirs > 0) {
-        removedBytes += sub.removedBytes;
-        removedFiles += sub.removedFiles;
-        removedDirs += sub.removedDirs;
-      }
-      nextChildren.push(sub.updated);
-    } else {
-      nextChildren.push(ch);
-    }
-  }
-
-  return {
-    updated: {
-      ...node,
-      size_bytes: Math.max(0, node.size_bytes - removedBytes),
-      file_count: Math.max(0, node.file_count - removedFiles),
-      dir_count: Math.max(0, node.dir_count - removedDirs),
-      children: nextChildren,
-    },
-    removedBytes,
-    removedFiles,
-    removedDirs,
-  };
 }
 
 const skipReasons = {

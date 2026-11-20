@@ -6,6 +6,7 @@ use crate::file_stamp::open_for_verification;
 use crate::path_recycle::{recycle_path_immediately, scan_timestamp};
 use crate::scan_progress::{ScanPhase, ScanProgress};
 use crate::sysinfo::SystemInfo;
+use crate::ttl_cache::TtlCache;
 use anyhow::{anyhow, Result};
 use chrono::DateTime;
 use rayon::prelude::*;
@@ -18,12 +19,12 @@ use std::io::{Read, Seek, SeekFrom};
 use std::os::windows::fs::MetadataExt;
 use std::os::windows::io::AsRawHandle;
 use std::path::{Path, PathBuf};
-use std::sync::{OnceLock, RwLock};
+use std::sync::OnceLock;
 use std::time::{Duration, Instant, UNIX_EPOCH};
 use walkdir::WalkDir;
 use windows_sys::Win32::Storage::FileSystem::{
-    GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION, FILE_READ_DATA,
-    FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+    GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION, FILE_READ_DATA, FILE_SHARE_DELETE,
+    FILE_SHARE_READ, FILE_SHARE_WRITE,
 };
 use winreg::enums::{
     HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ, KEY_WOW64_32KEY, KEY_WOW64_64KEY,
@@ -116,7 +117,11 @@ struct RankedFile {
 
 impl Ord for RankedFile {
     fn cmp(&self, other: &Self) -> Ordering {
-        other.entry.size_bytes.cmp(&self.entry.size_bytes).then_with(|| self.order.cmp(&other.order))
+        other
+            .entry
+            .size_bytes
+            .cmp(&self.entry.size_bytes)
+            .then_with(|| self.order.cmp(&other.order))
     }
 }
 
@@ -137,14 +142,20 @@ impl Eq for RankedFile {}
 impl LargestFiles {
     fn accepts(&self, size: u64) -> bool {
         self.heap.len() < MAX_LARGEST_FILES
-            || self.heap.peek().is_some_and(|entry| size > entry.entry.size_bytes)
+            || self
+                .heap
+                .peek()
+                .is_some_and(|entry| size > entry.entry.size_bytes)
     }
 
     fn insert(&mut self, entry: LargeFileEntry) {
         if !self.accepts(entry.size_bytes) {
             return;
         }
-        let ranked = RankedFile { entry, order: self.sequence };
+        let ranked = RankedFile {
+            entry,
+            order: self.sequence,
+        };
         self.sequence += 1;
         self.push_ranked(ranked);
     }
@@ -167,7 +178,11 @@ impl LargestFiles {
     }
 
     fn into_ranked_entries(self) -> Vec<LargeFileEntry> {
-        self.heap.into_sorted_vec().into_iter().map(|ranked| ranked.entry).collect()
+        self.heap
+            .into_sorted_vec()
+            .into_iter()
+            .map(|ranked| ranked.entry)
+            .collect()
     }
 }
 
@@ -205,16 +220,29 @@ impl OmittedChildren {
 pub fn get_presets(sys: &SystemInfo) -> Vec<DiskPreset> {
     let mut presets = Vec::new();
     let var_candidates = [
-        ("%LOCALAPPDATA%", "本地应用数据 (AppData\\Local)", "AppData\\Local"),
-        ("%APPDATA%", "漫游应用数据 (AppData\\Roaming)", "AppData\\Roaming"),
+        (
+            "%LOCALAPPDATA%",
+            "本地应用数据 (AppData\\Local)",
+            "AppData\\Local",
+        ),
+        (
+            "%APPDATA%",
+            "漫游应用数据 (AppData\\Roaming)",
+            "AppData\\Roaming",
+        ),
         ("%USERPROFILE%", "用户主目录", "User Profile"),
         ("%ProgramData%", "程序数据 (ProgramData)", "ProgramData"),
-        ("%SystemRoot%\\SystemTemp", "系统临时目录 (SystemTemp)", "Windows SystemTemp"),
+        (
+            "%SystemRoot%\\SystemTemp",
+            "系统临时目录 (SystemTemp)",
+            "Windows SystemTemp",
+        ),
     ];
     for (env_expr, zh, en) in var_candidates {
         let key = env_expr.trim_matches('%');
         let resolved = if env_expr.contains('\\') {
-            let sys_root = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".to_string());
+            let sys_root =
+                std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".to_string());
             format!(r"{}\SystemTemp", sys_root)
         } else {
             std::env::var(key).unwrap_or_default()
@@ -246,7 +274,11 @@ pub fn analyze_path(root: &Path, max_depth: usize) -> Result<DiskAnalysisReport>
     analyze_path_with_options(root, max_depth, false, None)
 }
 
-pub fn analyze_path_with_progress(root: &Path, max_depth: usize, progress: &ScanProgress) -> Result<DiskAnalysisReport> {
+pub fn analyze_path_with_progress(
+    root: &Path,
+    max_depth: usize,
+    progress: &ScanProgress,
+) -> Result<DiskAnalysisReport> {
     analyze_path_with_options(root, max_depth, false, Some(progress))
 }
 
@@ -286,7 +318,7 @@ pub fn analyze_path_with_options(
         .into_iter()
         .map(|(k, (sz, cnt))| (k, sz, cnt))
         .collect();
-    ext_vec.sort_by(|a, b| b.1.cmp(&a.1));
+    ext_vec.sort_by_key(|entry| std::cmp::Reverse(entry.1));
 
     let mut extensions = Vec::new();
     let mut other_bytes = 0u64;
@@ -372,7 +404,9 @@ fn scan_recursive(
     }
 
     if meta.is_file() {
-        if let Some(progress) = progress { progress.file_processed(); }
+        if let Some(progress) = progress {
+            progress.file_processed();
+        }
         let size = meta.len();
         let ext = normalized_extension(path);
         let mut exts = HashMap::new();
@@ -436,7 +470,9 @@ fn scan_recursive(
             continue;
         }
         if c_meta.is_file() {
-            if let Some(progress) = progress { progress.file_processed(); }
+            if let Some(progress) = progress {
+                progress.file_processed();
+            }
             let size = c_meta.len();
             let file_name = entry.file_name();
             let ext = normalized_extension(Path::new(&file_name));
@@ -446,7 +482,8 @@ fn scan_recursive(
             add_extension(&mut exts, &ext, size, 1);
 
             let largest = top_files.accepts(size);
-            let visible = child_depth.is_some() && visible_cutoff.is_none_or(|cutoff| size > cutoff);
+            let visible =
+                child_depth.is_some() && visible_cutoff.is_none_or(|cutoff| size > cutoff);
             if child_depth.is_some() && !visible && size != 0 {
                 omitted_children.size_bytes = omitted_children.size_bytes.saturating_add(size);
                 omitted_children.file_count += 1;
@@ -456,7 +493,8 @@ fn scan_recursive(
                 continue;
             }
             let child_path = entry.path();
-            let allocated_bytes = allocation.and_then(|scan| scan.record_file(&child_path, c_meta.file_attributes()));
+            let allocated_bytes =
+                allocation.and_then(|scan| scan.record_file(&child_path, c_meta.file_attributes()));
             if !(largest || visible) {
                 continue;
             }
@@ -574,7 +612,11 @@ fn normalized_extension(path: &Path) -> Cow<'_, str> {
 }
 
 fn extension_label(ext: &str) -> String {
-    if ext.is_empty() { "(no ext)".to_string() } else { format!(".{ext}") }
+    if ext.is_empty() {
+        "(no ext)".to_string()
+    } else {
+        format!(".{ext}")
+    }
 }
 
 fn add_extension(exts: &mut HashMap<String, (u64, usize)>, ext: &str, size: u64, count: usize) {
@@ -655,10 +697,14 @@ fn describe_extension(ext: &str) -> LocalizedText {
         ".html" | ".htm" | ".css" | ".scss" => ("网页与样式文件", "Web Document / Stylesheet"),
         ".wasm" => ("WebAssembly 模块", "WebAssembly Module"),
         ".py" | ".pyc" | ".whl" => ("Python 脚本 / Wheel 包", "Python Script / Wheel"),
-        ".rs" | ".c" | ".cpp" | ".h" | ".hpp" | ".cs" | ".go" | ".java" => ("编程语言源码", "Source Code"),
+        ".rs" | ".c" | ".cpp" | ".h" | ".hpp" | ".cs" | ".go" | ".java" => {
+            ("编程语言源码", "Source Code")
+        }
         ".jar" => ("Java 归档包", "Java Archive"),
         ".ttf" | ".otf" | ".woff" | ".woff2" => ("字体文件", "Font File"),
-        ".png" | ".jpg" | ".jpeg" | ".webp" | ".gif" | ".bmp" | ".ico" | ".svg" => ("图像 / 图标资源", "Image / Icon"),
+        ".png" | ".jpg" | ".jpeg" | ".webp" | ".gif" | ".bmp" | ".ico" | ".svg" => {
+            ("图像 / 图标资源", "Image / Icon")
+        }
         ".mp4" | ".mkv" | ".avi" | ".mov" | ".webm" => ("视频媒体文件", "Video Media"),
         ".mp3" | ".wav" | ".flac" | ".ogg" => ("音频媒体文件", "Audio Media"),
         ".pdf" => ("PDF 文档", "PDF Document"),
@@ -845,27 +891,41 @@ pub fn find_duplicate_files_with_progress(
     find_duplicate_files_inner(root, min_size_bytes, Some(progress))
 }
 
-fn find_duplicate_files_inner(root: &Path, min_size_bytes: u64, progress: Option<&ScanProgress>) -> Result<DuplicateScanReport> {
+fn find_duplicate_files_inner(
+    root: &Path,
+    min_size_bytes: u64,
+    progress: Option<&ScanProgress>,
+) -> Result<DuplicateScanReport> {
     check_scan(progress)?;
     if !root.exists() {
         return Err(anyhow!("Path does not exist: {}", root.display()));
     }
     let started = Instant::now();
     let threshold = min_size_bytes.max(64 * 1024);
-    let windows = crate::system_tools::windows_dir().unwrap_or_else(|_| PathBuf::from(r"C:\Windows"));
+    let windows =
+        crate::system_tools::windows_dir().unwrap_or_else(|_| PathBuf::from(r"C:\Windows"));
     let winsxs = normalize_win_path(&windows.join("WinSxS"));
     let driverstore = normalize_win_path(&windows.join(r"System32\DriverStore"));
 
     let mut by_size: HashMap<u64, Vec<PathBuf>> = HashMap::new();
-    let mut walker = WalkDir::new(root).follow_links(false).follow_root_links(false).into_iter();
+    let mut walker = WalkDir::new(root)
+        .follow_links(false)
+        .follow_root_links(false)
+        .into_iter();
     loop {
         check_scan(progress)?;
-        let Some(entry) = walker.next() else { break; };
-        let Ok(entry) = entry else { continue; };
+        let Some(entry) = walker.next() else {
+            break;
+        };
+        let Ok(entry) = entry else {
+            continue;
+        };
         let directory = entry.file_type().is_dir();
         // WalkDir uses the Windows directory entry's cached attributes and size.
         let Ok(meta) = entry.metadata() else {
-            if directory { walker.skip_current_dir(); }
+            if directory {
+                walker.skip_current_dir();
+            }
             continue;
         };
         let servicing_path = if directory || entry.depth() == 0 {
@@ -875,13 +935,17 @@ fn find_duplicate_files_inner(root: &Path, min_size_bytes: u64, progress: Option
             false
         };
         if meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 || servicing_path {
-            if directory { walker.skip_current_dir(); }
+            if directory {
+                walker.skip_current_dir();
+            }
             continue;
         }
         if !meta.is_file() {
             continue;
         }
-        if let Some(progress) = progress { progress.file_processed(); }
+        if let Some(progress) = progress {
+            progress.file_processed();
+        }
         let size = meta.len();
         if size >= threshold {
             by_size.entry(size).or_default().push(entry.into_path());
@@ -895,9 +959,13 @@ fn find_duplicate_files_inner(root: &Path, min_size_bytes: u64, progress: Option
     let sampled = size_candidates
         .into_par_iter()
         .filter_map(|(sz, path)| {
-            if let Err(error) = check_scan(progress) { return Some(Err(error)); }
+            if let Err(error) = check_scan(progress) {
+                return Some(Err(error));
+            }
             let sample = sample_hash_file(&path, sz, progress);
-            if let Some(progress) = progress { progress.file_processed(); }
+            if let Some(progress) = progress {
+                progress.file_processed();
+            }
             sample.map(|hash| Ok((sz, hash, path)))
         })
         .collect::<Result<Vec<_>>>()?;
@@ -908,7 +976,8 @@ fn find_duplicate_files_inner(root: &Path, min_size_bytes: u64, progress: Option
         by_sample.entry((size, sample)).or_default().push(path);
     }
 
-    let full_candidates: Vec<_> = by_sample.into_iter()
+    let full_candidates: Vec<_> = by_sample
+        .into_iter()
         .filter(|(_, paths)| paths.len() >= 2)
         .flat_map(|((size, _), paths)| paths.into_iter().map(move |path| (size, path)))
         .collect();
@@ -919,7 +988,9 @@ fn find_duplicate_files_inner(root: &Path, min_size_bytes: u64, progress: Option
     let hashed = full_candidates
         .into_par_iter()
         .filter_map(|(size, path)| {
-            if let Err(error) = check_scan(progress) { return Some(Err(error)); }
+            if let Err(error) = check_scan(progress) {
+                return Some(Err(error));
+            }
             let result = (|| {
                 let mut file = open_hash_file(&path, size)?;
                 let modified = file.metadata().ok()?.last_write_time();
@@ -930,12 +1001,16 @@ fn find_duplicate_files_inner(root: &Path, min_size_bytes: u64, progress: Option
                 }
                 Some((size, hash, path, modified, state))
             })();
-            if let Some(progress) = progress { progress.file_processed(); }
+            if let Some(progress) = progress {
+                progress.file_processed();
+            }
             result.map(Ok)
         })
         .collect::<Result<Vec<_>>>()?;
 
-    if let Some(progress) = progress { progress.set_phase(ScanPhase::Finishing, None); }
+    if let Some(progress) = progress {
+        progress.set_phase(ScanPhase::Finishing, None);
+    }
 
     const WINDOWS_EPOCH_SECONDS: u64 = 11_644_473_600;
     const TICKS_PER_SECOND: u64 = 10_000_000;
@@ -964,13 +1039,16 @@ fn find_duplicate_files_inner(root: &Path, min_size_bytes: u64, progress: Option
         let modified_date = DateTime::from_timestamp(mod_unix as i64, 0)
             .map(|dt| dt.format("%Y-%m-%d").to_string())
             .unwrap_or_default();
-        by_full.entry((sz, h)).or_default().push((modified_ticks, DuplicateFileEntry {
-            path: path.to_string_lossy().into_owned(),
-            name,
-            modified_date,
-            modified_unix: mod_unix,
-            stamp,
-        }));
+        by_full.entry((sz, h)).or_default().push((
+            modified_ticks,
+            DuplicateFileEntry {
+                path: path.to_string_lossy().into_owned(),
+                name,
+                modified_date,
+                modified_unix: mod_unix,
+                stamp,
+            },
+        ));
     }
 
     let mut groups = Vec::new();
@@ -979,7 +1057,9 @@ fn find_duplicate_files_inner(root: &Path, min_size_bytes: u64, progress: Option
         if files.len() < 2 {
             continue;
         }
-        files.sort_by(|(a_time, a), (b_time, b)| b_time.cmp(a_time).then_with(|| a.path.cmp(&b.path)));
+        files.sort_by(|(a_time, a), (b_time, b)| {
+            b_time.cmp(a_time).then_with(|| a.path.cmp(&b.path))
+        });
         let wasted_bytes = sz.saturating_mul((files.len() - 1) as u64);
         groups.push(DuplicateGroup {
             hash_hex: h.to_hex().to_string(),
@@ -989,7 +1069,7 @@ fn find_duplicate_files_inner(root: &Path, min_size_bytes: u64, progress: Option
         });
     }
 
-    groups.sort_by(|a, b| b.wasted_bytes.cmp(&a.wasted_bytes));
+    groups.sort_by_key(|entry| std::cmp::Reverse(entry.wasted_bytes));
     let total_groups = groups.len();
     let total_wasted_bytes: u64 = groups.iter().map(|g| g.wasted_bytes).sum();
     groups.truncate(100);
@@ -1008,22 +1088,28 @@ fn distinct_duplicate_candidates(
     by_size: HashMap<u64, Vec<PathBuf>>,
     progress: Option<&ScanProgress>,
 ) -> Result<Vec<(u64, PathBuf)>> {
-    let candidates: Vec<_> = by_size.into_iter()
+    let candidates: Vec<_> = by_size
+        .into_iter()
         .filter(|(_, paths)| paths.len() >= 2)
         .flat_map(|(size, paths)| paths.into_iter().map(move |path| (size, path)))
         .collect();
-    let probed = candidates.into_par_iter().map(|(size, path)| {
-        check_scan(progress)?;
-        let identity = hard_link_identity(&path);
-        Ok((size, path, identity))
-    }).collect::<Result<Vec<_>>>()?;
+    let probed = candidates
+        .into_par_iter()
+        .map(|(size, path)| {
+            check_scan(progress)?;
+            let identity = hard_link_identity(&path);
+            Ok((size, path, identity))
+        })
+        .collect::<Result<Vec<_>>>()?;
 
     let mut linked: HashMap<FileIdentity, (u64, PathBuf)> = HashMap::new();
     let mut distinct = Vec::new();
     for (size, path, identity) in probed {
         check_scan(progress)?;
         if let Some(identity) = identity {
-            let entry = linked.entry(identity).or_insert_with(|| (size, path.clone()));
+            let entry = linked
+                .entry(identity)
+                .or_insert_with(|| (size, path.clone()));
             if path < entry.1 {
                 *entry = (size, path);
             }
@@ -1052,22 +1138,39 @@ fn hard_link_identity(path: &Path) -> Option<FileIdentity> {
     }
 }
 
-fn read_hash_chunk(reader: &mut impl Read, buffer: &mut [u8], progress: Option<&ScanProgress>) -> Option<usize> {
+fn read_hash_chunk(
+    reader: &mut impl Read,
+    buffer: &mut [u8],
+    progress: Option<&ScanProgress>,
+) -> Option<usize> {
     check_scan(progress).ok()?;
     let bytes = reader.read(buffer).ok()?;
-    if let Some(progress) = progress { progress.read_bytes(bytes); }
+    if let Some(progress) = progress {
+        progress.read_bytes(bytes);
+    }
     Some(bytes)
 }
 
 fn open_hash_file(path: &Path, expected_size: u64) -> Option<File> {
-    let file = open_for_verification(path, false, FILE_READ_DATA, FILE_SHARE_READ | FILE_SHARE_DELETE).ok()?;
+    let file = open_for_verification(
+        path,
+        false,
+        FILE_READ_DATA,
+        FILE_SHARE_READ | FILE_SHARE_DELETE,
+    )
+    .ok()?;
     let metadata = file.metadata().ok()?;
-    (metadata.is_file() && metadata.len() == expected_size
+    (metadata.is_file()
+        && metadata.len() == expected_size
         && metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT == 0)
         .then_some(file)
 }
 
-fn sample_hash_file(path: &Path, size: u64, progress: Option<&ScanProgress>) -> Option<blake3::Hash> {
+fn sample_hash_file(
+    path: &Path,
+    size: u64,
+    progress: Option<&ScanProgress>,
+) -> Option<blake3::Hash> {
     let mut file = open_hash_file(path, size)?;
     let mut hash = blake3::Hasher::new();
     let mut buffer = [0; 4096];
@@ -1098,32 +1201,16 @@ fn full_hash(mut reader: impl Read, progress: Option<&ScanProgress>) -> Option<b
     }
 }
 
-static ORPHANS_CACHE: OnceLock<RwLock<Option<(Instant, Vec<OrphanDirEntry>)>>> = OnceLock::new();
+static ORPHANS_CACHE: TtlCache<Vec<OrphanDirEntry>> = TtlCache::new(Duration::from_secs(30));
 
 pub fn invalidate_orphans_cache() {
-    if let Some(lock) = ORPHANS_CACHE.get() {
-        if let Ok(mut w) = lock.write() {
-            *w = None;
-        }
-    }
+    ORPHANS_CACHE.invalidate();
 }
 
 /// Scans top-level AppData / ProgramData directories and flags large folders not matched
 /// against active Uninstall keys, installed AppX apps, or known Windows/vendor safelists.
 pub fn find_orphaned_app_dirs() -> Vec<OrphanDirEntry> {
-    let cache = ORPHANS_CACHE.get_or_init(|| RwLock::new(None));
-    if let Ok(guard) = cache.read() {
-        if let Some((ts, ref list)) = *guard {
-            if ts.elapsed() < Duration::from_secs(30) {
-                return list.clone();
-            }
-        }
-    }
-    let computed = compute_orphaned_app_dirs();
-    if let Ok(mut w) = cache.write() {
-        *w = Some((Instant::now(), computed.clone()));
-    }
-    computed
+    ORPHANS_CACHE.get_or_load(compute_orphaned_app_dirs)
 }
 
 fn compute_orphaned_app_dirs() -> Vec<OrphanDirEntry> {
@@ -1224,7 +1311,9 @@ fn compute_orphaned_app_dirs() -> Vec<OrphanDirEntry> {
             let lower_path = p.to_string_lossy().to_ascii_lowercase();
 
             if safelist.contains(lower_name.as_str())
-                || installed_dirs.iter().any(|id_path| lower_path.starts_with(id_path) || id_path.starts_with(&lower_path))
+                || installed_dirs.iter().any(|id_path| {
+                    lower_path.starts_with(id_path) || id_path.starts_with(&lower_path)
+                })
                 || matches_app_tokens(&lower_name, &installed_tokens, &safelist)
             {
                 continue;
@@ -1260,7 +1349,7 @@ fn compute_orphaned_app_dirs() -> Vec<OrphanDirEntry> {
         })
         .collect();
 
-    results.sort_by(|a, b| b.size_bytes.cmp(&a.size_bytes));
+    results.sort_by_key(|entry| std::cmp::Reverse(entry.size_bytes));
     results
 }
 
@@ -1301,9 +1390,21 @@ fn collect_installed_app_tokens() -> (HashSet<String>, Vec<String>) {
     let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
     let hkcu = RegKey::predef(HKEY_CURRENT_USER);
     let targets = [
-        (&hklm, r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall", KEY_READ | KEY_WOW64_64KEY),
-        (&hklm, r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall", KEY_READ | KEY_WOW64_32KEY),
-        (&hkcu, r"Software\Microsoft\Windows\CurrentVersion\Uninstall", KEY_READ),
+        (
+            &hklm,
+            r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall",
+            KEY_READ | KEY_WOW64_64KEY,
+        ),
+        (
+            &hklm,
+            r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall",
+            KEY_READ | KEY_WOW64_32KEY,
+        ),
+        (
+            &hkcu,
+            r"Software\Microsoft\Windows\CurrentVersion\Uninstall",
+            KEY_READ,
+        ),
     ];
 
     for (root, sub, sam) in targets {
@@ -1373,7 +1474,10 @@ mod tests {
 
     #[test]
     fn full_hash_checks_for_cancellation_before_reading_the_next_chunk() {
-        struct CancelAfterChunk<'a> { progress: &'a ScanProgress, reads: usize }
+        struct CancelAfterChunk<'a> {
+            progress: &'a ScanProgress,
+            reads: usize,
+        }
         impl Read for CancelAfterChunk<'_> {
             fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
                 self.reads += 1;
@@ -1383,7 +1487,10 @@ mod tests {
             }
         }
         let progress = ScanProgress::default();
-        let mut reader = CancelAfterChunk { progress: &progress, reads: 0 };
+        let mut reader = CancelAfterChunk {
+            progress: &progress,
+            reads: 0,
+        };
         assert!(full_hash(&mut reader, Some(&progress)).is_none());
         assert_eq!(reader.reads, 1);
         let snapshot = serde_json::to_value(progress.snapshot()).unwrap();
@@ -1392,7 +1499,8 @@ mod tests {
 
     #[test]
     fn test_diskmap_aggregation_extensions_and_pruning() {
-        let base = std::env::temp_dir().join(format!("dismnext_diskmap_test_{}", std::process::id()));
+        let base =
+            std::env::temp_dir().join(format!("dismnext_diskmap_test_{}", std::process::id()));
         let _ = fs::remove_dir_all(&base);
         let sub_a = base.join("Cache");
         let sub_b = base.join("beta");
@@ -1431,15 +1539,16 @@ mod tests {
         assert_eq!(snapshot["processed_files"], 3);
         assert_eq!(snapshot["phase"], "finishing");
         progress.cancel();
-        assert!(analyze_path_with_progress(&base, 2, &progress).unwrap_err().is::<crate::scan_progress::ScanCancelled>());
+        assert!(analyze_path_with_progress(&base, 2, &progress)
+            .unwrap_err()
+            .is::<crate::scan_progress::ScanCancelled>());
 
         let _ = fs::remove_dir_all(&base);
     }
 
     #[test]
     fn ntfs_allocation_counts_hard_links_once_across_directories() {
-        let root =
-            std::env::temp_dir().join(format!("dismnext_allocation_{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("dismnext_allocation_{}", std::process::id()));
         let first_dir = root.join("first");
         let second_dir = root.join("second");
         fs::create_dir(&root).unwrap();
@@ -1452,7 +1561,10 @@ mod tests {
 
         let logical = analyze_path(&root, 1).unwrap();
         assert!(logical.allocation.is_none());
-        assert!(serde_json::to_value(&logical).unwrap().get("allocation").is_none());
+        assert!(serde_json::to_value(&logical)
+            .unwrap()
+            .get("allocation")
+            .is_none());
         let measured = analyze_path_with_options(&root, 1, true, None).unwrap();
         assert_eq!(measured.total_bytes, 16_384);
         assert_eq!(measured.total_bytes, logical.total_bytes);
@@ -1462,7 +1574,8 @@ mod tests {
             hard_link_aliases,
             unmeasured_files,
             unreadable_entries,
-        } = measured.allocation.unwrap() else {
+        } = measured.allocation.unwrap()
+        else {
             panic!("Expected NTFS allocation data from the test volume");
         };
         assert!(allocated_bytes > 0);
@@ -1533,8 +1646,12 @@ mod tests {
         )));
         assert!(is_protected_recycle_target(Path::new(r"C:\Program Files")));
 
-        let sample = std::env::temp_dir().join(format!("dismnext_recycle_test_{}.tmp", std::process::id()));
-        File::create(&sample).unwrap().write_all(b"recycle_me").unwrap();
+        let sample =
+            std::env::temp_dir().join(format!("dismnext_recycle_test_{}.tmp", std::process::id()));
+        File::create(&sample)
+            .unwrap()
+            .write_all(b"recycle_me")
+            .unwrap();
         assert!(!is_protected_recycle_target(&sample));
         let freed = recycle_path(&sample).unwrap();
         assert_eq!(freed, 10);
@@ -1550,14 +1667,30 @@ mod tests {
 
         let same_payload = vec![0x5Au8; 70 * 1024];
         let diff_payload = vec![0x7Bu8; 70 * 1024];
-        File::create(base.join("a\\dup1.bin")).unwrap().write_all(&same_payload).unwrap();
-        File::create(base.join("b\\dup2.bin")).unwrap().write_all(&same_payload).unwrap();
-        File::create(base.join("b\\unique.bin")).unwrap().write_all(&diff_payload).unwrap();
+        File::create(base.join("a\\dup1.bin"))
+            .unwrap()
+            .write_all(&same_payload)
+            .unwrap();
+        File::create(base.join("b\\dup2.bin"))
+            .unwrap()
+            .write_all(&same_payload)
+            .unwrap();
+        File::create(base.join("b\\unique.bin"))
+            .unwrap()
+            .write_all(&diff_payload)
+            .unwrap();
 
         let same_second = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
         for (name, milliseconds) in [("a\\dup1.bin", 100), ("b\\dup2.bin", 900)] {
-            let file = std::fs::OpenOptions::new().write(true).open(base.join(name)).unwrap();
-            file.set_times(std::fs::FileTimes::new().set_modified(same_second + Duration::from_millis(milliseconds))).unwrap();
+            let file = std::fs::OpenOptions::new()
+                .write(true)
+                .open(base.join(name))
+                .unwrap();
+            file.set_times(
+                std::fs::FileTimes::new()
+                    .set_modified(same_second + Duration::from_millis(milliseconds)),
+            )
+            .unwrap();
         }
 
         let report = find_duplicate_files(&base, 64 * 1024).unwrap();
@@ -1565,14 +1698,18 @@ mod tests {
         assert_eq!(report.total_wasted_bytes, 70 * 1024);
         assert_eq!(report.groups[0].files.len(), 2);
         assert_eq!(report.groups[0].files[0].name, "dup2.bin");
-        assert_eq!(report.groups[0].hash_hex, blake3::hash(&same_payload).to_hex().to_string());
+        assert_eq!(
+            report.groups[0].hash_hex,
+            blake3::hash(&same_payload).to_hex().to_string()
+        );
 
         let _ = fs::remove_dir_all(&base);
     }
 
     #[test]
     fn hard_link_aliases_are_removed_before_reading_duplicate_content() {
-        let root = std::env::temp_dir().join(format!("dismnext_hardlink_dups_{}", std::process::id()));
+        let root =
+            std::env::temp_dir().join(format!("dismnext_hardlink_dups_{}", std::process::id()));
         fs::create_dir(&root).unwrap();
         let size = 72 * 1024;
         let bytes = vec![0x42; size];
@@ -1588,15 +1725,24 @@ mod tests {
         assert_eq!(counters["bytes_read"], 2 * (size + 2 * 4096));
         assert_eq!(report.total_wasted_bytes, size as u64);
         assert_eq!(report.groups[0].files.len(), 2);
-        assert!(report.groups[0].files.iter().all(|file| file.name != "z-link.bin"));
-        for path in [alias, original, copy] { fs::remove_file(path).unwrap(); }
+        assert!(report.groups[0]
+            .files
+            .iter()
+            .all(|file| file.name != "z-link.bin"));
+        for path in [alias, original, copy] {
+            fs::remove_file(path).unwrap();
+        }
         fs::remove_dir(root).unwrap();
     }
 
     #[test]
     fn largest_files_heap_preserves_rank_and_ties_across_subtrees() {
         let file = |size_bytes, name: String| LargeFileEntry {
-            path: name.clone(), name, ext: "(no ext)".into(), size_bytes, allocated_bytes: None,
+            path: name.clone(),
+            name,
+            ext: "(no ext)".into(),
+            size_bytes,
+            allocated_bytes: None,
         };
         let mut parent = LargestFiles::default();
         let mut child = LargestFiles::default();

@@ -1,3 +1,4 @@
+import { calculateSelectedBytes } from '../cleanupSelection';
 import { useMaintenance } from '../MaintenanceJobs';
 import React, { useMemo, useState } from 'react';
 import {
@@ -401,17 +402,10 @@ export const SpaceRecycleView: React.FC<Props> = ({
     [entries, selectedIds]
   );
 
-  const selectedBytes = useMemo(() => {
-    if (selectedEntries.length === 0) return 0;
-    if (!summary) return null;
-    const selected = new Set(selectedEntries.map(({ rule }) => rule.id));
-    let bytes = selectedEntries.reduce((total, { rule }) => total + rule.cleanable_bytes, 0);
-    for (const overlap of summary.overlaps) {
-      const count = overlap.rule_ids.filter((id) => selected.has(id)).length;
-      if (count > 1) bytes -= (count - 1) * overlap.cleanable_bytes;
-    }
-    return bytes;
-  }, [selectedEntries, summary]);
+  const selectedBytes = useMemo(
+    () => calculateSelectedBytes(selectedEntries, summary),
+    [selectedEntries, summary]
+  );
   const pendingScan = lang === 'zh' ? '待扫描' : 'Pending scan';
   const totalScanLabel = summary ? formatBytes(summary.cleanable_bytes) : pendingScan;
   const selectedLabel = selectedBytes === null ? pendingScan : formatBytes(selectedBytes);

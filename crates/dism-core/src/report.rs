@@ -1,6 +1,7 @@
 use crate::catalog::Catalog;
 use crate::cleaner::{scan_all_with_summary, CleanupBatchScan, CleanupScanResult};
 use crate::drivers::list_drivers;
+use crate::fmt_bytes;
 use crate::startup::{list_scheduled_tasks, list_startup_items, list_third_party_services};
 use crate::sysinfo::SystemInfo;
 use crate::systasks::get_system_task_status;
@@ -75,11 +76,12 @@ pub fn generate_health_report(
 
     let reclaimable_bytes = scans.summary.cleanable_bytes;
 
-    let mut ranked: Vec<&CleanupScanResult> = scans.items
+    let mut ranked: Vec<&CleanupScanResult> = scans
+        .items
         .iter()
         .filter(|r| r.cleanable_bytes > 0)
         .collect();
-    ranked.sort_by(|a, b| b.cleanable_bytes.cmp(&a.cleanable_bytes));
+    ranked.sort_by_key(|entry| std::cmp::Reverse(entry.cleanable_bytes));
     let top_cleanup_rules: Vec<ReportRuleSummary> = ranked
         .into_iter()
         .take(10)
@@ -110,8 +112,15 @@ pub fn generate_health_report(
     md.push_str("# DismNext 系统健康诊断与空间体检报告\n\n");
     md.push_str(&format!("- **生成时间**：`{}`\n", generated_at));
     md.push_str(&format!("- **系统环境**：{}\n", os_summary));
-    md.push_str(&format!("- **规则库基线**：`{}`（{} 条规则）\n", catalog.base_version, catalog.cleanup_rules.len()));
-    md.push_str(&format!("- **综合健康评分**：**{} / 100**\n\n", health_score));
+    md.push_str(&format!(
+        "- **规则库基线**：`{}`（{} 条规则）\n",
+        catalog.base_version,
+        catalog.cleanup_rules.len()
+    ));
+    md.push_str(&format!(
+        "- **综合健康评分**：**{} / 100**\n\n",
+        health_score
+    ));
 
     md.push_str("## 1. 磁盘与可释放空间概览\n\n");
     md.push_str(&format!(
@@ -121,10 +130,17 @@ pub fn generate_health_report(
         fmt_bytes(sys.system_disk.total_bytes),
         fmt_bytes(sys.system_disk.free_bytes)
     ));
-    md.push_str(&format!("- **可安全回收垃圾**：**{}**\n", fmt_bytes(reclaimable_bytes)));
+    md.push_str(&format!(
+        "- **可安全回收垃圾**：**{}**\n",
+        fmt_bytes(reclaimable_bytes)
+    ));
     md.push_str(&format!(
         "- **CompactOS 系统压缩**：{}\n",
-        if task_status.compact_os_enabled { "已开启" } else { "未开启" }
+        if task_status.compact_os_enabled {
+            "已开启"
+        } else {
+            "未开启"
+        }
     ));
     md.push_str(&format!(
         "- **过期重复驱动包**：{} 个（{}）\n",
@@ -138,10 +154,25 @@ pub fn generate_health_report(
     ));
 
     md.push_str("## 2. 启动项、后台服务与应用分布\n\n");
-    md.push_str(&format!("- **开机自启项（启用中）**：{} / {}\n", enabled_startups, startups.len()));
-    md.push_str(&format!("- **第三方自启动服务**：{} / {}\n", auto_services, services.len()));
-    md.push_str(&format!("- **已启用非系统计划任务**：{} / {}\n", enabled_tasks, tasks.len()));
-    md.push_str(&format!("- **已安装桌面软件（Win32/MSI）**：{} 款\n\n", win32_apps.len()));
+    md.push_str(&format!(
+        "- **开机自启项（启用中）**：{} / {}\n",
+        enabled_startups,
+        startups.len()
+    ));
+    md.push_str(&format!(
+        "- **第三方自启动服务**：{} / {}\n",
+        auto_services,
+        services.len()
+    ));
+    md.push_str(&format!(
+        "- **已启用非系统计划任务**：{} / {}\n",
+        enabled_tasks,
+        tasks.len()
+    ));
+    md.push_str(&format!(
+        "- **已安装桌面软件（Win32/MSI）**：{} 款\n\n",
+        win32_apps.len()
+    ));
 
     if !top_cleanup_rules.is_empty() {
         md.push_str("## 3. Top 可清理大项明细\n\n");
@@ -226,7 +257,8 @@ fn compute_health_score(
         let free_ratio = sys.system_disk.free_bytes as f64 / sys.system_disk.total_bytes as f64;
         if free_ratio < 0.10 {
             score -= 20;
-            notes.push("系统盘可用空间低于 10%，强烈建议立即执行空间回收或清理大文件。".to_string());
+            notes
+                .push("系统盘可用空间低于 10%，强烈建议立即执行空间回收或清理大文件。".to_string());
         } else if free_ratio < 0.20 {
             score -= 10;
             notes.push("系统盘可用空间偏低（< 20%），建议定期释放缓存空间。".to_string());
@@ -412,7 +444,11 @@ fn render_html_report(
         tk_on = enabled_tasks,
         tk_tot = total_tasks,
         apps = installed_win32_apps,
-        compact = if compact_os_enabled { "已开启" } else { "未开启" },
+        compact = if compact_os_enabled {
+            "已开启"
+        } else {
+            "未开启"
+        },
         rows = rows_html,
         notes = notes_html,
     )
@@ -423,22 +459,6 @@ fn escape_html(s: &str) -> String {
         .replace('<', "&lt;")
         .replace('>', "&gt;")
         .replace('"', "&quot;")
-}
-
-fn fmt_bytes(b: u64) -> String {
-    const KB: f64 = 1024.0;
-    const MB: f64 = KB * 1024.0;
-    const GB: f64 = MB * 1024.0;
-    let f = b as f64;
-    if f >= GB {
-        format!("{:.2} GB", f / GB)
-    } else if f >= MB {
-        format!("{:.2} MB", f / MB)
-    } else if f >= KB {
-        format!("{:.1} KB", f / KB)
-    } else {
-        format!("{} B", b)
-    }
 }
 
 #[cfg(test)]
@@ -454,7 +474,9 @@ mod tests {
         assert!(report.health_score <= 100);
         assert!(report.disk_total_bytes > 0);
         assert_eq!(report.reclaimable_bytes, 42);
-        assert!(report.markdown.contains("DismNext 系统健康诊断与空间体检报告"));
+        assert!(report
+            .markdown
+            .contains("DismNext 系统健康诊断与空间体检报告"));
         assert!(report.html.contains("<!DOCTYPE html>"));
         assert!(report.html.contains("DismNext 系统健康体检报告"));
     }

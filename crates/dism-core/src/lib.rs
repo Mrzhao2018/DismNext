@@ -4,6 +4,7 @@ pub mod cleaner;
 mod com;
 mod disk_allocation;
 pub mod diskmap;
+mod display;
 pub mod drivers;
 pub mod duplicate_recycle;
 pub mod evaluator;
@@ -21,9 +22,11 @@ pub mod rescue;
 pub mod scan_progress;
 pub mod snapshot;
 pub mod startup;
+mod storage;
 pub mod sysinfo;
 pub mod systasks;
 pub mod system_tools;
+mod ttl_cache;
 pub mod uninstaller;
 
 pub use appx::{list_appx_packages, remove_appx_package, AppxCategory, AppxPackageInfo};
@@ -37,6 +40,7 @@ pub use diskmap::{
     DiskAnalysisReport, DiskPreset, DiskTreeNode, DuplicateFileEntry, DuplicateGroup,
     DuplicateScanReport, OrphanDirEntry,
 };
+pub use display::fmt_bytes;
 pub use drivers::{
     default_backup_dir, delete_driver, export_drivers, list_drivers, DriverBackupReport,
     DriverPackageInfo,
@@ -50,10 +54,10 @@ pub use lockcheck::{
     LockingProcessInfo,
 };
 pub use optimizer::{
-    apply_optimization, apply_optimization_batch, evaluate_all_groups,
-    export_optimization_profile, get_optimization_presets, ApplyOutcome, ApplyValue,
-    BatchApplyOutcome, OptimizationGroupStatus, OptimizationItemStatus, OptimizationPreset,
-    OptimizationProfile, OptimizationProfileEntry, ScopeName, ScopeStatus,
+    apply_optimization, apply_optimization_batch, evaluate_all_groups, export_optimization_profile,
+    get_optimization_presets, ApplyOutcome, ApplyValue, BatchApplyOutcome, OptimizationGroupStatus,
+    OptimizationItemStatus, OptimizationPreset, OptimizationProfile, OptimizationProfileEntry,
+    ScopeName, ScopeStatus,
 };
 pub use report::{generate_health_report, HealthReportPayload, ReportRuleSummary};
 pub use rescue::{
