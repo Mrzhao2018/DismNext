@@ -26,7 +26,7 @@ use dism_core::startup::{
     inspect_startup_item, list_scheduled_tasks, list_startup_items, list_third_party_services,
     set_scheduled_task_enabled, set_service_start_mode, set_startup_enabled,
 };
-use dism_core::sysinfo::relaunch_as_admin;
+use dism_core::sysinfo::{is_administrator, open_in_browser, relaunch_as_admin};
 use dism_core::systasks::{get_system_task_status, run_system_task};
 use dism_core::uninstaller::{
     launch_win32_uninstaller, list_win32_apps, recycle_app_leftovers, scan_reviewable_app_leftovers,
@@ -35,8 +35,8 @@ use dism_core::uninstaller::{
 use dism_core::{Catalog, CustomRuleInput, SnapshotManager, SystemInfo};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::fs;
 use std::hash::{BuildHasher, RandomState};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex, MutexGuard, RwLock};
@@ -45,7 +45,13 @@ use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
 
 include!(concat!(env!("OUT_DIR"), "/embedded_ui.rs"));
 
+mod request_security;
 mod scan_jobs;
+mod static_files;
+use request_security::{
+    add_cors_headers, header_value, new_session_token, verify_request, Session,
+    SESSION_EXCHANGE_PATH, SESSION_HEADER,
+};
 use scan_jobs::{ScanBusy, ScanJobs};
 
 #[derive(Parser)]
@@ -62,10 +68,17 @@ struct Args {
 
     #[arg(long)]
     ui_dir: Option<PathBuf>,
+
+    /// Allow the Vite origin when running a non-elevated debug host.
+    #[arg(long)]
+    dev_origin: bool,
 }
 
 struct AppState {
     port: u16,
+    session: Session,
+    dev_origin: bool,
+    catalog_path: Option<PathBuf>,
     catalog: RwLock<Catalog>,
     snap_mgr: SnapshotManager,
     scan_cache: RwLock<CleanupScanCache>,
@@ -77,6 +90,18 @@ struct AppState {
 
 const FULL_SCAN_TTL: Duration = Duration::from_secs(60);
 const CLEANUP_REVIEW_TTL: Duration = Duration::from_secs(5 * 60);
+const MAX_HTTP_BODY: usize = 4 * 1024 * 1024;
+
+#[derive(Debug)]
+struct HttpBodyTooLarge;
+
+impl std::fmt::Display for HttpBodyTooLarge {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "HTTP request body exceeds {MAX_HTTP_BODY} bytes")
+    }
+}
+
+impl std::error::Error for HttpBodyTooLarge {}
 
 #[derive(Default)]
 struct CleanupReviewSlot {
@@ -257,7 +282,9 @@ struct SysTaskRunReq {
 
 #[derive(Deserialize)]
 struct TerminatePidReq {
+    path: String,
     pid: u32,
+    process_start_time: String,
 }
 
 #[derive(Deserialize)]
@@ -346,12 +373,30 @@ struct ErrorPayload {
 
 fn main() -> Result<()> {
     let args = Args::parse();
-    let catalog = Catalog::load(args.catalog.as_deref())?;
+    let is_admin = is_administrator();
+    anyhow::ensure!(
+        !args.dev_origin || (cfg!(debug_assertions) && !is_admin),
+        "--dev-origin requires a non-elevated debug build"
+    );
+    let catalog_path = args
+        .catalog
+        .as_deref()
+        .map(std::fs::canonicalize)
+        .transpose()?;
+    let catalog = Catalog::load(catalog_path.as_deref())?;
     let snap_mgr = SnapshotManager::new(SnapshotManager::default_dir());
-    let ui_dir = resolve_ui_dir(args.ui_dir);
+    let ui_dir = resolve_ui_dir(args.ui_dir, args.dev_origin)?;
+    let launch_token = if args.no_window {
+        None
+    } else {
+        Some(new_session_token()?)
+    };
 
     let state = Arc::new(AppState {
         port: args.port,
+        session: Session::new(launch_token.clone())?,
+        dev_origin: args.dev_origin,
+        catalog_path,
         catalog: RwLock::new(catalog),
         snap_mgr,
         scan_cache: RwLock::new(CleanupScanCache::default()),
@@ -376,8 +421,12 @@ fn main() -> Result<()> {
         println!("UI assets not found; serving API endpoints only.");
     }
 
-    if !args.no_window {
-        launch_desktop_window(&url);
+    match launch_token {
+        Some(token) => launch_desktop_window(&format!("{url}/#launch={token}"))?,
+        None => println!(
+            "DismNext session URL: {url}/#token={}",
+            state.session.api_token()
+        ),
     }
 
     // Pre-warm static system metadata, driver cache, system task status, and scheduled tasks
@@ -414,99 +463,131 @@ fn bind_with_retry(addr: &str) -> Result<Server> {
     Err(anyhow::anyhow!("Failed to bind {}: {}", addr, last_err))
 }
 
-fn resolve_ui_dir(explicit: Option<PathBuf>) -> Option<PathBuf> {
+fn resolve_ui_dir(explicit: Option<PathBuf>, dev_origin: bool) -> Result<Option<PathBuf>> {
     if let Some(p) = explicit {
-        if p.join("index.html").exists() {
-            return Some(p);
-        }
+        let dir = p.canonicalize()?;
+        anyhow::ensure!(
+            dir.join("index.html").is_file(),
+            "UI directory has no index.html"
+        );
+        return Ok(Some(dir));
     }
-    if !EMBEDDED_UI_ASSETS.is_empty() {
-        return None;
+    let local_dist = Path::new("ui/dist");
+    if dev_origin && EMBEDDED_UI_ASSETS.is_empty() && local_dist.join("index.html").is_file() {
+        return Ok(Some(local_dist.canonicalize()?));
     }
-    let mut candidates = vec![PathBuf::from("ui/dist")];
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            candidates.push(dir.join("ui/dist"));
-            candidates.push(dir.join("../../ui/dist"));
-            candidates.push(dir.join("../../../ui/dist"));
-        }
-    }
-    candidates.into_iter().find(|p| p.join("index.html").exists())
+    Ok(None)
 }
 
-fn launch_desktop_window(url: &str) {
+fn launch_desktop_window(url: &str) -> Result<()> {
     let edge_candidates = [
         r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
         r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
     ];
     for edge in edge_candidates {
-        if Path::new(edge).exists() {
-            let _ = Command::new(edge)
+        if Path::new(edge).exists()
+            && Command::new(edge)
+                .current_dir(Path::new(edge).parent().unwrap())
                 .arg(format!("--app={}", url))
                 .arg("--window-size=1320,860")
-                .spawn();
-            return;
+                .spawn()
+                .is_ok()
+        {
+            return Ok(());
         }
     }
-    let _ = Command::new("cmd").args(["/C", "start", "", url]).spawn();
+    open_in_browser(url)
 }
 
 fn handle_request(mut req: Request, state: &Arc<AppState>) {
-    let origin_header = header_value(&req, "origin");
-    if let Err(reason) = verify_request_security(&req, state.port) {
-        let mut resp = Response::from_string(
-            serde_json::json!({ "error": reason }).to_string(),
-        )
-        .with_status_code(StatusCode(403));
-        if let Ok(h) = Header::from_bytes("Content-Type", "application/json; charset=utf-8") {
-            resp.add_header(h);
-        }
-        let _ = req.respond(resp);
-        return;
-    }
-
-    if req.method() == &Method::Options {
-        let mut resp = Response::empty(StatusCode(204));
-        add_cors_headers(&mut resp, state.port, origin_header.as_deref());
-        let _ = req.respond(resp);
-        return;
-    }
-
+    let origin_header = header_value(&req, "origin").map(str::to_owned);
     let raw_url = req.url().to_string();
     let (path, query) = match raw_url.split_once('?') {
         Some((p, q)) => (p, q),
         None => (raw_url.as_str(), ""),
     };
+    let origin = origin_header.as_deref();
+    if let Err(reason) = verify_request(
+        &req,
+        path,
+        state.port,
+        state.dev_origin,
+        state.session.api_token(),
+    ) {
+        respond_json(
+            req,
+            StatusCode(403),
+            &ErrorPayload {
+                error: reason.into(),
+            },
+            state,
+            origin,
+        );
+        return;
+    }
 
-    if path.starts_with("/api/") {
-        let result = dispatch_api(&mut req, path, query, state);
-        match result {
-            Ok(json_val) => respond_json(
+    if req.method() == &Method::Options {
+        let mut resp = Response::empty(StatusCode(204));
+        add_cors_headers(&mut resp, state.port, state.dev_origin, origin);
+        let _ = req.respond(resp);
+        return;
+    }
+
+    if req.method() == &Method::Post && path == SESSION_EXCHANGE_PATH {
+        if req.body_length().unwrap_or(0) != 0
+            || req
+                .headers()
+                .iter()
+                .any(|header| header.field.equiv("Transfer-Encoding"))
+        {
+            let body = ErrorPayload {
+                error: "Session exchange requires an empty request body".into(),
+            };
+            respond_json(req, StatusCode(400), &body, state, origin);
+        } else if let Some(token) = state.session.exchange(header_value(&req, SESSION_HEADER)) {
+            respond_json(
                 req,
                 StatusCode(200),
-                &json_val,
-                state.port,
-                origin_header.as_deref(),
-            ),
+                &serde_json::json!({ "token": token }),
+                state,
+                origin,
+            );
+        } else {
+            let body = ErrorPayload {
+                error: "Invalid or expired DismNext launch token".into(),
+            };
+            respond_json(req, StatusCode(403), &body, state, origin);
+        }
+        return;
+    }
+
+    if path.starts_with("/api/") {
+        let result = if req.body_length().is_some_and(|len| len > MAX_HTTP_BODY) {
+            Err(HttpBodyTooLarge.into())
+        } else {
+            dispatch_api(&mut req, path, query, state)
+        };
+        match result {
+            Ok(json_val) => respond_json(req, StatusCode(200), &json_val, state, origin),
             Err(err) => {
-                let code = if err.is::<ScanBusy>() || err.is::<CleanupReviewUnavailable>() { 409 } else { 400 };
+                let code = if err.is::<HttpBodyTooLarge>() {
+                    413
+                } else if err.is::<ScanBusy>() || err.is::<CleanupReviewUnavailable>() {
+                    409
+                } else {
+                    400
+                };
                 let body = ErrorPayload {
                     error: err.to_string(),
                 };
-                respond_json(
-                    req,
-                    StatusCode(code),
-                    &body,
-                    state.port,
-                    origin_header.as_deref(),
-                );
+                respond_json(req, StatusCode(code), &body, state, origin);
             }
         }
         return;
     }
 
     if let Some(ref ui_dir) = state.ui_dir {
-        serve_static(req, ui_dir, path);
+        static_files::serve(req, ui_dir, path);
     } else if !EMBEDDED_UI_ASSETS.is_empty() {
         serve_embedded(req, path);
     } else {
@@ -514,7 +595,7 @@ fn handle_request(mut req: Request, state: &Arc<AppState>) {
             "DismNext API Server is running. Run `npm run build` in ui/ to enable GUI.",
         )
         .with_status_code(StatusCode(200));
-        add_cors_headers(&mut resp, state.port, origin_header.as_deref());
+        add_cors_headers(&mut resp, state.port, state.dev_origin, origin);
         let _ = req.respond(resp);
     }
 }
@@ -644,14 +725,16 @@ fn dispatch_api(
             if sys.is_admin {
                 return Ok(serde_json::json!({ "already_admin": true, "relaunching": false }));
             }
-            let mut extra_args = vec![
-                "--port".to_string(),
-                state.port.to_string(),
-                "--no-window".to_string(),
-            ];
-            if let Some(ref ui) = state.ui_dir {
-                extra_args.push("--ui-dir".to_string());
-                extra_args.push(ui.to_string_lossy().into_owned());
+            let mut extra_args = vec!["--port".to_string(), state.port.to_string()];
+            if let Some(ref catalog) = state.catalog_path {
+                extra_args.push("--catalog".to_string());
+                extra_args.push(catalog.to_string_lossy().into_owned());
+            }
+            if !state.dev_origin {
+                if let Some(ref ui) = state.ui_dir {
+                    extra_args.push("--ui-dir".to_string());
+                    extra_args.push(ui.to_string_lossy().into_owned());
+                }
             }
             relaunch_as_admin(&extra_args)?;
             std::thread::spawn(|| {
@@ -741,6 +824,18 @@ fn dispatch_api(
         (&Method::Post, "/api/cleanup/custom/save") => {
             let payload: CustomRuleInput = read_json_body(req)?;
             let _operation = state.begin_cleanup_mutation();
+            if let Some(id) = payload.id.as_deref().map(str::trim) {
+                anyhow::ensure!(
+                    !state
+                        .catalog
+                        .read()
+                        .unwrap()
+                        .cleanup_rules
+                        .iter()
+                        .any(|rule| rule.id == id && rule.source != "custom"),
+                    "Cannot replace a catalog cleanup rule"
+                );
+            }
             let saved = Catalog::save_custom_rule(payload)?;
             let scanned = scan_rule_preview(&saved, &sys);
             let mut cat = state.catalog.write().unwrap();
@@ -762,7 +857,8 @@ fn dispatch_api(
             let _operation = state.begin_cleanup_mutation();
             Catalog::delete_custom_rule(&payload.rule_id)?;
             let mut cat = state.catalog.write().unwrap();
-            cat.cleanup_rules.retain(|r| r.id != payload.rule_id);
+            cat.cleanup_rules
+                .retain(|r| r.id != payload.rule_id || r.source != "custom");
             let mut cache = state.scan_cache.write().unwrap();
             cache.rules.remove(&payload.rule_id);
             let items = cleanup_rules_stub_list(&cat, &cache.rules, &sys);
@@ -825,7 +921,9 @@ fn dispatch_api(
             if !target.exists() {
                 return Err(anyhow::anyhow!("Path does not exist: {}", payload.path));
             }
-            let _ = Command::new("explorer.exe")
+            let windows_dir = dism_core::system_tools::windows_dir()?;
+            let _ = Command::new(windows_dir.join("explorer.exe"))
+                .current_dir(windows_dir)
                 .arg(format!("/select,{}", target.to_string_lossy()))
                 .spawn();
             Ok(serde_json::json!({ "ok": true }))
@@ -949,7 +1047,11 @@ fn dispatch_api(
         }
         (&Method::Post, "/api/lockcheck/terminate") => {
             let payload: TerminatePidReq = read_json_body(req)?;
-            let message = terminate_locking_process(payload.pid)?;
+            let message = terminate_locking_process(
+                Path::new(payload.path.trim()),
+                payload.pid,
+                payload.process_start_time.parse()?,
+            )?;
             Ok(serde_json::json!({ "ok": true, "message": message }))
         }
         (&Method::Get, "/api/startup/services") => {
@@ -1187,35 +1289,6 @@ fn drivers_list_payload() -> serde_json::Value {
     })
 }
 
-fn serve_static(req: Request, ui_dir: &Path, url_path: &str) {
-    let rel = url_path.trim_start_matches('/');
-    let rel_clean = if rel.is_empty() { "index.html" } else { rel };
-    // Reject path traversal
-    if rel_clean.contains("..") {
-        let _ = req.respond(Response::empty(StatusCode(403)));
-        return;
-    }
-
-    let mut target = ui_dir.join(rel_clean);
-    if !target.exists() || target.is_dir() {
-        target = ui_dir.join("index.html");
-    }
-
-    match fs::read(&target) {
-        Ok(bytes) => {
-            let mime = content_type_for(&target);
-            let mut resp = Response::from_data(bytes).with_status_code(StatusCode(200));
-            if let Ok(h) = Header::from_bytes("Content-Type", mime) {
-                resp.add_header(h);
-            }
-            let _ = req.respond(resp);
-        }
-        Err(_) => {
-            let _ = req.respond(Response::empty(StatusCode(404)));
-        }
-    }
-}
-
 fn content_type_for(path: &Path) -> &'static str {
     match path.extension().and_then(|e| e.to_str()).unwrap_or("") {
         "html" => "text/html; charset=utf-8",
@@ -1231,9 +1304,14 @@ fn content_type_for(path: &Path) -> &'static str {
 }
 
 fn read_json_body<T: serde::de::DeserializeOwned>(req: &mut Request) -> Result<T> {
-    let mut body = String::new();
-    req.as_reader().read_to_string(&mut body)?;
-    Ok(serde_json::from_str(&body)?)
+    let mut body = Vec::new();
+    req.as_reader()
+        .take(MAX_HTTP_BODY as u64 + 1)
+        .read_to_end(&mut body)?;
+    if body.len() > MAX_HTTP_BODY {
+        return Err(HttpBodyTooLarge.into());
+    }
+    Ok(serde_json::from_slice(&body)?)
 }
 
 fn parse_query_param(query: &str, key: &str) -> Option<String> {
@@ -1251,7 +1329,7 @@ fn respond_json<T: Serialize>(
     req: Request,
     status: StatusCode,
     val: &T,
-    port: u16,
+    state: &AppState,
     origin: Option<&str>,
 ) {
     let text = serde_json::to_string(val).unwrap_or_else(|_| "{}".to_string());
@@ -1259,80 +1337,17 @@ fn respond_json<T: Serialize>(
     if let Ok(h) = Header::from_bytes("Content-Type", "application/json; charset=utf-8") {
         resp.add_header(h);
     }
-    add_cors_headers(&mut resp, port, origin);
+    if let Ok(header) = Header::from_bytes("Cache-Control", "no-store") {
+        resp.add_header(header);
+    }
+    add_cors_headers(&mut resp, state.port, state.dev_origin, origin);
     let _ = req.respond(resp);
-}
-
-fn header_value(req: &Request, name_lower: &str) -> Option<String> {
-    req.headers()
-        .iter()
-        .find(|h| h.field.as_str().as_str().eq_ignore_ascii_case(name_lower))
-        .map(|h| h.value.as_str().trim().to_string())
-}
-
-fn is_allowed_host(host: &str, port: u16) -> bool {
-    let lower = host.trim().to_ascii_lowercase();
-    lower == format!("127.0.0.1:{}", port)
-        || lower == format!("localhost:{}", port)
-        || lower == "127.0.0.1"
-        || lower == "localhost"
-}
-
-fn is_allowed_origin(origin: &str, port: u16) -> bool {
-    let lower = origin.trim().trim_end_matches('/').to_ascii_lowercase();
-    lower == format!("http://127.0.0.1:{}", port)
-        || lower == format!("http://localhost:{}", port)
-        || lower == "http://127.0.0.1:5173"
-        || lower == "http://localhost:5173"
-}
-
-fn verify_request_security(req: &Request, port: u16) -> std::result::Result<(), String> {
-    if let Some(host) = header_value(req, "host") {
-        if !is_allowed_host(&host, port) {
-            return Err(format!("Blocked untrusted Host header: {}", host));
-        }
-    }
-    if let Some(origin) = header_value(req, "origin") {
-        if !is_allowed_origin(&origin, port) {
-            return Err(format!("Blocked untrusted Origin header: {}", origin));
-        }
-    }
-    if req.method() == &Method::Post && req.url().starts_with("/api/") {
-        let token_ok = header_value(req, "x-dismnext-client")
-            .map(|v| v == "1")
-            .unwrap_or(false);
-        if !token_ok {
-            return Err("Missing required X-DismNext-Client CSRF protection header".to_string());
-        }
-    }
-    Ok(())
-}
-
-fn add_cors_headers<R: std::io::Read>(resp: &mut Response<R>, port: u16, origin: Option<&str>) {
-    let allowed_origin = match origin {
-        Some(o) if is_allowed_origin(o, port) => o.to_string(),
-        _ => format!("http://127.0.0.1:{}", port),
-    };
-    if let Ok(h) = Header::from_bytes("Access-Control-Allow-Origin", allowed_origin.as_bytes()) {
-        resp.add_header(h);
-    }
-    if let Ok(h) = Header::from_bytes("Vary", "Origin") {
-        resp.add_header(h);
-    }
-    if let Ok(h) = Header::from_bytes("Access-Control-Allow-Methods", "GET, POST, OPTIONS") {
-        resp.add_header(h);
-    }
-    if let Ok(h) = Header::from_bytes(
-        "Access-Control-Allow-Headers",
-        "Content-Type, X-DismNext-Client",
-    ) {
-        resp.add_header(h);
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::request_security::{is_allowed_host, is_allowed_origin};
 
     #[test]
     fn cleanup_reviews_are_single_use_and_expire() {
@@ -1384,9 +1399,14 @@ mod tests {
         assert!(!is_allowed_host("evil.example.com:9527", 9527));
         assert!(!is_allowed_host("127.0.0.1:9999", 9527));
 
-        assert!(is_allowed_origin("http://127.0.0.1:9527", 9527));
-        assert!(is_allowed_origin("http://localhost:9527/", 9527));
-        assert!(!is_allowed_origin("https://evil.example.com", 9527));
-        assert!(!is_allowed_origin("null", 9527));
+        assert!(is_allowed_origin("http://127.0.0.1:9527", 9527, false));
+        assert!(is_allowed_origin("http://localhost:9527", 9527, false));
+        assert!(!is_allowed_origin("http://localhost:5173", 9527, false));
+        assert_eq!(
+            is_allowed_origin("http://localhost:5173", 9527, true),
+            cfg!(debug_assertions)
+        );
+        assert!(!is_allowed_origin("https://evil.example.com", 9527, false));
+        assert!(!is_allowed_origin("null", 9527, false));
     }
 }

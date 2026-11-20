@@ -14,12 +14,14 @@ use crate::systasks::get_system_task_status;
 use crate::uninstaller::{list_win32_apps, scan_app_leftovers};
 use anyhow::{anyhow, Result};
 use serde_json::{json, Value};
-use std::io::{BufRead, BufReader, BufWriter, Write};
+use std::io::{BufRead, BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 
 const SERVER_NAME: &str = "dismnext-mcp";
 const SERVER_VERSION: &str = "2.0.0";
 const DEFAULT_PROTOCOL_VERSION: &str = "2024-11-05";
+const MAX_MCP_BODY: usize = 16 * 1024 * 1024;
+const MAX_MCP_HEADERS: usize = 8 * 1024;
 
 enum FramingMode {
     Newline,
@@ -63,37 +65,52 @@ fn read_next_message<R: BufRead>(reader: &mut R) -> Result<Option<(String, Frami
     let mut first_line = String::new();
     loop {
         first_line.clear();
-        let n = reader.read_line(&mut first_line)?;
+        let n = (&mut *reader)
+            .take((MAX_MCP_BODY + 3) as u64)
+            .read_line(&mut first_line)?;
         if n == 0 {
             return Ok(None);
         }
-        let trimmed = first_line.trim();
+        let line = first_line.strip_suffix('\n').unwrap_or(&first_line);
+        let line = line.strip_suffix('\r').unwrap_or(line);
+        if n == MAX_MCP_BODY + 3 || line.len() > MAX_MCP_BODY {
+            return Err(anyhow!("MCP message exceeds {MAX_MCP_BODY} bytes"));
+        }
+        let trimmed = line.trim();
         if trimmed.is_empty() {
             continue;
         }
 
         if let Some(rest) = strip_ascii_prefix_ci(trimmed, "content-length:") {
-            let mut content_len: usize = rest
+            let content_len: usize = rest
                 .trim()
                 .parse()
-                .map_err(|_| anyhow!("Invalid Content-Length header: {}", trimmed))?;
+                .map_err(|_| anyhow!("Invalid MCP Content-Length header"))?;
+            if content_len > MAX_MCP_BODY {
+                return Err(anyhow!("MCP message exceeds {MAX_MCP_BODY} bytes"));
+            }
 
             let mut header_line = String::new();
+            let mut remaining_headers = MAX_MCP_HEADERS
+                .checked_sub(n)
+                .ok_or_else(|| anyhow!("MCP headers exceed {MAX_MCP_HEADERS} bytes"))?;
             loop {
                 header_line.clear();
-                let hn = reader.read_line(&mut header_line)?;
+                let hn = (&mut *reader)
+                    .take(remaining_headers as u64 + 1)
+                    .read_line(&mut header_line)?;
                 if hn == 0 {
                     return Err(anyhow!("Unexpected EOF while reading MCP headers"));
                 }
+                remaining_headers = remaining_headers
+                    .checked_sub(hn)
+                    .ok_or_else(|| anyhow!("MCP headers exceed {MAX_MCP_HEADERS} bytes"))?;
                 let ht = header_line.trim();
                 if ht.is_empty() {
                     break;
                 }
-                if let Some(more_len) = strip_ascii_prefix_ci(ht, "content-length:") {
-                    content_len = more_len
-                        .trim()
-                        .parse()
-                        .map_err(|_| anyhow!("Invalid Content-Length header: {}", ht))?;
+                if strip_ascii_prefix_ci(ht, "content-length:").is_some() {
+                    return Err(anyhow!("Duplicate MCP Content-Length header"));
                 }
             }
 
@@ -888,6 +905,25 @@ fn resolve_snapshot_dir() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rejects_oversized_messages_in_both_framing_modes() {
+        let header = format!("Content-Length: {}\r\n\r\n", MAX_MCP_BODY + 1);
+        let framed = read_next_message(&mut header.as_bytes());
+        assert!(framed
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("MCP message exceeds"));
+
+        let mut line = BufReader::new(std::io::repeat(b'x').take(MAX_MCP_BODY as u64 + 1));
+        let unframed = read_next_message(&mut line);
+        assert!(unframed
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("MCP message exceeds"));
+    }
 
     fn test_catalog() -> Catalog {
         Catalog::load(None).expect("embedded catalog should load")

@@ -4,7 +4,6 @@ use std::collections::HashSet;
 use std::fs;
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::{OnceLock, RwLock};
 use std::time::{Duration, Instant};
 use winreg::enums::{HKEY_LOCAL_MACHINE, HKEY_USERS, KEY_READ, KEY_WOW64_32KEY, KEY_WOW64_64KEY};
@@ -113,10 +112,13 @@ pub fn query_compact_os() -> (bool, String) {
 }
 
 fn query_compact_os_uncached() -> (bool, String) {
-    let Ok(output) = Command::new("compact.exe")
-        .creation_flags(CREATE_NO_WINDOW)
-        .arg("/CompactOS:query")
-        .output()
+    let Ok(output) =
+        crate::system_tools::system32_command("compact.exe").and_then(|mut command| {
+            command
+                .creation_flags(CREATE_NO_WINDOW)
+                .arg("/CompactOS:query")
+                .output()
+        })
     else {
         return (false, "Unable to query CompactOS state".to_string());
     };
@@ -416,7 +418,7 @@ pub fn run_system_task(task_id: &str) -> Result<SystemTaskExecOutcome> {
 }
 
 fn exec_cmd(program: &str, args: &[&str]) -> Result<String> {
-    let output = Command::new(program)
+    let output = crate::system_tools::system32_command(program)?
         .creation_flags(CREATE_NO_WINDOW)
         .args(args)
         .output()

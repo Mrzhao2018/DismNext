@@ -180,6 +180,7 @@ const AppShell: React.FC<{
   const scanning = Boolean(cleanupScan.active);
   const [scanError, setScanError] = useState<string | null>(null);
   const [elevating, setElevating] = useState(false);
+  const [elevationRelaunching, setElevationRelaunching] = useState(false);
   const [elevateErr, setElevateErr] = useState<string | null>(null);
 
   const handleElevate = async () => {
@@ -188,22 +189,8 @@ const AppShell: React.FC<{
     try {
       const res = await api.elevate();
       if (res.relaunching) {
-        // Poll until elevated backend binds the port and responds with is_admin=true
-        for (let i = 0; i < 25; i++) {
-          await new Promise((r) => setTimeout(r, 300));
-          try {
-            const sys = await api.getSysInfo();
-            if (sys.system.is_admin) {
-              setSysPayload(sys);
-              void cleanup.reload();
-              void refreshSnapshots();
-              if (tab === 'optimize') void optimizer.reload();
-              return;
-            }
-          } catch {
-            // Backend is restarting during UAC handoff
-          }
-        }
+        setElevationRelaunching(true);
+        return;
       }
       setSysPayload(await api.getSysInfo());
     } catch (e) {
@@ -401,7 +388,7 @@ const AppShell: React.FC<{
                     <Button
                       size="small"
                       appearance="primary"
-                      disabled={elevating}
+                      disabled={elevating || elevationRelaunching}
                       onClick={handleElevate}
                     >
                       {elevating
@@ -412,6 +399,11 @@ const AppShell: React.FC<{
                         ? '一键提权为管理员'
                         : 'Elevate to Admin'}
                     </Button>
+                  )}
+                  {elevationRelaunching && (
+                    <Text size={100}>
+                      {lang === 'zh' ? '请在新打开的管理员窗口中继续。' : 'Continue in the new administrator window.'}
+                    </Text>
                   )}
                   {elevateErr && (
                     <Text size={100} style={{ color: tokens.colorPaletteRedForeground1 }}>

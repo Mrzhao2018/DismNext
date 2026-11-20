@@ -1,4 +1,6 @@
-use anyhow::{anyhow, Context, Result};
+use crate::diskmap::is_protected_recycle_target;
+use crate::evaluator::expand_expression;
+use anyhow::{anyhow, ensure, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -219,7 +221,7 @@ pub struct Catalog {
 }
 
 impl Catalog {
-    /// Loads catalog from an explicit path, `catalog/rules.json` in CWD/exe dir, or embedded JSON fallback,
+    /// Loads an explicit catalog or the embedded baseline,
     /// and merges user-defined rules from `data/custom_rules.json`.
     pub fn load(explicit_path: Option<&Path>) -> Result<Self> {
         let mut catalog: Self = if let Some(p) = explicit_path {
@@ -228,41 +230,14 @@ impl Catalog {
             serde_json::from_str(&text)
                 .with_context(|| format!("Failed to parse catalog JSON at {}", p.display()))?
         } else {
-            let candidates = [
-                Path::new("catalog/rules.json").to_path_buf(),
-                std::env::current_exe()
-                    .ok()
-                    .and_then(|e| e.parent().map(|d| d.join("catalog/rules.json")))
-                    .unwrap_or_default(),
-            ];
-
-            let mut loaded_disk = None;
-            for c in candidates {
-                if !c.as_os_str().is_empty() && c.exists() {
-                    let text = std::fs::read_to_string(&c)
-                        .with_context(|| format!("Failed to read catalog at {}", c.display()))?;
-                    loaded_disk = Some(
-                        serde_json::from_str(&text)
-                            .with_context(|| format!("Failed to parse catalog JSON at {}", c.display()))?,
-                    );
-                    break;
-                }
-            }
-
-            match loaded_disk {
-                Some(cat) => cat,
-                None => serde_json::from_str(EMBEDDED_CATALOG_JSON)
-                    .context("Failed to parse embedded catalog/rules.json")?,
-            }
+            serde_json::from_str(EMBEDDED_CATALOG_JSON)
+                .context("Failed to parse embedded catalog/rules.json")?
         };
 
-        let existing_ids: HashSet<String> = catalog
-            .cleanup_rules
-            .iter()
-            .map(|r| r.id.clone())
-            .collect();
+        let mut existing_ids: HashSet<String> =
+            catalog.cleanup_rules.iter().map(|r| r.id.clone()).collect();
         for custom_rule in Self::load_custom_rules() {
-            if !existing_ids.contains(&custom_rule.id) {
+            if existing_ids.insert(custom_rule.id.clone()) {
                 catalog.cleanup_rules.push(custom_rule);
             }
         }
@@ -315,12 +290,7 @@ impl Catalog {
             .filter(|e| !e.is_empty())
             .collect();
 
-        if queries.is_empty() && is_unsafe_bare_custom_root(raw_root) {
-            return Err(anyhow!(
-                "Safety guard: '{}' cannot be added without file/subfolder query filters (queries)",
-                raw_root
-            ));
-        }
+        validate_custom_action(raw_root, &queries)?;
 
         let id = input
             .id
@@ -332,6 +302,7 @@ impl Catalog {
                 let ts = chrono::Local::now().format("%Y%m%d%H%M%S").to_string();
                 format!("custom-{}", ts)
             });
+        validate_custom_id(&id)?;
 
         let name_en = input
             .name_en
@@ -426,10 +397,33 @@ impl Catalog {
 }
 
 fn load_custom_rules_from(path: &Path) -> Vec<CleanupRule> {
-    let Ok(text) = std::fs::read_to_string(path) else {
-        return Vec::new();
-    };
-    serde_json::from_str::<Vec<CleanupRule>>(&text).unwrap_or_default()
+    read_custom_rules(path)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|rule| {
+            rule.source == "custom"
+                && validate_custom_id(&rule.id).is_ok()
+                && !rule.scans.is_empty()
+                && rule.scans.iter().all(|scan| {
+                    !scan.actions.is_empty()
+                        && scan.actions.iter().all(|action| {
+                            matches!(action, Action::General { root_path, queries, .. }
+                            if validate_custom_action(root_path, queries).is_ok())
+                        })
+                })
+        })
+        .collect()
+}
+
+fn read_custom_rules(path: &Path) -> Result<Vec<CleanupRule>> {
+    match std::fs::read_to_string(path) {
+        Ok(text) => serde_json::from_str(&text)
+            .with_context(|| format!("Failed to parse custom rules at {}", path.display())),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(error) => {
+            Err(error).with_context(|| format!("Failed to read custom rules at {}", path.display()))
+        }
+    }
 }
 
 fn save_custom_rule_to(path: &Path, input: CustomRuleInput) -> Result<CleanupRule> {
@@ -437,7 +431,7 @@ fn save_custom_rule_to(path: &Path, input: CustomRuleInput) -> Result<CleanupRul
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let mut existing = load_custom_rules_from(path);
+    let mut existing = read_custom_rules(path)?;
     if let Some(pos) = existing.iter().position(|r| r.id == rule.id) {
         existing[pos] = rule.clone();
     } else {
@@ -448,7 +442,8 @@ fn save_custom_rule_to(path: &Path, input: CustomRuleInput) -> Result<CleanupRul
 }
 
 fn delete_custom_rule_from(path: &Path, rule_id: &str) -> Result<()> {
-    let mut existing = load_custom_rules_from(path);
+    validate_custom_id(rule_id)?;
+    let mut existing = read_custom_rules(path)?;
     let before = existing.len();
     existing.retain(|r| r.id != rule_id);
     if existing.len() == before {
@@ -461,51 +456,51 @@ fn delete_custom_rule_from(path: &Path, rule_id: &str) -> Result<()> {
     Ok(())
 }
 
-fn is_unsafe_bare_custom_root(raw_root: &str) -> bool {
-    let norm = raw_root
-        .trim()
-        .replace('/', "\\")
-        .trim_end_matches('\\')
-        .to_ascii_lowercase();
-    if norm.len() <= 2 && norm.ends_with(':') {
-        return true;
-    }
-    let static_blocked = [
-        "%systemdrive%",
-        "%systemroot%",
-        "%windir%",
-        "%userprofile%",
-        "%programfiles%",
-        "%programfilesx86%",
-        "%programfiles(x86)%",
-        "%programdata%",
-        "%localappdata%",
-        "%appdata%",
-        r"c:\windows",
-        r"c:\windows\system32",
-        r"c:\windows\syswow64",
-        r"c:\users",
-    ];
-    if static_blocked.iter().any(|b| *b == norm) {
-        return true;
-    }
-    for env_key in [
-        "SystemRoot",
-        "USERPROFILE",
-        "ProgramFiles",
-        "ProgramFiles(x86)",
-        "ProgramW6432",
-        "ProgramData",
-        "LOCALAPPDATA",
-        "APPDATA",
-    ] {
-        if let Ok(v) = std::env::var(env_key) {
-            if v.trim().trim_end_matches('\\').eq_ignore_ascii_case(&norm) {
-                return true;
+fn validate_custom_id(id: &str) -> Result<()> {
+    ensure!(
+        id.starts_with("custom-") && id.len() > "custom-".len(),
+        "Custom rule IDs must start with 'custom-'"
+    );
+    Ok(())
+}
+
+fn validate_custom_action(root_path: &str, queries: &[String]) -> Result<()> {
+    let expanded = expand_expression(root_path, None)
+        .filter(|path| !path.trim().is_empty())
+        .ok_or_else(|| anyhow!("Could not resolve custom cleanup root '{root_path}'"))?;
+    let normalized = expanded.trim().replace('/', "\\");
+    let mut root = normalized.as_str();
+    if queries.is_empty() {
+        if let Some((parent, leaf)) = root.rsplit_once('\\') {
+            if leaf.contains(['*', '?']) {
+                root = parent;
             }
         }
     }
-    false
+    let system_drive_pattern;
+    if let Some(suffix) = root.strip_prefix(r"*\") {
+        let windows_dir = crate::system_tools::windows_dir()?;
+        let volume = windows_dir.ancestors().last().unwrap_or(&windows_dir);
+        system_drive_pattern = volume.join(suffix);
+        root = system_drive_pattern
+            .to_str()
+            .ok_or_else(|| anyhow!("Invalid custom cleanup root"))?;
+    }
+    ensure!(
+        !root.is_empty() && root != "*" && !is_protected_recycle_target(Path::new(root)),
+        "Custom cleanup root '{root_path}' is protected"
+    );
+    ensure!(
+        queries.iter().all(|query| {
+            !query.contains([':', '\0'])
+                && !query.starts_with(['\\', '/'])
+                && query
+                    .split(['\\', '/'])
+                    .all(|part| !part.ends_with(['.', ' ']))
+        }),
+        "Custom rule queries must stay within the cleanup root"
+    );
+    Ok(())
 }
 
 #[cfg(test)]
@@ -533,6 +528,11 @@ mod tests {
             flags: None,
         };
         assert!(Catalog::build_custom_rule(&bad).is_err());
+        assert!(validate_custom_action(r"C:\", &["*".into()]).is_err());
+        assert!(validate_custom_action(r"%SystemRoot%\.", &["*".into()]).is_err());
+        assert!(validate_custom_action(r"*\Windows", &["*".into()]).is_err());
+        assert!(validate_custom_action(r"C:\example", &[r"..\*".into()]).is_err());
+        assert!(validate_custom_id("clean-042").is_err());
 
         // Safe custom directory saves, loads, and deletes cleanly
         let ok_in = CustomRuleInput {

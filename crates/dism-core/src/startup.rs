@@ -4,7 +4,6 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::{OnceLock, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -349,14 +348,13 @@ try {
 $result | ConvertTo-Json -Compress
 "#;
 
-    let system_root = std::env::var_os("SystemRoot").unwrap_or_else(|| r"C:\Windows".into());
-    let powershell = PathBuf::from(system_root).join(r"System32\WindowsPowerShell\v1.0");
-    let output = Command::new(powershell.join("powershell.exe"))
-        .creation_flags(CREATE_NO_WINDOW)
-        .args(["-NoProfile", "-NonInteractive", "-Command", SCRIPT])
-        .env("PSModulePath", powershell.join("Modules"))
-        .env("DISMNEXT_STARTUP_INSPECT_PATH", &path)
-        .output();
+    let output = crate::system_tools::powershell_command().and_then(|mut command| {
+        command
+            .creation_flags(CREATE_NO_WINDOW)
+            .args(["-NoProfile", "-NonInteractive", "-Command", SCRIPT])
+            .env("DISMNEXT_STARTUP_INSPECT_PATH", &path)
+            .output()
+    });
     output
         .ok()
         .filter(|output| output.status.success())
@@ -513,11 +511,9 @@ pub fn list_third_party_services() -> Vec<ThirdPartyServiceItem> {
         let Ok(sk) = root.open_subkey_with_flags(&svc_name, KEY_READ) else {
             continue;
         };
-        let svc_type: u32 = sk.get_value("Type").unwrap_or(0);
-        // Only Win32 services (Own=0x10, Share=0x20, Interactive=0x100)
-        if !matches!(svc_type, 0x10 | 0x20 | 0x110 | 0x120) {
+        let Some(image_path) = third_party_service_image(&svc_name, &sk) else {
             continue;
-        }
+        };
         let start_val: u32 = sk.get_value("Start").unwrap_or(3);
         let start_mode = match start_val {
             2 => "auto",
@@ -526,15 +522,6 @@ pub fn list_third_party_services() -> Vec<ThirdPartyServiceItem> {
             _ => continue,
         }
         .to_string();
-
-        let image_path = sk
-            .get_raw_value("ImagePath")
-            .ok()
-            .map(|rv| reg_value_to_string(&rv).trim().to_string())
-            .unwrap_or_default();
-        if image_path.is_empty() || is_core_windows_service(&svc_name, &image_path) {
-            continue;
-        }
 
         let target_path = extract_target_path(&image_path);
         let target_exists = target_path
@@ -593,7 +580,7 @@ pub fn list_third_party_services() -> Vec<ThirdPartyServiceItem> {
 /// Changes a third-party service startup mode (`auto`, `manual`, `disabled`) via `sc.exe config`.
 pub fn set_service_start_mode(service_name: &str, start_mode: &str) -> Result<ThirdPartyServiceItem> {
     let trimmed = service_name.trim();
-    if trimmed.is_empty() || trimmed.contains(['\\', '/', '"']) {
+    if trimmed.is_empty() || trimmed.contains(['\\', '/', '"', '\0']) {
         return Err(anyhow!("Invalid service name '{}'", trimmed));
     }
 
@@ -610,7 +597,18 @@ pub fn set_service_start_mode(service_name: &str, start_mode: &str) -> Result<Th
         other => return Err(anyhow!("Unsupported service start mode '{}'", other)),
     };
 
-    let output = Command::new("sc.exe")
+    let key = RegKey::predef(HKEY_LOCAL_MACHINE)
+        .open_subkey_with_flags(format!(r"{SERVICES_KEY}\{trimmed}"), KEY_READ)
+        .with_context(|| format!("Could not verify service '{trimmed}'"))?;
+    if third_party_service_image(trimmed, &key).is_none()
+        || !matches!(key.get_value::<u32, _>("Start"), Ok(2..=4))
+    {
+        return Err(anyhow!(
+            "Service '{trimmed}' is protected or is not a third-party Win32 service"
+        ));
+    }
+
+    let output = crate::system_tools::system32_command("sc.exe")?
         .creation_flags(CREATE_NO_WINDOW)
         .args(["config", trimmed, "start=", sc_mode])
         .output()
@@ -679,11 +677,12 @@ $items = @(Walk-Tasks ($svc.GetFolder('\')))
 $items | ConvertTo-Json -Compress
 "#;
 
-    let Ok(output) = Command::new("powershell.exe")
-        .creation_flags(CREATE_NO_WINDOW)
-        .args(["-NoProfile", "-NonInteractive", "-Command", ps_script])
-        .output()
-    else {
+    let Ok(output) = crate::system_tools::powershell_command().and_then(|mut command| {
+        command
+            .creation_flags(CREATE_NO_WINDOW)
+            .args(["-NoProfile", "-NonInteractive", "-Command", ps_script])
+            .output()
+    }) else {
         return Vec::new();
     };
 
@@ -752,7 +751,7 @@ pub fn set_scheduled_task_enabled(task_path: &str, enabled: bool) -> Result<()> 
     }
 
     let flag = if enabled { "/ENABLE" } else { "/DISABLE" };
-    let output = Command::new("schtasks.exe")
+    let output = crate::system_tools::system32_command("schtasks.exe")?
         .creation_flags(CREATE_NO_WINDOW)
         .args(["/Change", "/TN", trimmed, flag])
         .output()
@@ -768,12 +767,38 @@ pub fn set_scheduled_task_enabled(task_path: &str, enabled: bool) -> Result<()> 
     Ok(())
 }
 
+fn third_party_service_image(name: &str, key: &RegKey) -> Option<String> {
+    if !matches!(
+        key.get_value::<u32, _>("Type"),
+        Ok(0x10 | 0x20 | 0x110 | 0x120)
+    ) {
+        return None;
+    }
+    let value = key.get_raw_value("ImagePath").ok()?;
+    let raw = reg_value_to_string(&value);
+    let image = raw.trim();
+    (!image.is_empty() && !is_core_windows_service(name, image)).then(|| image.to_string())
+}
+
 fn is_core_windows_service(name: &str, image_path: &str) -> bool {
-    let lower_path = image_path.trim().to_ascii_lowercase().replace('/', "\\");
+    let lower_path = image_path
+        .trim()
+        .trim_start_matches('"')
+        .to_ascii_lowercase()
+        .replace('/', "\\");
     if lower_path.contains(r"\windows\system32\")
         || lower_path.contains(r"\windows\syswow64\")
         || lower_path.contains(r"\windows\servicing\")
         || lower_path.contains(r"\windows\microsoft.net\")
+        || lower_path.starts_with(r"%systemroot%\")
+        || lower_path.starts_with(r"%windir%\")
+        || lower_path.starts_with(r"\systemroot\")
+        || crate::system_tools::windows_dir().is_ok_and(|path| {
+            lower_path.starts_with(&format!(
+                r"{}\",
+                path.to_string_lossy().to_ascii_lowercase()
+            ))
+        })
         || lower_path.contains("svchost.exe")
         || lower_path.contains("msmpeng.exe")
         || lower_path.contains("nissrv.exe")
@@ -783,7 +808,18 @@ fn is_core_windows_service(name: &str, image_path: &str) -> bool {
     }
     matches!(
         name.to_ascii_lowercase().as_str(),
-        "wscsvc" | "trustedinstaller" | "wuauserv" | "bits" | "spooler" | "defender"
+        "wscsvc"
+            | "trustedinstaller"
+            | "wuauserv"
+            | "bits"
+            | "spooler"
+            | "defender"
+            | "rpcss"
+            | "rpceptmapper"
+            | "dcomlaunch"
+            | "windefend"
+            | "bfe"
+            | "mpssvc"
     )
 }
 

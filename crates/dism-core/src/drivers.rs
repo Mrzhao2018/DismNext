@@ -8,7 +8,6 @@ use std::os::windows::ffi::OsStrExt;
 use std::os::windows::fs::MetadataExt;
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::{OnceLock, RwLock};
 use std::time::{Duration, Instant};
 use winreg::enums::{HKEY_LOCAL_MACHINE, KEY_READ};
@@ -326,7 +325,7 @@ pub fn delete_driver(published_name: &str) -> Result<String> {
         ));
     }
 
-    let output = Command::new("pnputil.exe")
+    let output = crate::system_tools::system32_command("pnputil.exe")?
         .creation_flags(CREATE_NO_WINDOW)
         .args(["/delete-driver", trimmed])
         .output()

@@ -551,11 +551,11 @@ export const SpaceRecycleView: React.FC<Props> = ({
     }
   };
 
-  const handleKillLockPid = async (pid: number, appName: string) => {
+  const handleKillLockPid = async (path: string, pid: number, startTime: string, appName: string) => {
     setLockBusyKey(`pid:${pid}`);
     setErrorMsg(null);
     try {
-      await api.terminateLockingProcess(pid);
+      await api.terminateLockingProcess(path, pid, startTime);
       setTaskNotice(
         lang === 'zh'
           ? `已结束占用进程 ${appName} (PID ${pid})，正在刷新文件状态...`
@@ -1074,7 +1074,7 @@ export const SpaceRecycleView: React.FC<Props> = ({
                                   size="small"
                                   appearance="outline"
                                   disabled={lockBusyKey === `pid:${lp.pid}`}
-                                  onClick={() => void handleKillLockPid(lp.pid, lp.app_name)}
+                                  onClick={() => void handleKillLockPid(f.path, lp.pid, lp.process_start_time, lp.app_name)}
                                 >
                                   {lockBusyKey === `pid:${lp.pid}`
                                     ? '...'

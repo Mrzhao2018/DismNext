@@ -35,7 +35,9 @@ cargo build --release --workspace --locked
 
 先构建前端，让 Rust 构建过程把 `ui/dist` 打包进桌面 EXE。输出位于 `target/release/`，其中 `dism-app.exe` 启动桌面界面，`dism-cli.exe` 提供命令行和 MCP。
 
-如果想自己在浏览器中打开界面，可用 `.\target\release\dism-app.exe --no-window` 启动服务。默认端口被占用时，可用 `--port` 指定一个可用端口。
+如果想自己在浏览器中打开界面，可用 `.\target\release\dism-app.exe --no-window` 启动服务，再打开终端输出的完整会话链接。调用本地 API 时，在 `X-DismNext-Token` 请求头中传入链接里的 `token`。每次启动都会生成新令牌，提权后请在新开的管理员窗口继续。默认端口被占用时，可用 `--port` 指定一个可用端口。
+
+使用 Vite 开发时，以标准用户运行 `cargo run -p dism-app -- --no-window --dev-origin`，然后把终端输出链接的 `#token=…` 附到 Vite 页面地址 `http://127.0.0.1:5173/`。默认使用内嵌规则库。可用 `--catalog` 指定受信任的外部规则库，或用 `--ui-dir` 托管受信任的已构建前端。
 
 ## 能做什么
 

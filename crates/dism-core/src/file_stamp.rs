@@ -5,8 +5,12 @@ use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
 use std::os::windows::io::AsRawHandle;
 use std::path::Path;
 use windows_sys::Win32::Storage::FileSystem::{
-    FileBasicInfo, GetFileInformationByHandleEx, FILE_ATTRIBUTE_REPARSE_POINT, FILE_BASIC_INFO,
-    FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES,
+    FileBasicInfo, FileDispositionInfoEx, GetFileInformationByHandleEx, SetFileInformationByHandle,
+    FILE_ATTRIBUTE_REPARSE_POINT, FILE_BASIC_INFO, FILE_DISPOSITION_FLAG_DELETE,
+    FILE_DISPOSITION_FLAG_FORCE_IMAGE_SECTION_CHECK,
+    FILE_DISPOSITION_FLAG_IGNORE_READONLY_ATTRIBUTE, FILE_DISPOSITION_FLAG_POSIX_SEMANTICS,
+    FILE_DISPOSITION_INFO_EX, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
+    FILE_READ_ATTRIBUTES,
 };
 
 pub(crate) fn open_for_verification(
@@ -100,5 +104,27 @@ pub(crate) fn read_basic_info(file: &File) -> io::Result<FILE_BASIC_INFO> {
         Err(io::Error::last_os_error())
     } else {
         Ok(info)
+    }
+}
+
+pub(crate) fn delete_open_target(file: &File, directory: bool) -> io::Result<()> {
+    let mut flags = FILE_DISPOSITION_FLAG_DELETE | FILE_DISPOSITION_FLAG_POSIX_SEMANTICS;
+    if !directory {
+        flags |= FILE_DISPOSITION_FLAG_IGNORE_READONLY_ATTRIBUTE
+            | FILE_DISPOSITION_FLAG_FORCE_IMAGE_SECTION_CHECK;
+    }
+    let disposition = FILE_DISPOSITION_INFO_EX { Flags: flags };
+    let ok = unsafe {
+        SetFileInformationByHandle(
+            file.as_raw_handle(),
+            FileDispositionInfoEx,
+            (&disposition as *const FILE_DISPOSITION_INFO_EX).cast(),
+            std::mem::size_of_val(&disposition) as u32,
+        )
+    };
+    if ok == 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
     }
 }

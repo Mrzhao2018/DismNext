@@ -1,9 +1,14 @@
+use crate::file_stamp::{delete_open_target, open_for_verification};
 use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::fs;
+use std::io;
+use std::os::windows::fs::MetadataExt;
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use windows_sys::Win32::Storage::FileSystem::{
+    DELETE, FILE_ATTRIBUTE_REPARSE_POINT, FILE_SHARE_READ,
+};
 use windows_sys::Win32::UI::Shell::{SHChangeNotify, SHCNE_ASSOCCHANGED, SHCNF_IDLIST};
 
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
@@ -27,11 +32,12 @@ pub struct RescueActionOutcome {
 /// Lists existing Windows System Restore points (returns empty list if unavailable or non-elevated).
 pub fn list_restore_points() -> Vec<RestorePointInfo> {
     let ps_cmd = "Get-ComputerRestorePoint -ErrorAction SilentlyContinue | Select-Object SequenceNumber,Description,CreationTime | ConvertTo-Json -Compress";
-    let Ok(output) = Command::new("powershell.exe")
-        .creation_flags(CREATE_NO_WINDOW)
-        .args(["-NoProfile", "-NonInteractive", "-Command", ps_cmd])
-        .output()
-    else {
+    let Ok(output) = crate::system_tools::powershell_command().and_then(|mut command| {
+        command
+            .creation_flags(CREATE_NO_WINDOW)
+            .args(["-NoProfile", "-NonInteractive", "-Command", ps_cmd])
+            .output()
+    }) else {
         return Vec::new();
     };
 
@@ -106,7 +112,7 @@ pub fn create_restore_point(description: &str) -> Result<String> {
         "$ErrorActionPreference='Stop'; Checkpoint-Computer -Description '{}' -RestorePointType 'MODIFY_SETTINGS'",
         final_desc
     );
-    let output = Command::new("powershell.exe")
+    let output = crate::system_tools::powershell_command()?
         .creation_flags(CREATE_NO_WINDOW)
         .args(["-NoProfile", "-NonInteractive", "-Command", &ps_script])
         .output()
@@ -188,15 +194,15 @@ pub fn run_rescue_action(action_id: &str) -> Result<RescueActionOutcome> {
         }
         "reset_windows_update" => {
             require_admin(&sys, "Resetting Windows Update cache")?;
+            let dl_dir = crate::system_tools::windows_dir()?.join(r"SoftwareDistribution\Download");
             let _ = exec_simple("net.exe", &["stop", "wuauserv"]);
             let _ = exec_simple("net.exe", &["stop", "bits"]);
 
-            let sys_root = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".to_string());
-            let dl_dir = Path::new(&sys_root).join(r"SoftwareDistribution\Download");
             let deleted = purge_unlocked_contents(&dl_dir);
 
             let _ = exec_simple("net.exe", &["start", "bits"]);
             let _ = exec_simple("net.exe", &["start", "wuauserv"]);
+            let deleted = deleted?;
 
             Ok(RescueActionOutcome {
                 action_id: action_id.to_string(),
@@ -211,11 +217,11 @@ pub fn run_rescue_action(action_id: &str) -> Result<RescueActionOutcome> {
         }
         "clear_print_spooler" => {
             require_admin(&sys, "Clearing Print Spooler queue")?;
+            let spool_dir = crate::system_tools::system32_dir()?.join(r"spool\PRINTERS");
             let _ = exec_simple("net.exe", &["stop", "Spooler"]);
-            let sys_root = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".to_string());
-            let spool_dir = Path::new(&sys_root).join(r"System32\spool\PRINTERS");
             let deleted = purge_unlocked_contents(&spool_dir);
             let _ = exec_simple("net.exe", &["start", "Spooler"]);
+            let deleted = deleted?;
             Ok(RescueActionOutcome {
                 action_id: action_id.to_string(),
                 success: true,
@@ -271,7 +277,7 @@ fn require_admin(sys: &crate::sysinfo::SystemInfo, label: &str) -> Result<()> {
 }
 
 fn exec_simple(program: &str, args: &[&str]) -> Result<String> {
-    let output = Command::new(program)
+    let output = crate::system_tools::system32_command(program)?
         .creation_flags(CREATE_NO_WINDOW)
         .args(args)
         .output()
@@ -291,22 +297,51 @@ fn exec_simple(program: &str, args: &[&str]) -> Result<String> {
     })
 }
 
-fn purge_unlocked_contents(dir: &Path) -> usize {
-    let Ok(rd) = fs::read_dir(dir) else {
-        return 0;
-    };
-    let mut removed = 0usize;
-    for entry in rd.flatten() {
-        let p = entry.path();
-        if p.is_dir() {
-            if fs::remove_dir_all(&p).is_ok() {
-                removed += 1;
+fn purge_unlocked_contents(dir: &Path) -> Result<usize> {
+    let ancestors: Vec<_> = dir.ancestors().collect();
+    let mut pinned = Vec::with_capacity(ancestors.len());
+    // Hold each verified directory without delete sharing while resolving its children.
+    for path in ancestors.into_iter().rev() {
+        let file = match open_for_verification(path, true, 0, FILE_SHARE_READ) {
+            Ok(file) => file,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(0),
+            Err(error) => {
+                return Err(error).with_context(|| format!("Could not open {}", path.display()))
             }
-        } else if p.is_file() && fs::remove_file(&p).is_ok() {
+        };
+        let metadata = file.metadata()?;
+        anyhow::ensure!(
+            metadata.is_dir() && metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT == 0,
+            "Refusing to clean through a reparse point or non-directory at {}",
+            path.display()
+        );
+        pinned.push(file);
+    }
+    Ok(purge_children(dir)?)
+}
+
+fn purge_children(dir: &Path) -> io::Result<usize> {
+    let mut removed = 0;
+    for entry in fs::read_dir(dir)?.flatten() {
+        let path = entry.path();
+        let Ok(file) = open_for_verification(&path, true, DELETE, FILE_SHARE_READ) else {
+            continue;
+        };
+        let Ok(metadata) = file.metadata() else {
+            continue;
+        };
+        if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            continue;
+        }
+        let directory = metadata.is_dir();
+        if directory && purge_children(&path).is_err() {
+            continue;
+        }
+        if (directory || metadata.is_file()) && delete_open_target(&file, directory).is_ok() {
             removed += 1;
         }
     }
-    removed
+    Ok(removed)
 }
 
 fn format_wmi_time(raw: &str) -> String {
@@ -329,10 +364,36 @@ fn format_wmi_time(raw: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::windows::fs::OpenOptionsExt;
 
     #[test]
     fn test_rescue_validation_and_wmi_time_format() {
         assert_eq!(format_wmi_time("20261119051022.000000+480"), "2026-11-19 05:10");
         assert!(run_rescue_action("unknown_action").is_err());
+    }
+
+    #[test]
+    fn purge_removes_unlocked_entries_and_keeps_locked_files() {
+        let root = std::env::temp_dir().join(format!("dismnext-rescue-{}", std::process::id()));
+        let folder = root.join("nested");
+        let locked_path = root.join("locked.txt");
+        fs::create_dir_all(&folder).unwrap();
+        fs::write(folder.join("cache.txt"), "nested").unwrap();
+        fs::write(root.join("cache.txt"), "top-level").unwrap();
+        let lock = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .share_mode(0)
+            .open(&locked_path)
+            .unwrap();
+
+        let result = purge_unlocked_contents(&root);
+        let kept_lock = locked_path.is_file();
+        let kept_folder = folder.exists();
+        drop(lock);
+        fs::remove_dir_all(&root).unwrap();
+        assert_eq!(result.unwrap(), 2);
+        assert!(kept_lock);
+        assert!(!kept_folder);
     }
 }

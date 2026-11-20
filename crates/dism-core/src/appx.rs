@@ -5,7 +5,6 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::os::windows::process::CommandExt;
 use std::path::Path;
-use std::process::Command;
 use winreg::enums::{HKEY_CURRENT_USER, KEY_READ};
 use winreg::RegKey;
 
@@ -151,7 +150,7 @@ pub fn remove_appx_package(package_full_name: &str) -> Result<()> {
         "Remove-AppxPackage -Package '{}' -ErrorAction Stop",
         trimmed
     );
-    let out = Command::new("powershell.exe")
+    let out = crate::system_tools::powershell_command()?
         .args(["-NoProfile", "-NonInteractive", "-Command", &ps_cmd])
         .creation_flags(CREATE_NO_WINDOW)
         .output()?;

@@ -629,37 +629,62 @@ fn into_disk_tree(raw: RawNode) -> DiskTreeNode {
     }
 }
 
-/// Checks whether `target` is a protected drive root or OS core folder that must never be recycled as a whole.
+/// Protects volume roots, shared top-level folders, and core Windows subtrees.
 pub fn is_protected_recycle_target(target: &Path) -> bool {
-    let norm = normalize_win_path(target).replace('/', "\\").to_ascii_lowercase();
-    let trimmed = norm.trim_end_matches('\\');
-    if trimmed.len() <= 2 && trimmed.ends_with(':') {
-        return true;
-    }
-    let sys_root = std::env::var("SystemRoot")
-        .unwrap_or_else(|_| r"C:\Windows".to_string())
-        .to_ascii_lowercase();
-    let sys_drive = std::env::var("SystemDrive").unwrap_or_else(|_| "C:".to_string());
-    let program_files = std::env::var("ProgramFiles").unwrap_or_default();
-    let protected_env_dirs = [
-        sys_root.clone(),
-        format!(r"{}\system32", sys_root),
-        format!(r"{}\syswow64", sys_root),
-        format!(r"{}\winsxs", sys_root),
-        format!(r"{sys_drive}\Users").to_ascii_lowercase(),
-        format!(r"{program_files}\Common Files").to_ascii_lowercase(),
-        program_files.to_ascii_lowercase(),
-        std::env::var("ProgramFiles(x86)").unwrap_or_default().to_ascii_lowercase(),
-        std::env::var("ProgramW6432").unwrap_or_default().to_ascii_lowercase(),
-        std::env::var("ProgramData").unwrap_or_default().to_ascii_lowercase(),
-        std::env::var("USERPROFILE").unwrap_or_default().to_ascii_lowercase(),
-        std::env::var("LOCALAPPDATA").unwrap_or_default().to_ascii_lowercase(),
-        std::env::var("APPDATA").unwrap_or_default().to_ascii_lowercase(),
-    ];
-    protected_env_dirs
-        .iter()
-        .filter(|s| !s.is_empty())
-        .any(|p| p.trim_end_matches('\\') == trimmed)
+    static PROTECTED: OnceLock<(Vec<PathBuf>, Vec<PathBuf>)> = OnceLock::new();
+    let (roots, trees) = PROTECTED.get_or_init(|| {
+        let windows =
+            crate::system_tools::windows_dir().unwrap_or_else(|_| PathBuf::from(r"C:\Windows"));
+        let drive = windows.ancestors().last().unwrap_or(&windows);
+        let trees = [
+            windows.join("System32"),
+            windows.join("SysWOW64"),
+            windows.join("WinSxS"),
+            windows.join("Boot"),
+            windows.join("Recovery"),
+            drive.join("Boot"),
+            drive.join("Recovery"),
+        ];
+        let mut roots = vec![
+            windows.clone(),
+            drive.join("Users"),
+            drive.join("Program Files"),
+            drive.join("Program Files (x86)"),
+            drive.join("ProgramData"),
+        ];
+        if let Some(program_files) = std::env::var_os("ProgramFiles") {
+            roots.push(PathBuf::from(program_files).join("Common Files"));
+        }
+        roots.extend(
+            [
+                "ProgramFiles",
+                "ProgramFiles(x86)",
+                "ProgramW6432",
+                "ProgramData",
+                "USERPROFILE",
+                "LOCALAPPDATA",
+                "APPDATA",
+            ]
+            .into_iter()
+            .filter_map(std::env::var_os)
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from),
+        );
+        (
+            roots.iter().map(|path| normalize_win_path(path)).collect(),
+            trees.iter().map(|path| normalize_win_path(path)).collect(),
+        )
+    });
+    let protected = |path: &Path| {
+        let path = normalize_win_path(path);
+        (path.has_root() && path.parent().is_none())
+            || roots.contains(&path)
+            || trees.iter().any(|tree| path.starts_with(tree))
+    };
+    let raw = target.as_os_str().to_string_lossy();
+    (raw.len() == 2 && raw.ends_with(':'))
+        || protected(target)
+        || target.canonicalize().is_ok_and(|path| protected(&path))
 }
 
 /// Verifies and moves a file or directory into the Windows Recycle Bin, returning its logical size.
@@ -667,16 +692,11 @@ pub fn recycle_path(target: &Path) -> Result<u64> {
     recycle_path_immediately(target)
 }
 
-fn normalize_win_path(path: &Path) -> String {
-    let pb: PathBuf = if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        std::env::current_dir()
-            .unwrap_or_else(|_| PathBuf::from("."))
-            .join(path)
-    };
-    let s = pb.to_string_lossy().into_owned();
-    s.strip_prefix(r"\\?\").unwrap_or(&s).to_string()
+fn normalize_win_path(path: &Path) -> PathBuf {
+    let absolute = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
+    let text = absolute.to_string_lossy();
+    let normalized = text.strip_prefix(r"\\?\").unwrap_or(&text);
+    PathBuf::from(normalized.replace('/', "\\").to_ascii_lowercase())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1355,7 +1375,18 @@ mod tests {
     fn test_protected_recycle_targets_and_sandbox_recycle() {
         assert!(is_protected_recycle_target(Path::new(r"C:\")));
         assert!(is_protected_recycle_target(Path::new(r"C:\Windows")));
-        assert!(is_protected_recycle_target(Path::new(r"C:\Windows\System32")));
+        assert!(is_protected_recycle_target(Path::new(
+            r"C:\Windows\System32"
+        )));
+        assert!(is_protected_recycle_target(Path::new(
+            r"C:\Windows\System32\drivers\etc\hosts"
+        )));
+        assert!(is_protected_recycle_target(Path::new(
+            r"C:\Recovery\sample"
+        )));
+        assert!(!is_protected_recycle_target(Path::new(
+            r"C:\Windows\System32-sample"
+        )));
         assert!(is_protected_recycle_target(Path::new(r"C:\Program Files")));
 
         let sample = std::env::temp_dir().join(format!("dismnext_recycle_test_{}.tmp", std::process::id()));

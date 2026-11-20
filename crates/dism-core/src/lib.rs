@@ -20,6 +20,7 @@ pub mod snapshot;
 pub mod startup;
 pub mod sysinfo;
 pub mod systasks;
+pub mod system_tools;
 pub mod uninstaller;
 
 pub use appx::{list_appx_packages, remove_appx_package, AppxCategory, AppxPackageInfo};

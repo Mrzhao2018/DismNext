@@ -277,6 +277,7 @@ pub struct CleanupTargetTotals {
 #[derive(Default)]
 struct CollectedFiles<'a> {
     preview_only: bool,
+    custom_rule: bool,
     index: Option<(&'a ScanIndex<'a>, usize)>,
     targets: Vec<(TargetKey, CleanupPath, PreviewFile)>,
     version_guard: Option<Arc<VersionGuard>>,
@@ -444,36 +445,24 @@ pub fn scan_rule(rule: &CleanupRule, sys: &SystemInfo) -> CleanupScanResult {
     scan_rule_with_budget(rule, sys, 64, None)
 }
 
-/// Scans a single rule with full handle diagnostics and a single batched Restart Manager lock check
-/// across up to the top 6 locked files in `preview_files`.
+/// Scans one rule with full handle diagnostics and checks up to six locked preview files.
 pub fn scan_rule_preview(rule: &CleanupRule, sys: &SystemInfo) -> CleanupScanResult {
     let mut res = scan_rule_with_budget(rule, sys, usize::MAX, None);
-    let locked_indices: Vec<usize> = res
+    for file in res
         .preview_files
-        .iter()
-        .enumerate()
-        .filter(|(_, f)| f.status == FileStatus::Locked)
-        .map(|(idx, _)| idx)
+        .iter_mut()
+        .filter(|file| file.status == FileStatus::Locked)
         .take(6)
-        .collect();
-
-    if !locked_indices.is_empty() {
-        let locked_paths: Vec<&Path> = locked_indices
-            .iter()
-            .map(|&idx| Path::new(&res.preview_files[idx].path))
-            .collect();
-        let procs = crate::lockcheck::find_locking_processes_batch(&locked_paths);
-        if !procs.is_empty() {
-            let summary: Vec<String> = procs
+    {
+        let processes = crate::lockcheck::find_locking_processes(Path::new(&file.path));
+        if !processes.is_empty() {
+            let summary: Vec<_> = processes
                 .iter()
                 .take(3)
                 .map(|p| format!("{} (PID {})", p.app_name, p.pid))
                 .collect();
-            let reason_text = format!("被进程占用: {}", summary.join(", "));
-            for idx in locked_indices {
-                res.preview_files[idx].reason = Some(reason_text.clone());
-                res.preview_files[idx].locking_processes = procs.clone();
-            }
+            file.reason = Some(format!("被进程占用: {}", summary.join(", ")));
+            file.locking_processes = processes;
         }
     }
     res
@@ -502,7 +491,14 @@ fn scan_rule_with_budget(
         .clone()
         .or_else(|| rule.warning.clone());
 
-    let mut collected = collect_scan_targets(active_scan, sys, probe_budget, true, index);
+    let mut collected = collect_scan_targets(
+        active_scan,
+        sys,
+        probe_budget,
+        true,
+        rule.source == "custom",
+        index,
+    );
     collected.files.trim_preview();
 
     CleanupScanResult {
@@ -718,7 +714,14 @@ fn plan_cleanup(
         let Some(active_scan) = active_scan else {
             continue;
         };
-        let collected = collect_scan_targets(active_scan, sys, usize::MAX, false, None);
+        let collected = collect_scan_targets(
+            active_scan,
+            sys,
+            usize::MAX,
+            false,
+            rule.source == "custom",
+            None,
+        );
         let recycle = collected.system_task_proc.as_deref() == Some("BuiltinInstallerCleanup");
 
         for (key, candidate, file) in collected.files.targets {
@@ -803,10 +806,12 @@ fn collect_scan_targets<'a>(
     sys: &SystemInfo,
     mut probe_budget: usize,
     preview_only: bool,
+    custom_rule: bool,
     index: Option<(&'a ScanIndex<'a>, usize)>,
 ) -> CollectedTargets<'a> {
     let mut files = CollectedFiles {
         preview_only,
+        custom_rule,
         index,
         ..CollectedFiles::default()
     };
@@ -939,6 +944,20 @@ fn collect_general_action(
         let Ok(root_meta) = std::fs::symlink_metadata(&root_dir) else {
             continue;
         };
+        if root_meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            continue;
+        }
+        let custom_root = if files.custom_rule {
+            let Ok(canonical) = root_dir.canonicalize() else {
+                continue;
+            };
+            if crate::diskmap::is_protected_recycle_target(&canonical) {
+                continue;
+            }
+            Some(canonical)
+        } else {
+            None
+        };
         let root_str = root_dir.to_string_lossy().into_owned();
         let Some(mut expanded_exclusions) = excluded
             .iter()
@@ -992,6 +1011,14 @@ fn collect_general_action(
                         return;
                     }
                     if is_excluded(&target, &root_dir, &expanded_exclusions) {
+                        continue;
+                    }
+                    if custom_root.as_ref().is_some_and(|root| {
+                        !target.canonicalize().is_ok_and(|path| {
+                            path.starts_with(root)
+                                && !crate::diskmap::is_protected_recycle_target(&path)
+                        })
+                    }) {
                         continue;
                     }
                     let Ok(t_meta) = std::fs::symlink_metadata(&target) else {

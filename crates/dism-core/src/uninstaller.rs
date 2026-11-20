@@ -6,7 +6,7 @@ use std::collections::HashSet;
 use std::os::windows::fs::MetadataExt;
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, ExitStatus};
+use std::process::{Child, ExitStatus};
 use std::sync::{OnceLock, RwLock};
 use std::time::{Duration, Instant};
 use winreg::enums::{
@@ -565,7 +565,7 @@ pub fn launch_win32_uninstaller(app_id: &str, use_quiet: bool) -> Result<Win32Un
         ));
     }
 
-    let child = Command::new("cmd.exe")
+    let child = crate::system_tools::system32_command("cmd.exe")?
         .args(["/D", "/S", "/C"])
         .raw_arg(format!("\"{raw_cmd}\""))
         .creation_flags(CREATE_NO_WINDOW)

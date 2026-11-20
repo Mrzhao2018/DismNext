@@ -756,8 +756,23 @@ fn exec_explorer_notify(
         "Cmd" => {
             if let Some(c) = cmd {
                 let expanded = expand_env_vars(c, None);
-                let _ = std::process::Command::new("cmd")
-                    .args(["/C", &expanded])
+                let (exe, args): (&str, &[&str]) = match expanded.to_ascii_lowercase().as_str() {
+                    "taskkill /f /im startmenuexperiencehost.exe" => (
+                        "taskkill.exe",
+                        &["/f", "/im", "StartMenuExperienceHost.exe"],
+                    ),
+                    "powercfg -hibernate on" => ("powercfg.exe", &["-hibernate", "on"]),
+                    "powercfg -hibernate off" => ("powercfg.exe", &["-hibernate", "off"]),
+                    "netsh wfp set options netevents=on" => {
+                        ("netsh.exe", &["wfp", "set", "options", "netevents=on"])
+                    }
+                    "netsh wfp set options netevents=off" => {
+                        ("netsh.exe", &["wfp", "set", "options", "netevents=off"])
+                    }
+                    _ => ("cmd.exe", &["/D", "/C", &expanded]),
+                };
+                let _ = crate::system_tools::system32_command(exe)?
+                    .args(args)
                     .creation_flags(CREATE_NO_WINDOW)
                     .output();
             }

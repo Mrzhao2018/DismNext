@@ -42,6 +42,7 @@ export type FileStatus = 'Ready' | 'Locked' | 'Protected';
 
 export interface LockingProcessInfo {
   pid: number;
+  process_start_time: string;
   app_name: string;
   service_name: string | null;
   app_type: string;
@@ -221,20 +222,52 @@ export class ApiError extends Error {
   }
 }
 
+const SESSION_STORAGE_KEY = 'dismnext-session-token';
+const sessionParams = new URLSearchParams(window.location.hash.slice(1));
+const launchToken = sessionParams.get('launch');
+const manualToken = sessionParams.get('token');
+const sessionToken = manualToken && /^[0-9a-f]{64}$/.test(manualToken)
+  ? manualToken
+  : window.sessionStorage.getItem(SESSION_STORAGE_KEY) ?? '';
+
+function rememberSession(token: string) {
+  window.history.replaceState(null, '', window.location.pathname + window.location.search);
+  if (token) window.sessionStorage.setItem(SESSION_STORAGE_KEY, token);
+}
+
+if (manualToken !== null) rememberSession(sessionToken);
+let exchange: Promise<string> | undefined;
+
+async function parseResponse<T>(res: Response): Promise<T> {
+  const data = await res.json().catch(() => null);
+  if (!res.ok) {
+    throw new ApiError(data?.error || `HTTP ${res.status}`, res.status);
+  }
+  if (data === null) throw new ApiError('DismNext returned an invalid JSON response', res.status);
+  return data as T;
+}
+
+async function exchangeLaunchToken(token: string): Promise<string> {
+  const response = await fetch('/api/session', {
+    method: 'POST',
+    headers: { 'X-DismNext-Token': token },
+  });
+  const session = await parseResponse<{ token: string }>(response);
+  rememberSession(session.token);
+  return session.token;
+}
+
 async function reqJson<T>(url: string, init?: RequestInit): Promise<T> {
+  const token = launchToken ? await (exchange ??= exchangeLaunchToken(launchToken)) : sessionToken;
   const res = await fetch(url, {
     ...init,
     headers: {
       'Content-Type': 'application/json',
-      'X-DismNext-Client': '1',
+      'X-DismNext-Token': token,
       ...(init?.headers ?? {}),
     },
   });
-  const data = await res.json();
-  if (!res.ok) {
-    throw new ApiError(data?.error || `HTTP ${res.status}`, res.status);
-  }
-  return data as T;
+  return parseResponse<T>(res);
 }
 
 export interface DiskTreeNode {
@@ -783,10 +816,10 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ path }),
     }),
-  terminateLockingProcess: (pid: number) =>
+  terminateLockingProcess: (path: string, pid: number, process_start_time: string) =>
     reqJson<{ ok: boolean; message: string }>('/api/lockcheck/terminate', {
       method: 'POST',
-      body: JSON.stringify({ pid }),
+      body: JSON.stringify({ path, pid, process_start_time }),
     }),
   getServices: () => reqJson<{ services: ThirdPartyServiceItem[] }>('/api/startup/services'),
   setServiceMode: (name: string, start_mode: string) =>

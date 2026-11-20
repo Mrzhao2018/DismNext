@@ -3,12 +3,15 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::ffi::OsStr;
 use std::os::windows::ffi::OsStrExt;
-use std::os::windows::process::CommandExt;
+use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::path::Path;
-use std::process::Command;
+
 use windows_sys::Win32::Foundation::{ERROR_MORE_DATA, ERROR_SUCCESS, FILETIME};
 
-const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+use windows_sys::Win32::System::Threading::{
+    GetProcessTimes, IsProcessCritical, OpenProcess, QueryFullProcessImageNameW, TerminateProcess,
+    PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_TERMINATE,
+};
 const CCH_RM_SESSION_KEY: usize = 32;
 const CCH_RM_MAX_APP_NAME: usize = 255;
 const CCH_RM_MAX_SVC_NAME: usize = 63;
@@ -70,6 +73,7 @@ extern "system" {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LockingProcessInfo {
     pub pid: u32,
+    pub process_start_time: String,
     pub app_name: String,
     pub service_name: Option<String>,
     pub app_type: String,
@@ -200,6 +204,7 @@ pub fn find_locking_processes_batch(paths: &[&Path]) -> Vec<LockingProcessInfo> 
 
         results.push(LockingProcessInfo {
             pid,
+            process_start_time: filetime_ticks(info.process.process_start_time).to_string(),
             app_name: display_app,
             service_name,
             app_type,
@@ -211,63 +216,101 @@ pub fn find_locking_processes_batch(paths: &[&Path]) -> Vec<LockingProcessInfo> 
 }
 
 /// Safely terminates a non-critical user-space process holding a lock on a cleanup target.
-pub fn terminate_locking_process(pid: u32) -> Result<String> {
-    let self_pid = std::process::id();
-    if pid <= 4 || pid == self_pid {
+pub fn terminate_locking_process(path: &Path, pid: u32, process_start_time: u64) -> Result<String> {
+    if is_critical_process(pid, std::process::id(), 0, "") {
         return Err(anyhow!(
-            "Refusing to terminate system core or host process (PID {})",
-            pid
+            "Refusing to terminate system core or host process (PID {pid})"
+        ));
+    }
+    let handle = unsafe {
+        OpenProcess(
+            PROCESS_TERMINATE | PROCESS_QUERY_LIMITED_INFORMATION,
+            0,
+            pid,
+        )
+    };
+    if handle.is_null() {
+        return Err(std::io::Error::last_os_error()).context("Could not open the locking process");
+    }
+    let process = unsafe { OwnedHandle::from_raw_handle(handle) };
+    let handle = process.as_raw_handle();
+    let (mut creation, mut exit, mut kernel, mut user) = unsafe { std::mem::zeroed() };
+    if unsafe { GetProcessTimes(handle, &mut creation, &mut exit, &mut kernel, &mut user) } == 0 {
+        return Err(std::io::Error::last_os_error())
+            .context("Could not verify process creation time");
+    }
+
+    let mut critical = 0;
+    if unsafe { IsProcessCritical(handle, &mut critical) } == 0 {
+        return Err(std::io::Error::last_os_error())
+            .context("Could not check for a critical process");
+    }
+    let mut image = vec![0; 32_768];
+    let mut len = image.len() as u32;
+    if unsafe { QueryFullProcessImageNameW(handle, 0, image.as_mut_ptr(), &mut len) } == 0 {
+        return Err(std::io::Error::last_os_error()).context("Could not verify the process image");
+    }
+    let image = String::from_utf16_lossy(&image[..len as usize]);
+    let executable = Path::new(&image)
+        .file_name()
+        .and_then(OsStr::to_str)
+        .unwrap_or("");
+    if critical != 0
+        || executable.is_empty()
+        || is_critical_process(pid, std::process::id(), 0, executable)
+    {
+        return Err(anyhow!(
+            "Refusing to terminate protected process (PID {pid})"
         ));
     }
 
-    let pid_str = pid.to_string();
-    let output = Command::new("taskkill.exe")
-        .creation_flags(CREATE_NO_WINDOW)
-        .args(["/PID", &pid_str, "/F"])
-        .output()
-        .context("Failed to execute taskkill.exe")?;
-
-    let stdout = crate::systasks::decode_cmd_output(&output.stdout);
-    let stderr = crate::systasks::decode_cmd_output(&output.stderr);
-    let combined = format!("{}\n{}", stdout.trim(), stderr.trim()).trim().to_string();
-    if !output.status.success() {
-        return Err(anyhow!("taskkill PID {} failed: {}", pid, combined));
+    let creation_time = filetime_ticks(creation);
+    let start_time = creation_time.to_string();
+    if process_start_time != creation_time
+        || !find_locking_processes(path).iter().any(|entry| {
+            entry.pid == pid && entry.process_start_time == start_time && !entry.is_critical
+        })
+    {
+        return Err(anyhow!(
+            "The lock changed. Inspect the file again before terminating a process"
+        ));
     }
-    Ok(if combined.is_empty() {
-        format!("Terminated PID {}", pid)
-    } else {
-        combined
-    })
+    if unsafe { TerminateProcess(handle, 1) } == 0 {
+        return Err(std::io::Error::last_os_error())
+            .context("Could not terminate the locking process");
+    }
+    Ok(format!("Terminated PID {pid}"))
+}
+
+fn filetime_ticks(time: FILETIME) -> u64 {
+    (u64::from(time.dwHighDateTime) << 32) | u64::from(time.dwLowDateTime)
 }
 
 fn is_critical_process(pid: u32, self_pid: u32, app_type: u32, app_name: &str) -> bool {
-    if pid <= 4 || pid == self_pid {
-        return true;
-    }
-    if matches!(app_type, 3 | 4 | 1000) {
+    if pid <= 4 || pid == self_pid || matches!(app_type, 3 | 4 | 1000) {
         return true;
     }
     let lower = app_name.trim().to_ascii_lowercase();
-    const PROTECTED_PREFIXES: &[&str] = &[
-        "system",
-        "smss",
-        "csrss",
-        "wininit",
-        "winlogon",
-        "services",
-        "lsass",
-        "svchost",
-        "dwm",
-        "explorer",
-        "windows explorer",
-        "dism-app",
-        "dism-cli",
-        "securityhealthservice",
-        "msmpeng",
-    ];
-    PROTECTED_PREFIXES
-        .iter()
-        .any(|p| lower == *p || lower.starts_with(&format!("{}.exe", p)) || lower.contains(p))
+    let name = lower.strip_suffix(".exe").unwrap_or(&lower);
+    matches!(
+        name,
+        "system"
+            | "smss"
+            | "csrss"
+            | "wininit"
+            | "winlogon"
+            | "services"
+            | "lsass"
+            | "lsaiso"
+            | "svchost"
+            | "dwm"
+            | "explorer"
+            | "windows explorer"
+            | "dism-app"
+            | "dism-cli"
+            | "securityhealthservice"
+            | "msmpeng"
+    )
 }
 
 fn utf16_z_to_string(buf: &[u16]) -> String {
@@ -302,7 +345,9 @@ mod tests {
         }
         let _ = std::fs::remove_file(&p);
 
-        assert!(terminate_locking_process(4).is_err());
-        assert!(terminate_locking_process(std::process::id()).is_err());
+        assert!(terminate_locking_process(&p, 4, 0).is_err());
+        assert!(terminate_locking_process(&p, std::process::id(), 0).is_err());
+        assert!(is_critical_process(120, 121, 0, "LSASS.EXE"));
+        assert!(!is_critical_process(120, 121, 1, "Example System Services"));
     }
 }

@@ -2,7 +2,6 @@ use crate::catalog::LocalizedText;
 use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::os::windows::process::CommandExt;
-use std::process::Command;
 use winreg::enums::{HKEY_LOCAL_MACHINE, KEY_READ};
 use winreg::RegKey;
 
@@ -106,7 +105,7 @@ pub fn set_feature_enabled(feature_name: &str, enabled: bool) -> Result<FeatureT
         args.push(&feature_arg);
     }
 
-    let output = Command::new("dism.exe")
+    let output = crate::system_tools::system32_command("dism.exe")?
         .creation_flags(CREATE_NO_WINDOW)
         .args(&args)
         .output()

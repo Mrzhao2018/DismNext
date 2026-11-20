@@ -5,22 +5,18 @@ use super::{
 };
 use crate::drivers::compute_drivers_uncached;
 use crate::duplicate_recycle::move_to_recycle_bin;
-use crate::file_stamp::{open_for_verification, TargetStamp};
+use crate::file_stamp::{delete_open_target, open_for_verification, TargetStamp};
 use crate::systasks::compute_orphaned_installer_files_uncached;
 use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io;
-use std::os::windows::io::AsRawHandle;
 use std::path::Path;
 use windows_sys::Win32::Foundation::{
     ERROR_DIR_NOT_EMPTY, ERROR_LOCK_VIOLATION, ERROR_SHARING_VIOLATION,
 };
 use windows_sys::Win32::Storage::FileSystem::{
-    FileDispositionInfoEx, SetFileInformationByHandle, DELETE, FILE_DISPOSITION_FLAG_DELETE,
-    FILE_DISPOSITION_FLAG_FORCE_IMAGE_SECTION_CHECK,
-    FILE_DISPOSITION_FLAG_IGNORE_READONLY_ATTRIBUTE, FILE_DISPOSITION_FLAG_POSIX_SEMANTICS,
-    FILE_DISPOSITION_INFO_EX, FILE_READ_DATA, FILE_SHARE_DELETE, FILE_SHARE_READ,
+    DELETE, FILE_READ_DATA, FILE_SHARE_DELETE, FILE_SHARE_READ,
 };
 
 /// Desktop cleanup plan. Execution consumes the plan and only considers its captured targets.
@@ -236,27 +232,5 @@ fn record_check_error(outcome: &mut RuleCleanOutcome, path: &Path, error: io::Er
             outcome.skipped_locked_files += 1;
         }
         _ => outcome.record_error(path.display(), error),
-    }
-}
-
-fn delete_open_target(file: &File, directory: bool) -> io::Result<()> {
-    let mut flags = FILE_DISPOSITION_FLAG_DELETE | FILE_DISPOSITION_FLAG_POSIX_SEMANTICS;
-    if !directory {
-        flags |= FILE_DISPOSITION_FLAG_IGNORE_READONLY_ATTRIBUTE
-            | FILE_DISPOSITION_FLAG_FORCE_IMAGE_SECTION_CHECK;
-    }
-    let disposition = FILE_DISPOSITION_INFO_EX { Flags: flags };
-    let ok = unsafe {
-        SetFileInformationByHandle(
-            file.as_raw_handle(),
-            FileDispositionInfoEx,
-            (&disposition as *const FILE_DISPOSITION_INFO_EX).cast(),
-            std::mem::size_of_val(&disposition) as u32,
-        )
-    };
-    if ok == 0 {
-        Err(io::Error::last_os_error())
-    } else {
-        Ok(())
     }
 }

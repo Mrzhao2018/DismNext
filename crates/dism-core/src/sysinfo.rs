@@ -41,7 +41,7 @@ fn static_sys_info() -> &'static StaticSystemInfo {
             other => (other.to_string(), 9),
         };
 
-        let is_admin = unsafe { IsUserAnAdmin() != 0 };
+        let is_admin = is_administrator();
         let system_drive = std::env::var("SystemDrive").unwrap_or_else(|_| "C:".to_string());
         let drive_root = if system_drive.ends_with('\\') {
             system_drive.clone()
@@ -213,6 +213,35 @@ pub fn enumerate_fixed_drives() -> Vec<String> {
         }
     }
     drives
+}
+
+pub fn is_administrator() -> bool {
+    unsafe { IsUserAnAdmin() != 0 }
+}
+
+pub fn open_in_browser(url: &str) -> Result<()> {
+    let url: Vec<u16> = OsStr::new(url).encode_wide().chain(Some(0)).collect();
+    let dir: Vec<u16> = crate::system_tools::system32_dir()?
+        .as_os_str()
+        .encode_wide()
+        .chain(Some(0))
+        .collect();
+    let result = unsafe {
+        ShellExecuteW(
+            std::ptr::null_mut(),
+            std::ptr::null(),
+            url.as_ptr(),
+            std::ptr::null(),
+            dir.as_ptr(),
+            1,
+        )
+    } as isize;
+    if result <= 32 {
+        return Err(anyhow!(
+            "Could not open DismNext in the browser (ShellExecuteW code {result})"
+        ));
+    }
+    Ok(())
 }
 
 /// Relaunches the current executable with an elevated UAC prompt (`runas`).
