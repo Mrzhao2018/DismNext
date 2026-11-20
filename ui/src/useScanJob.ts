@@ -21,10 +21,36 @@ export interface ActiveScan {
   cancelling: boolean;
 }
 
+export function createScanStatusStore() {
+  let current: ActiveScan | null = null;
+  const listeners = new Set<() => void>();
+  return {
+    getSnapshot: () => current,
+    subscribe(listener: () => void) {
+      listeners.add(listener);
+      return () => { listeners.delete(listener); };
+    },
+    publish(next: ActiveScan | null) {
+      const previous = current;
+      if (previous?.kind === next?.kind && previous?.cancelling === next?.cancelling
+        && previous?.progress?.phase === next?.progress?.phase
+        && previous?.progress?.processed_files === next?.progress?.processed_files
+        && previous?.progress?.total_files === next?.progress?.total_files
+        && previous?.progress?.bytes_read === next?.progress?.bytes_read
+        && previous?.progress?.can_cancel === next?.progress?.can_cancel) return;
+      current = next;
+      listeners.forEach((listener) => listener());
+    },
+  };
+}
+
+export type ScanStatusStore = ReturnType<typeof createScanStatusStore>;
+
 export function useScanJob() {
   const current = useRef<Session | null>(null);
-  const [active, setActive] = useState<ActiveScan | null>(null);
+  const [active, setActive] = useState<{ kind: ScanRequest['kind'] } | null>(null);
   const [cancelled, setCancelled] = useState(false);
+  const [statusStore] = useState(createScanStatusStore);
 
   useEffect(() => () => {
     const session = current.current;
@@ -37,7 +63,8 @@ export function useScanJob() {
   const cancel = () => {
     if (current.current) {
       current.current.cancelRequested = true;
-      setActive((scan) => scan && { ...scan, cancelling: true });
+      const scan = statusStore.getSnapshot();
+      if (scan) statusStore.publish({ ...scan, cancelling: true });
     }
   };
 
@@ -46,7 +73,8 @@ export function useScanJob() {
     const session: Session = { id: null, cancelRequested: false, detached: false };
     current.current = session;
     setCancelled(false);
-    setActive({ kind: request.kind, progress: null, cancelling: false });
+    setActive({ kind: request.kind });
+    statusStore.publish({ kind: request.kind, progress: null, cancelling: false });
     try {
       const { id } = await api.startScan(request);
       session.id = id;
@@ -65,7 +93,7 @@ export function useScanJob() {
         if (status.state === 'completed') return status.result;
         if (status.state === 'failed') throw new Error(status.error);
         if (!session.detached) {
-          setActive({
+          statusStore.publish({
             kind: request.kind,
             progress: status.progress,
             cancelling: status.state === 'cancelling' || (session.cancelRequested && status.progress.can_cancel),
@@ -78,9 +106,12 @@ export function useScanJob() {
       if (!session.detached) throw error;
     } finally {
       current.current = null;
-      if (!session.detached) setActive(null);
+      if (!session.detached) {
+        statusStore.publish(null);
+        setActive(null);
+      }
     }
   }
 
-  return { active, cancelled, cancel, run };
+  return { active, statusStore, cancelled, cancel, run };
 }

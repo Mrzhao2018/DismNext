@@ -1,4 +1,4 @@
-import { createContext, useContext, useRef, useState, type ReactNode } from 'react';
+import { createContext, useCallback, useContext, useMemo, useRef, useState, type ReactNode } from 'react';
 import { Button, Spinner, Text } from '@fluentui/react-components';
 import { api, type Lang, type MaintenanceProgress, type MaintenanceRequest, type MaintenanceResults } from './api';
 
@@ -8,20 +8,25 @@ interface ActiveJob {
   cancelling: boolean;
 }
 
-interface JobContext {
+interface JobStatus {
   active: ActiveJob | null;
   notice: { title: string; state: 'completed' | 'cancelled' | 'failed'; error?: string } | null;
   dismiss: () => void;
   cancel: () => void;
+}
+
+interface JobActions {
+  active: boolean;
   run: <T extends MaintenanceRequest>(request: T, title: string) => Promise<MaintenanceResults[T['kind']] | undefined>;
 }
 
-const MaintenanceContext = createContext<JobContext | null>(null);
+const MaintenanceContext = createContext<JobActions | null>(null);
+const MaintenanceStatusContext = createContext<JobStatus | null>(null);
 
 export function MaintenanceProvider({ children }: { children: ReactNode }) {
   const job = useRef<{ cancelRequested: boolean } | null>(null);
   const [active, setActive] = useState<ActiveJob | null>(null);
-  const [notice, setNotice] = useState<JobContext['notice']>(null);
+  const [notice, setNotice] = useState<JobStatus['notice']>(null);
 
   const cancel = () => {
     if (!job.current) return;
@@ -29,7 +34,7 @@ export function MaintenanceProvider({ children }: { children: ReactNode }) {
     setActive((current) => current && { ...current, cancelling: true });
   };
 
-  async function run<T extends MaintenanceRequest>(request: T, title: string): Promise<MaintenanceResults[T['kind']] | undefined> {
+  const run = useCallback(async <T extends MaintenanceRequest>(request: T, title: string): Promise<MaintenanceResults[T['kind']] | undefined> => {
     if (job.current) throw new Error('Another maintenance task is already running');
     const session = { cancelRequested: false };
     job.current = session;
@@ -63,10 +68,14 @@ export function MaintenanceProvider({ children }: { children: ReactNode }) {
       job.current = null;
       setActive(null);
     }
-  }
+  }, []);
+  const busy = active !== null;
+  const actions = useMemo(() => ({ active: busy, run }), [busy, run]);
 
-  return <MaintenanceContext.Provider value={{ active, notice, dismiss: () => setNotice(null), cancel, run }}>
-    {children}
+  return <MaintenanceContext.Provider value={actions}>
+    <MaintenanceStatusContext.Provider value={{ active, notice, dismiss: () => setNotice(null), cancel }}>
+      {children}
+    </MaintenanceStatusContext.Provider>
   </MaintenanceContext.Provider>;
 }
 
@@ -77,7 +86,9 @@ export function useMaintenance() {
 }
 
 export function MaintenanceStatusBar({ lang }: { lang: Lang }) {
-  const { active, notice, cancel, dismiss } = useMaintenance();
+  const context = useContext(MaintenanceStatusContext);
+  if (!context) throw new Error('MaintenanceProvider is missing');
+  const { active, notice, cancel, dismiss } = context;
   const zh = lang === 'zh';
   if (!active) {
     if (!notice) return null;

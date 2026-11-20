@@ -1,37 +1,32 @@
 use crate::catalog::LocalizedText;
 use crate::disk_allocation::AllocationScan;
 pub use crate::disk_allocation::DiskAllocation;
-use crate::duplicate_recycle::{FileIdentity, FileState};
-use crate::file_stamp::open_for_verification;
 use crate::path_recycle::{recycle_path_immediately, scan_timestamp};
 use crate::scan_progress::{ScanPhase, ScanProgress};
 use crate::sysinfo::SystemInfo;
-use crate::ttl_cache::TtlCache;
+use crate::win_util::{windows_dir_or_default, FILE_ATTRIBUTE_REPARSE_POINT};
 use anyhow::{anyhow, Result};
-use chrono::DateTime;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 use std::cmp::{Ordering, Reverse};
-use std::collections::{BinaryHeap, HashMap, HashSet};
-use std::fs::File;
-use std::io::{Read, Seek, SeekFrom};
+use std::collections::{BinaryHeap, HashMap};
 use std::os::windows::fs::MetadataExt;
-use std::os::windows::io::AsRawHandle;
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
-use std::time::{Duration, Instant, UNIX_EPOCH};
-use walkdir::WalkDir;
-use windows_sys::Win32::Storage::FileSystem::{
-    GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION, FILE_READ_DATA, FILE_SHARE_DELETE,
-    FILE_SHARE_READ, FILE_SHARE_WRITE,
-};
-use winreg::enums::{
-    HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ, KEY_WOW64_32KEY, KEY_WOW64_64KEY,
-};
-use winreg::RegKey;
+use std::time::Instant;
 
-const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
+mod duplicates;
+mod orphans;
+mod protected;
+
+pub use duplicates::{
+    find_duplicate_files, find_duplicate_files_with_progress, DuplicateFileEntry, DuplicateGroup,
+    DuplicateScanReport,
+};
+pub(crate) use orphans::measure_dir_stats;
+pub use orphans::{find_orphaned_app_dirs, invalidate_orphans_cache, OrphanDirEntry};
+pub use protected::is_protected_recycle_target;
+
 const MAX_CHILDREN_PER_NODE: usize = 60;
 const MAX_LARGEST_FILES: usize = 100;
 const MAX_EXTENSIONS: usize = 40;
@@ -241,9 +236,10 @@ pub fn get_presets(sys: &SystemInfo) -> Vec<DiskPreset> {
     for (env_expr, zh, en) in var_candidates {
         let key = env_expr.trim_matches('%');
         let resolved = if env_expr.contains('\\') {
-            let sys_root =
-                std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".to_string());
-            format!(r"{}\SystemTemp", sys_root)
+            windows_dir_or_default()
+                .join("SystemTemp")
+                .to_string_lossy()
+                .into_owned()
         } else {
             std::env::var(key).unwrap_or_default()
         };
@@ -769,727 +765,19 @@ fn into_disk_tree(raw: RawNode) -> DiskTreeNode {
     }
 }
 
-/// Protects volume roots, shared top-level folders, and core Windows subtrees.
-pub fn is_protected_recycle_target(target: &Path) -> bool {
-    static PROTECTED: OnceLock<(Vec<PathBuf>, Vec<PathBuf>)> = OnceLock::new();
-    let (roots, trees) = PROTECTED.get_or_init(|| {
-        let windows =
-            crate::system_tools::windows_dir().unwrap_or_else(|_| PathBuf::from(r"C:\Windows"));
-        let drive = windows.ancestors().last().unwrap_or(&windows);
-        let trees = [
-            windows.join("System32"),
-            windows.join("SysWOW64"),
-            windows.join("WinSxS"),
-            windows.join("Boot"),
-            windows.join("Recovery"),
-            drive.join("Boot"),
-            drive.join("Recovery"),
-        ];
-        let mut roots = vec![
-            windows.clone(),
-            drive.join("Users"),
-            drive.join("Program Files"),
-            drive.join("Program Files (x86)"),
-            drive.join("ProgramData"),
-        ];
-        if let Some(program_files) = std::env::var_os("ProgramFiles") {
-            roots.push(PathBuf::from(program_files).join("Common Files"));
-        }
-        roots.extend(
-            [
-                "ProgramFiles",
-                "ProgramFiles(x86)",
-                "ProgramW6432",
-                "ProgramData",
-                "USERPROFILE",
-                "LOCALAPPDATA",
-                "APPDATA",
-            ]
-            .into_iter()
-            .filter_map(std::env::var_os)
-            .filter(|value| !value.is_empty())
-            .map(PathBuf::from),
-        );
-        (
-            roots.iter().map(|path| normalize_win_path(path)).collect(),
-            trees.iter().map(|path| normalize_win_path(path)).collect(),
-        )
-    });
-    let protected = |path: &Path| {
-        let path = normalize_win_path(path);
-        (path.has_root() && path.parent().is_none())
-            || roots.contains(&path)
-            || trees.iter().any(|tree| path.starts_with(tree))
-    };
-    let raw = target.as_os_str().to_string_lossy();
-    (raw.len() == 2 && raw.ends_with(':'))
-        || protected(target)
-        || target.canonicalize().is_ok_and(|path| protected(&path))
-}
-
 /// Verifies and moves a file or directory into the Windows Recycle Bin, returning its logical size.
 pub fn recycle_path(target: &Path) -> Result<u64> {
     recycle_path_immediately(target)
 }
 
-fn normalize_win_path(path: &Path) -> PathBuf {
-    let absolute = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
-    let text = absolute.to_string_lossy();
-    let normalized = text.strip_prefix(r"\\?\").unwrap_or(&text);
-    PathBuf::from(normalized.replace('/', "\\").to_ascii_lowercase())
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DuplicateFileEntry {
-    pub path: String,
-    pub name: String,
-    pub modified_date: String,
-    pub modified_unix: u64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub stamp: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DuplicateGroup {
-    pub hash_hex: String,
-    pub size_bytes: u64,
-    pub wasted_bytes: u64,
-    pub files: Vec<DuplicateFileEntry>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DuplicateScanReport {
-    pub root_path: String,
-    pub elapsed_ms: u64,
-    pub total_groups: usize,
-    pub total_wasted_bytes: u64,
-    pub groups: Vec<DuplicateGroup>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct OrphanDirEntry {
-    pub name: String,
-    pub path: String,
-    pub scope_label: String,
-    pub size_bytes: u64,
-    pub file_count: usize,
-    #[serde(default)]
-    pub size_is_estimate: bool,
-    pub modified_date: String,
-    #[serde(default)]
-    pub scan_started_at: String,
-}
-
-/// Finds duplicate files by size, sampled content and a full BLAKE3 hash.
-pub fn find_duplicate_files(root: &Path, min_size_bytes: u64) -> Result<DuplicateScanReport> {
-    find_duplicate_files_inner(root, min_size_bytes, None)
-}
-
-pub fn find_duplicate_files_with_progress(
-    root: &Path,
-    min_size_bytes: u64,
-    progress: &ScanProgress,
-) -> Result<DuplicateScanReport> {
-    find_duplicate_files_inner(root, min_size_bytes, Some(progress))
-}
-
-fn find_duplicate_files_inner(
-    root: &Path,
-    min_size_bytes: u64,
-    progress: Option<&ScanProgress>,
-) -> Result<DuplicateScanReport> {
-    check_scan(progress)?;
-    if !root.exists() {
-        return Err(anyhow!("Path does not exist: {}", root.display()));
-    }
-    let started = Instant::now();
-    let threshold = min_size_bytes.max(64 * 1024);
-    let windows =
-        crate::system_tools::windows_dir().unwrap_or_else(|_| PathBuf::from(r"C:\Windows"));
-    let winsxs = normalize_win_path(&windows.join("WinSxS"));
-    let driverstore = normalize_win_path(&windows.join(r"System32\DriverStore"));
-
-    let mut by_size: HashMap<u64, Vec<PathBuf>> = HashMap::new();
-    let mut walker = WalkDir::new(root)
-        .follow_links(false)
-        .follow_root_links(false)
-        .into_iter();
-    loop {
-        check_scan(progress)?;
-        let Some(entry) = walker.next() else {
-            break;
-        };
-        let Ok(entry) = entry else {
-            continue;
-        };
-        let directory = entry.file_type().is_dir();
-        // WalkDir uses the Windows directory entry's cached attributes and size.
-        let Ok(meta) = entry.metadata() else {
-            if directory {
-                walker.skip_current_dir();
-            }
-            continue;
-        };
-        let servicing_path = if directory || entry.depth() == 0 {
-            let path = normalize_win_path(entry.path());
-            path.starts_with(&winsxs) || path.starts_with(&driverstore)
-        } else {
-            false
-        };
-        if meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 || servicing_path {
-            if directory {
-                walker.skip_current_dir();
-            }
-            continue;
-        }
-        if !meta.is_file() {
-            continue;
-        }
-        if let Some(progress) = progress {
-            progress.file_processed();
-        }
-        let size = meta.len();
-        if size >= threshold {
-            by_size.entry(size).or_default().push(entry.into_path());
-        }
-    }
-
-    let size_candidates = distinct_duplicate_candidates(by_size, progress)?;
-    if let Some(progress) = progress {
-        progress.set_phase(ScanPhase::Sampling, Some(size_candidates.len()));
-    }
-    let sampled = size_candidates
-        .into_par_iter()
-        .filter_map(|(sz, path)| {
-            if let Err(error) = check_scan(progress) {
-                return Some(Err(error));
-            }
-            let sample = sample_hash_file(&path, sz, progress);
-            if let Some(progress) = progress {
-                progress.file_processed();
-            }
-            sample.map(|hash| Ok((sz, hash, path)))
-        })
-        .collect::<Result<Vec<_>>>()?;
-
-    let mut by_sample: HashMap<(u64, blake3::Hash), Vec<PathBuf>> = HashMap::new();
-    for (size, sample, path) in sampled {
-        check_scan(progress)?;
-        by_sample.entry((size, sample)).or_default().push(path);
-    }
-
-    let full_candidates: Vec<_> = by_sample
-        .into_iter()
-        .filter(|(_, paths)| paths.len() >= 2)
-        .flat_map(|((size, _), paths)| paths.into_iter().map(move |path| (size, path)))
-        .collect();
-
-    if let Some(progress) = progress {
-        progress.set_phase(ScanPhase::Hashing, Some(full_candidates.len()));
-    }
-    let hashed = full_candidates
-        .into_par_iter()
-        .filter_map(|(size, path)| {
-            if let Err(error) = check_scan(progress) {
-                return Some(Err(error));
-            }
-            let result = (|| {
-                let mut file = open_hash_file(&path, size)?;
-                let modified = file.metadata().ok()?.last_write_time();
-                let state = FileState::read(&file).ok();
-                let hash = full_hash(&mut file, progress)?;
-                if state != FileState::read(&file).ok() {
-                    return None;
-                }
-                Some((size, hash, path, modified, state))
-            })();
-            if let Some(progress) = progress {
-                progress.file_processed();
-            }
-            result.map(Ok)
-        })
-        .collect::<Result<Vec<_>>>()?;
-
-    if let Some(progress) = progress {
-        progress.set_phase(ScanPhase::Finishing, None);
-    }
-
-    const WINDOWS_EPOCH_SECONDS: u64 = 11_644_473_600;
-    const TICKS_PER_SECOND: u64 = 10_000_000;
-    let mut by_full: HashMap<(u64, blake3::Hash), Vec<(u64, DuplicateFileEntry)>> = HashMap::new();
-    let mut identities = HashSet::new();
-    for (sz, h, path, modified, state) in hashed {
-        check_scan(progress)?;
-        let modified_ticks = state.as_ref().map_or(modified, |state| state.modified);
-        let stamp = match state {
-            Some(state) => {
-                let stamp = state.stamp();
-                // Also guard against aliases created after the first identity check.
-                if !identities.insert(state.identity) {
-                    continue;
-                }
-                Some(stamp)
-            }
-            None => None,
-        };
-        let mod_unix = (modified_ticks / TICKS_PER_SECOND).saturating_sub(WINDOWS_EPOCH_SECONDS);
-        let name = path
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or("")
-            .to_string();
-        let modified_date = DateTime::from_timestamp(mod_unix as i64, 0)
-            .map(|dt| dt.format("%Y-%m-%d").to_string())
-            .unwrap_or_default();
-        by_full.entry((sz, h)).or_default().push((
-            modified_ticks,
-            DuplicateFileEntry {
-                path: path.to_string_lossy().into_owned(),
-                name,
-                modified_date,
-                modified_unix: mod_unix,
-                stamp,
-            },
-        ));
-    }
-
-    let mut groups = Vec::new();
-    for ((sz, h), mut files) in by_full {
-        check_scan(progress)?;
-        if files.len() < 2 {
-            continue;
-        }
-        files.sort_by(|(a_time, a), (b_time, b)| {
-            b_time.cmp(a_time).then_with(|| a.path.cmp(&b.path))
-        });
-        let wasted_bytes = sz.saturating_mul((files.len() - 1) as u64);
-        groups.push(DuplicateGroup {
-            hash_hex: h.to_hex().to_string(),
-            size_bytes: sz,
-            wasted_bytes,
-            files: files.into_iter().map(|(_, file)| file).collect(),
-        });
-    }
-
-    groups.sort_by_key(|entry| std::cmp::Reverse(entry.wasted_bytes));
-    let total_groups = groups.len();
-    let total_wasted_bytes: u64 = groups.iter().map(|g| g.wasted_bytes).sum();
-    groups.truncate(100);
-
-    check_scan(progress)?;
-    Ok(DuplicateScanReport {
-        root_path: root.to_string_lossy().into_owned(),
-        elapsed_ms: started.elapsed().as_millis() as u64,
-        total_groups,
-        total_wasted_bytes,
-        groups,
-    })
-}
-
-fn distinct_duplicate_candidates(
-    by_size: HashMap<u64, Vec<PathBuf>>,
-    progress: Option<&ScanProgress>,
-) -> Result<Vec<(u64, PathBuf)>> {
-    let candidates: Vec<_> = by_size
-        .into_iter()
-        .filter(|(_, paths)| paths.len() >= 2)
-        .flat_map(|(size, paths)| paths.into_iter().map(move |path| (size, path)))
-        .collect();
-    let probed = candidates
-        .into_par_iter()
-        .map(|(size, path)| {
-            check_scan(progress)?;
-            let identity = hard_link_identity(&path);
-            Ok((size, path, identity))
-        })
-        .collect::<Result<Vec<_>>>()?;
-
-    let mut linked: HashMap<FileIdentity, (u64, PathBuf)> = HashMap::new();
-    let mut distinct = Vec::new();
-    for (size, path, identity) in probed {
-        check_scan(progress)?;
-        if let Some(identity) = identity {
-            let entry = linked
-                .entry(identity)
-                .or_insert_with(|| (size, path.clone()));
-            if path < entry.1 {
-                *entry = (size, path);
-            }
-        } else {
-            distinct.push((size, path));
-        }
-    }
-    distinct.extend(linked.into_values());
-    let mut counts = HashMap::new();
-    for (size, _) in &distinct {
-        *counts.entry(*size).or_insert(0usize) += 1;
-    }
-    distinct.retain(|(size, _)| counts[size] > 1);
-    Ok(distinct)
-}
-
-fn hard_link_identity(path: &Path) -> Option<FileIdentity> {
-    let sharing = FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE;
-    let file = open_for_verification(path, false, 0, sharing).ok()?;
-    let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
-    let ok = unsafe { GetFileInformationByHandle(file.as_raw_handle(), &mut info) };
-    if ok != 0 && info.nNumberOfLinks > 1 {
-        FileIdentity::read(&file).ok()
-    } else {
-        None
-    }
-}
-
-fn read_hash_chunk(
-    reader: &mut impl Read,
-    buffer: &mut [u8],
-    progress: Option<&ScanProgress>,
-) -> Option<usize> {
-    check_scan(progress).ok()?;
-    let bytes = reader.read(buffer).ok()?;
-    if let Some(progress) = progress {
-        progress.read_bytes(bytes);
-    }
-    Some(bytes)
-}
-
-fn open_hash_file(path: &Path, expected_size: u64) -> Option<File> {
-    let file = open_for_verification(
-        path,
-        false,
-        FILE_READ_DATA,
-        FILE_SHARE_READ | FILE_SHARE_DELETE,
-    )
-    .ok()?;
-    let metadata = file.metadata().ok()?;
-    (metadata.is_file()
-        && metadata.len() == expected_size
-        && metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT == 0)
-        .then_some(file)
-}
-
-fn sample_hash_file(
-    path: &Path,
-    size: u64,
-    progress: Option<&ScanProgress>,
-) -> Option<blake3::Hash> {
-    let mut file = open_hash_file(path, size)?;
-    let mut hash = blake3::Hasher::new();
-    let mut buffer = [0; 4096];
-    for offset in [0, size - buffer.len() as u64] {
-        file.seek(SeekFrom::Start(offset)).ok()?;
-        let mut copied = 0;
-        while copied < buffer.len() {
-            let count = read_hash_chunk(&mut file, &mut buffer[copied..], progress)?;
-            if count == 0 {
-                return None;
-            }
-            copied += count;
-        }
-        hash.update(&buffer);
-    }
-    Some(hash.finalize())
-}
-
-fn full_hash(mut reader: impl Read, progress: Option<&ScanProgress>) -> Option<blake3::Hash> {
-    let mut hash = blake3::Hasher::new();
-    let mut buffer = [0; 64 * 1024];
-    loop {
-        let count = read_hash_chunk(&mut reader, &mut buffer, progress)?;
-        if count == 0 {
-            return Some(hash.finalize());
-        }
-        hash.update(&buffer[..count]);
-    }
-}
-
-static ORPHANS_CACHE: TtlCache<Vec<OrphanDirEntry>> = TtlCache::new(Duration::from_secs(30));
-
-pub fn invalidate_orphans_cache() {
-    ORPHANS_CACHE.invalidate();
-}
-
-/// Scans top-level AppData / ProgramData directories and flags large folders not matched
-/// against active Uninstall keys, installed AppX apps, or known Windows/vendor safelists.
-pub fn find_orphaned_app_dirs() -> Vec<OrphanDirEntry> {
-    ORPHANS_CACHE.get_or_load(compute_orphaned_app_dirs)
-}
-
-fn compute_orphaned_app_dirs() -> Vec<OrphanDirEntry> {
-    let scan_started_at = scan_timestamp();
-    let (installed_tokens, installed_dirs) = collect_installed_app_tokens();
-    let mut safelist: HashSet<&'static str> = [
-        "microsoft",
-        "windows",
-        "package cache",
-        "packages",
-        "temp",
-        "d3dscache",
-        "connecteddevicesplatform",
-        "crashdumps",
-        "comms",
-        "publishers",
-        "virtualstore",
-        "cef",
-        "squirreltemp",
-        "fontcache",
-        "usoshared",
-        "ssh",
-        "git",
-        "npm",
-        "npm-cache",
-        "pip",
-        "uv",
-        "pnpm",
-        "yarn",
-        "cargo",
-        "rustup",
-        "go-build",
-        "nuget",
-        "jetbrains",
-        "vscode",
-        "code",
-        "google",
-        "mozilla",
-        "nvidia",
-        "nvidia corporation",
-        "intel",
-        "amd",
-        "realtek",
-        "dolby",
-        "lenovo",
-        "apple",
-        "apple computer",
-        "steam",
-        "epicgameslauncher",
-        "unity",
-        "unrealengine",
-        "solidworks",
-        "ansys",
-        "codesys",
-        "codemeter",
-        "bonjour",
-        "coremail",
-        "baidunetdisk",
-        "iconcache",
-        "elevateddiagnostics",
-        "low",
-        "programs",
-        "peernetworking",
-        "application data",
-        "history",
-        "local",
-        "roaming",
-    ]
-    .into_iter()
-    .collect();
-    let _ = &mut safelist;
-
-    let mut candidates: Vec<(String, PathBuf, String)> = Vec::new();
-    for (env_var, label) in [
-        ("LOCALAPPDATA", "AppData\\Local"),
-        ("APPDATA", "AppData\\Roaming"),
-        ("ProgramData", "ProgramData"),
-    ] {
-        let Ok(base_str) = std::env::var(env_var) else {
-            continue;
-        };
-        let Ok(rd) = std::fs::read_dir(&base_str) else {
-            continue;
-        };
-        for entry in rd.flatten() {
-            let p = entry.path();
-            let Ok(meta) = std::fs::symlink_metadata(&p) else {
-                continue;
-            };
-            if !meta.is_dir() || (meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT) != 0 {
-                continue;
-            }
-            let name = entry.file_name().to_string_lossy().into_owned();
-            if name.starts_with('.') || name.starts_with('$') {
-                continue;
-            }
-            let lower_name = name.trim().to_ascii_lowercase();
-            let lower_path = p.to_string_lossy().to_ascii_lowercase();
-
-            if safelist.contains(lower_name.as_str())
-                || installed_dirs.iter().any(|id_path| {
-                    lower_path.starts_with(id_path) || id_path.starts_with(&lower_path)
-                })
-                || matches_app_tokens(&lower_name, &installed_tokens, &safelist)
-            {
-                continue;
-            }
-            let mod_date = meta
-                .modified()
-                .ok()
-                .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-                .and_then(|d| DateTime::from_timestamp(d.as_secs() as i64, 0))
-                .map(|dt| dt.format("%Y-%m-%d").to_string())
-                .unwrap_or_default();
-            candidates.push((name, p, format!("{}|{}", label, mod_date)));
-        }
-    }
-
-    let mut results: Vec<OrphanDirEntry> = candidates
-        .into_par_iter()
-        .filter_map(|(name, path, meta_tag)| {
-            let stats = measure_dir_stats(&path);
-            if stats.size_bytes < 1_048_576 {
-                return None;
-            }
-            let (scope_label, modified_date) = meta_tag.split_once('|').unwrap_or(("", ""));
-            Some(OrphanDirEntry {
-                name,
-                path: path.to_string_lossy().into_owned(),
-                scope_label: scope_label.to_string(),
-                size_bytes: stats.size_bytes,
-                file_count: stats.file_count,
-                size_is_estimate: stats.incomplete,
-                modified_date: modified_date.to_string(),
-                scan_started_at: scan_started_at.clone(),
-            })
-        })
-        .collect();
-
-    results.sort_by_key(|entry| std::cmp::Reverse(entry.size_bytes));
-    results
-}
-
-#[derive(Default)]
-pub(crate) struct DirStats {
-    pub size_bytes: u64,
-    pub file_count: usize,
-    pub incomplete: bool,
-}
-
-pub(crate) fn measure_dir_stats(dir: &Path) -> DirStats {
-    measure_dir_stats_up_to(dir, 20_000)
-}
-
-fn measure_dir_stats_up_to(dir: &Path, file_limit: usize) -> DirStats {
-    let mut stats = DirStats::default();
-    let mut stack = vec![dir.to_path_buf()];
-    while let Some(cur) = stack.pop() {
-        let Ok(rd) = std::fs::read_dir(&cur) else {
-            stats.incomplete = true;
-            continue;
-        };
-        for entry in rd {
-            let Ok(entry) = entry else {
-                stats.incomplete = true;
-                continue;
-            };
-            let Ok(meta) = entry.metadata() else {
-                stats.incomplete = true;
-                continue;
-            };
-            if (meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT) != 0 {
-                continue;
-            }
-            if meta.is_dir() {
-                stack.push(entry.path());
-            } else if meta.is_file() {
-                stats.size_bytes = stats.size_bytes.saturating_add(meta.len());
-                stats.file_count += 1;
-                if stats.file_count >= file_limit {
-                    stats.incomplete = true;
-                    return stats;
-                }
-            }
-        }
-    }
-    stats
-}
-
-fn collect_installed_app_tokens() -> (HashSet<String>, Vec<String>) {
-    let mut tokens = HashSet::new();
-    let mut dirs = Vec::new();
-
-    let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
-    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
-    let targets = [
-        (
-            &hklm,
-            r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall",
-            KEY_READ | KEY_WOW64_64KEY,
-        ),
-        (
-            &hklm,
-            r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall",
-            KEY_READ | KEY_WOW64_32KEY,
-        ),
-        (
-            &hkcu,
-            r"Software\Microsoft\Windows\CurrentVersion\Uninstall",
-            KEY_READ,
-        ),
-    ];
-
-    for (root, sub, sam) in targets {
-        if let Ok(uninst) = root.open_subkey_with_flags(sub, sam) {
-            for k in uninst.enum_keys().flatten() {
-                let Ok(sk) = uninst.open_subkey_with_flags(&k, sam) else {
-                    continue;
-                };
-                for val_name in ["DisplayName", "Publisher"] {
-                    if let Ok(s) = sk.get_value::<String, _>(val_name) {
-                        add_tokens(&s, &mut tokens);
-                    }
-                }
-                if let Ok(loc) = sk.get_value::<String, _>("InstallLocation") {
-                    let norm = loc.trim().trim_end_matches('\\').to_ascii_lowercase();
-                    if norm.len() >= 4 {
-                        dirs.push(norm);
-                    }
-                }
-            }
-        }
-    }
-
-    for pkg in crate::appx::list_appx_packages() {
-        add_tokens(&pkg.name, &mut tokens);
-        add_tokens(&pkg.display_name.zh, &mut tokens);
-        add_tokens(&pkg.display_name.en, &mut tokens);
-    }
-
-    (tokens, dirs)
-}
-
-fn add_tokens(s: &str, tokens: &mut HashSet<String>) {
-    let full = s.trim().to_ascii_lowercase();
-    if full.len() >= 3 {
-        tokens.insert(full);
-    }
-    for part in s.split(|c: char| !c.is_ascii_alphanumeric()) {
-        let lp = part.to_ascii_lowercase();
-        if lp.len() >= 3 {
-            tokens.insert(lp);
-        }
-    }
-}
-
-fn matches_app_tokens(
-    dir_lower: &str,
-    tokens: &HashSet<String>,
-    safelist: &HashSet<&'static str>,
-) -> bool {
-    if tokens.contains(dir_lower) {
-        return true;
-    }
-    for part in dir_lower.split(|c: char| !c.is_ascii_alphanumeric()) {
-        if part.len() >= 4 && (tokens.contains(part) || safelist.contains(part)) {
-            return true;
-        }
-    }
-    false
-}
-
 #[cfg(test)]
 mod tests {
+    use super::duplicates::full_hash;
+    use super::orphans::measure_dir_stats_up_to;
     use super::*;
     use std::fs::{self, File};
-    use std::io::Write;
+    use std::io::{Read, Write};
+    use std::time::{Duration, UNIX_EPOCH};
 
     #[test]
     fn full_hash_checks_for_cancellation_before_reading_the_next_chunk() {
@@ -1777,19 +1065,21 @@ mod tests {
         assert_eq!(entries[1].name, "original-0");
         assert_eq!(entries.last().unwrap().name, "original-98");
     }
-}
-#[test]
-fn limited_directory_statistics_are_marked_as_incomplete() {
-    let dir = std::env::temp_dir().join(format!("dismnext-limited-stats-{}", std::process::id()));
-    std::fs::create_dir(&dir).unwrap();
-    for index in 0..3 {
-        std::fs::write(dir.join(index.to_string()), b"1234").unwrap();
+
+    #[test]
+    fn limited_directory_statistics_are_marked_as_incomplete() {
+        let dir =
+            std::env::temp_dir().join(format!("dismnext-limited-stats-{}", std::process::id()));
+        std::fs::create_dir(&dir).unwrap();
+        for index in 0..3 {
+            std::fs::write(dir.join(index.to_string()), b"1234").unwrap();
+        }
+        let limited = measure_dir_stats_up_to(&dir, 2);
+        let full = measure_dir_stats(&dir);
+        std::fs::remove_dir_all(dir).unwrap();
+        assert!(limited.incomplete);
+        assert_eq!((limited.size_bytes, limited.file_count), (8, 2));
+        assert!(!full.incomplete);
+        assert_eq!((full.size_bytes, full.file_count), (12, 3));
     }
-    let limited = measure_dir_stats_up_to(&dir, 2);
-    let full = measure_dir_stats(&dir);
-    std::fs::remove_dir_all(dir).unwrap();
-    assert!(limited.incomplete);
-    assert_eq!((limited.size_bytes, limited.file_count), (8, 2));
-    assert!(!full.incomplete);
-    assert_eq!((full.size_bytes, full.file_count), (12, 3));
 }

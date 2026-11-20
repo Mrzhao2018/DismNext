@@ -1,4 +1,5 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import { VirtualList } from './VirtualList';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   Badge,
   Button,
@@ -117,7 +118,7 @@ export const DriverView: React.FC<Props> = ({ lang, isAdmin }) => {
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [confirmCleanOutdated, setConfirmCleanOutdated] = useState(false);
 
-  const load = async () => {
+  const load = useCallback(async () => {
     setLoading(true);
     setErrorMsg(null);
     try {
@@ -126,19 +127,17 @@ export const DriverView: React.FC<Props> = ({ lang, isAdmin }) => {
       setTotalBytes(res.total_bytes);
       setOutdatedCount(res.outdated_count);
       setOutdatedBytes(res.outdated_bytes);
-      if (!backupDir && res.default_backup_dir) {
-        setBackupDir(res.default_backup_dir);
-      }
+      setBackupDir((previous) => previous || res.default_backup_dir);
     } catch (e) {
       setErrorMsg(String(e));
     } finally {
       setLoading(false);
     }
-  };
+  }, []);
 
   useEffect(() => {
-    load();
-  }, []);
+    void load();
+  }, [load]);
 
   const topClasses = useMemo(() => {
     const counts = new Map<string, number>();
@@ -266,7 +265,7 @@ export const DriverView: React.FC<Props> = ({ lang, isAdmin }) => {
                   size="small"
                   appearance="outline"
                   icon={<FolderOpen16Regular />}
-                  onClick={() => api.revealInExplorer(backupReport.manifest_path)}
+                  onClick={() => { void api.revealInExplorer(backupReport.manifest_path).catch((error) => setErrorMsg(String(error))); }}
                 >
                   {lang === 'zh' ? '打开备份目录' : 'Open Backup Folder'}
                 </Button>
@@ -403,10 +402,11 @@ export const DriverView: React.FC<Props> = ({ lang, isAdmin }) => {
             {lang === 'zh' ? '当前筛选条件下没有匹配的驱动包。' : 'No matching driver packages.'}
           </Text>
         ) : (
-          filtered.map((drv) => (
+          <VirtualList rows={filtered} getKey={(drv) => drv.published_name} label={lang === 'zh' ? '驱动包' : 'Driver packages'} renderRow={(drv) => (
             <div key={drv.repo_folder} className={styles.row}>
               <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0, flex: 1 }}>
                 <Checkbox
+                  aria-label={drv.published_name}
                   checked={selected.has(drv.published_name)}
                   onChange={() => toggleSelect(drv.published_name)}
                 />
@@ -457,7 +457,7 @@ export const DriverView: React.FC<Props> = ({ lang, isAdmin }) => {
                   size="small"
                   appearance="subtle"
                   icon={<FolderOpen16Regular />}
-                  onClick={() => api.revealInExplorer(drv.repo_path)}
+                  onClick={() => { void api.revealInExplorer(drv.repo_path).catch((error) => setErrorMsg(String(error))); }}
                   title={drv.repo_path}
                 >
                   {lang === 'zh' ? '目录' : 'Folder'}
@@ -475,7 +475,7 @@ export const DriverView: React.FC<Props> = ({ lang, isAdmin }) => {
                 )}
               </div>
             </div>
-          ))
+          )} />
         )}
       </div>
 

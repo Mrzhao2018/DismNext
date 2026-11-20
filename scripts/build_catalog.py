@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Compile maintenance XML rule definitions (Data_1002.2.xml, Data_custom.sample.xml, en.xml)
-into a clean, bilingual, strongly-typed JSON catalog for DismNext.
+into an import candidate for manual review. Edit catalog/rules.json to change shipped rules.
 
 Modernization transforms:
 1. Strips '#' i18n prefix and resolves zh/en bilingual labels.
@@ -14,6 +14,7 @@ Modernization transforms:
 
 from __future__ import annotations
 
+import argparse
 import json
 import re
 import xml.etree.ElementTree as ET
@@ -25,7 +26,7 @@ DATA_DIR = ROOT / "RE" / "源码重建" / "01_数据层源码" / "src"
 MAIN_XML = DATA_DIR / "rules" / "Data_1002.2.xml"
 CUSTOM_XML = DATA_DIR / "rules" / "Data_custom.sample.xml"
 EN_XML = DATA_DIR / "languages" / "en.xml"
-OUT_JSON = ROOT / "catalog" / "rules.json"
+SHIPPED_CATALOG = ROOT / "catalog" / "rules.json"
 
 # Supplement English translations for Win11 custom rules and modified rules
 EXTRA_EN: dict[str, str] = {
@@ -992,11 +993,17 @@ def build_catalog() -> dict[str, Any]:
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--output", required=True, type=Path, help="Path for a new import candidate")
+    output = parser.parse_args().output.resolve()
+    if output == SHIPPED_CATALOG.resolve() or output.exists():
+        parser.error("Choose a new output file outside the shipped catalog")
     catalog = build_catalog()
-    OUT_JSON.parent.mkdir(parents=True, exist_ok=True)
+    output.parent.mkdir(parents=True, exist_ok=True)
     serialized = json.dumps(catalog, ensure_ascii=False, indent=2)
     assert "`" not in serialized, "Unexpected backtick remained in compiled rules!"
-    OUT_JSON.write_text(serialized, encoding="utf-8", newline="\n")
+    with output.open("x", encoding="utf-8", newline="\n") as handle:
+        handle.write(serialized)
 
     n_clean = len(catalog["cleanup_rules"])
     n_groups = len(catalog["optimization_groups"])
@@ -1010,7 +1017,7 @@ def main() -> None:
         for i in g["items"]
         if i["name"]["zh"] == i["name"]["en"]
     )
-    print(f"Wrote {OUT_JSON} ({len(serialized)} bytes)")
+    print(f"Wrote {output} ({len(serialized.encode('utf-8'))} bytes)")
     print(f"Cleanup rules: {n_clean} (identical zh/en names: {untranslated_clean})")
     print(f"Optimization groups: {n_groups}, items: {n_opt} (identical zh/en names: {untranslated_opt})")
 

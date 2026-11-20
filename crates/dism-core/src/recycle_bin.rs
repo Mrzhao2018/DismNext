@@ -1,5 +1,6 @@
 use crate::com::Apartment;
 use crate::diskmap::is_protected_recycle_target;
+use crate::win_util::{has_reparse_point_in_ancestors, is_local_drive_path, pin_directory};
 use anyhow::{anyhow, Result};
 use std::fs::File;
 use std::io;
@@ -36,7 +37,7 @@ struct ShellEntry<T> {
 
 enum EntryState<T> {
     Pending(Box<dyn FnOnce() -> Result<Verified<T>> + Send>),
-    Verified(Verified<T>),
+    Verified(Verified<T>, Vec<File>),
     Rejected(anyhow::Error),
     Finished(Result<T>),
     Empty,
@@ -56,22 +57,28 @@ impl<T: Send + 'static> IFileOperationProgressSink_Impl for DeleteSink_Impl<T> {
         let EntryState::Pending(verify) = std::mem::replace(&mut *state, EntryState::Empty) else {
             return Err(E_ABORT.into());
         };
-        let verified = catch_unwind(AssertUnwindSafe(verify))
-            .unwrap_or_else(|_| Err(anyhow!("Recycle target verification stopped unexpectedly")))
-            .and_then(|verified| {
-                if flags & TSF_DELETE_RECYCLE_IF_POSSIBLE.0 as u32 == 0
-                    || is_protected_recycle_target(&self.0.path)
-                {
-                    return Err(anyhow!(
-                        "Windows cannot safely recycle '{}'",
-                        self.0.path.display()
-                    ));
-                }
-                Ok(verified)
-            });
+        let verified = catch_unwind(AssertUnwindSafe(|| {
+            let parent = self
+                .0
+                .path
+                .parent()
+                .ok_or_else(|| anyhow!("Missing recycle target parent"))?;
+            let parents = pin_directory(parent, false)?;
+            let verified = verify()?;
+            if flags & TSF_DELETE_RECYCLE_IF_POSSIBLE.0 as u32 == 0
+                || is_protected_recycle_target(&self.0.path)
+            {
+                return Err(anyhow!(
+                    "Windows cannot safely recycle '{}'",
+                    self.0.path.display()
+                ));
+            }
+            Ok((verified, parents))
+        }))
+        .unwrap_or_else(|_| Err(anyhow!("Recycle target verification stopped unexpectedly")));
         match verified {
-            Ok(verified) => {
-                *state = EntryState::Verified(verified);
+            Ok((verified, parents)) => {
+                *state = EntryState::Verified(verified, parents);
                 Ok(())
             }
             Err(error) => {
@@ -89,8 +96,8 @@ impl<T: Send + 'static> IFileOperationProgressSink_Impl for DeleteSink_Impl<T> {
         recycled: Ref<IShellItem>,
     ) -> windows::core::Result<()> {
         let mut state = self.0.state.lock().unwrap();
-        if let EntryState::Verified(_) = &*state {
-            if let EntryState::Verified(Verified { value, hold }) =
+        if let EntryState::Verified(_, _) = &*state {
+            if let EntryState::Verified(Verified { value, hold }, _parents) =
                 std::mem::replace(&mut *state, EntryState::Empty)
             {
                 drop(hold);
@@ -334,6 +341,10 @@ fn queue_item<T: Send + 'static>(
     operation: &IFileOperation,
     entry: &Arc<ShellEntry<T>>,
 ) -> Result<()> {
+    anyhow::ensure!(
+        is_local_drive_path(&entry.path) && !has_reparse_point_in_ancestors(&entry.path, true),
+        "Recycle target must be on a local drive with no reparse points"
+    );
     let path: Vec<_> = entry
         .path
         .as_os_str()

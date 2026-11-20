@@ -11,6 +11,7 @@ use dism_core::systasks::get_system_task_status;
 use dism_core::SystemInfo;
 use serde::Deserialize;
 use std::path::Path;
+use std::sync::atomic::Ordering;
 use tiny_http::{Method, Request};
 
 #[derive(Deserialize)]
@@ -46,25 +47,25 @@ pub(super) fn handle(req: &mut Request, path: &str, state: &AppState) -> Result<
             if sys.is_admin {
                 return Ok(serde_json::json!({ "already_admin": true, "relaunching": false }));
             }
-            if state.maintenance_jobs.is_active() {
-                return Err(ScanBusy("maintenance task").into());
+            let _exclusive = state
+                .requests
+                .try_write()
+                .map_err(|_| ScanBusy("desktop request"))?;
+            if state.relaunching.load(Ordering::Acquire) {
+                return Err(ScanBusy("desktop relaunch").into());
             }
-            let mut extra_args = vec!["--port".to_string(), state.port.to_string()];
-            if let Some(ref catalog) = state.catalog_path {
-                extra_args.push("--catalog".to_string());
-                extra_args.push(catalog.to_string_lossy().into_owned());
+            if state.maintenance_jobs.is_active()
+                || state.scan_jobs.is_active()
+                || crate::uninstall_running(state)
+            {
+                return Err(ScanBusy("background task").into());
             }
-            if !state.dev_origin {
-                if let Some(ref ui) = state.ui_dir {
-                    extra_args.push("--ui-dir".to_string());
-                    extra_args.push(ui.to_string_lossy().into_owned());
-                }
-            }
-            relaunch_as_admin(&extra_args)?;
-            std::thread::spawn(|| {
-                std::thread::sleep(std::time::Duration::from_millis(200));
-                std::process::exit(0);
-            });
+            anyhow::ensure!(
+                state.catalog_path.is_none() && state.ui_dir.is_none() && !state.dev_origin,
+                "Restart DismNext directly as administrator to use an external catalog or UI"
+            );
+            relaunch_as_admin(&["--port".to_string(), state.port.to_string()])?;
+            state.relaunching.store(true, Ordering::Release);
             Ok(serde_json::json!({ "already_admin": false, "relaunching": true }))
         }
         (&Method::Get, "/api/sysinfo") => {

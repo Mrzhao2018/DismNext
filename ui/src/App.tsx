@@ -34,6 +34,7 @@ import { DashboardTargetTab, DashboardView } from './views/DashboardView';
 import { ScanStatusBar } from './ScanStatusBar';
 import { MaintenanceProvider, MaintenanceStatusBar } from './MaintenanceJobs';
 import { useScanJob } from './useScanJob';
+import { navigationLabel } from './i18n';
 
 const SpaceRecycleView = lazy(() =>
   import('./views/SpaceRecycleView').then((m) => ({ default: m.SpaceRecycleView }))
@@ -73,6 +74,7 @@ const useStyles = makeStyles({
     backgroundColor: tokens.colorNeutralBackground1,
     color: tokens.colorNeutralForeground1,
     overflow: 'hidden',
+    '@media (max-width: 700px)': { flexDirection: 'column' },
   },
   sidebar: {
     width: '220px',
@@ -83,21 +85,37 @@ const useStyles = makeStyles({
     backgroundColor: tokens.colorNeutralBackground2,
     borderRight: `1px solid ${tokens.colorNeutralStroke2}`,
     flexShrink: 0,
+    overflowY: 'auto',
+    '@media (max-width: 900px)': {
+      width: '150px',
+      padding: '10px 6px',
+    },
+    '@media (max-width: 700px)': {
+      width: 'auto',
+      padding: '6px',
+      flexDirection: 'row',
+      alignItems: 'center',
+      overflowX: 'auto',
+      overflowY: 'hidden',
+    },
   },
   brand: {
     display: 'flex',
     flexDirection: 'column',
     gap: '4px',
     padding: '4px 8px 16px 8px',
+    '@media (max-width: 700px)': { display: 'none' },
   },
   navStack: {
     display: 'flex',
     flexDirection: 'column',
     gap: '6px',
+    '@media (max-width: 700px)': { flexDirection: 'row' },
   },
   navBtn: {
     justifyContent: 'flex-start',
     height: '40px',
+    whiteSpace: 'nowrap',
   },
   mainCol: {
     flex: 1,
@@ -107,6 +125,7 @@ const useStyles = makeStyles({
     padding: '16px',
     gap: '12px',
     overflow: 'hidden',
+    '@media (max-width: 700px)': { padding: '8px', gap: '8px' },
   },
   topBanner: {
     display: 'flex',
@@ -118,6 +137,7 @@ const useStyles = makeStyles({
     backgroundColor: tokens.colorNeutralBackground2,
     border: `1px solid ${tokens.colorNeutralStroke2}`,
     flexShrink: 0,
+    '@media (max-width: 700px)': { flexWrap: 'wrap', gap: '8px', padding: '8px 10px' },
   },
   diskBarTrack: {
     width: '280px',
@@ -126,11 +146,19 @@ const useStyles = makeStyles({
     backgroundColor: tokens.colorNeutralBackground4,
     overflow: 'hidden',
     display: 'flex',
+    '@media (max-width: 700px)': { width: 'min(220px, 50vw)' },
   },
   contentArea: {
+    display: 'flex',
+    flexDirection: 'column',
     flex: 1,
     minHeight: 0,
     overflow: 'hidden',
+  },
+  viewArea: {
+    flex: '1 1 0',
+    minHeight: 0,
+    overflow: 'auto',
   },
 });
 
@@ -186,11 +214,9 @@ const AppShell: React.FC<{
   const styles = useStyles();
   const [lang, setLang] = useState<Lang>(() => storedPreference(LANGUAGE_KEY) === 'en' ? 'en' : 'zh');
   const [tab, setTab] = useState<NavTab>('dashboard');
-  const [visitedCleanup, setVisitedCleanup] = useState(false);
-  const [visitedDiskmap, setVisitedDiskmap] = useState(false);
+  const [visitedTabs, setVisitedTabs] = useState(() => new Set<NavTab>(['dashboard']));
   const navigate = useCallback((next: NavTab) => {
-    if (next === 'cleanup') setVisitedCleanup(true);
-    if (next === 'diskmap') setVisitedDiskmap(true);
+    setVisitedTabs((visited) => visited.has(next) ? visited : new Set([...visited, next]));
     setTab(next);
   }, []);
   const toggleLanguage = () => {
@@ -297,7 +323,7 @@ const AppShell: React.FC<{
               icon={<HomeRegular style={{ fontSize: 22 }} />}
               onClick={() => navigate('dashboard')}
             >
-              {lang === 'zh' ? '系统概览' : 'Dashboard'}
+              {navigationLabel('dashboard', lang)}
             </Button>
             <Button
               className={styles.navBtn}
@@ -305,7 +331,7 @@ const AppShell: React.FC<{
               icon={<Broom24Regular />}
               onClick={() => navigate('cleanup')}
             >
-              {lang === 'zh' ? '空间回收' : 'Space Recycle'}
+              {navigationLabel('cleanup', lang)}
             </Button>
             <Button
               className={styles.navBtn}
@@ -313,7 +339,7 @@ const AppShell: React.FC<{
               icon={<DataPie24Regular />}
               onClick={() => navigate('diskmap')}
             >
-              {lang === 'zh' ? '空间分析' : 'Space Analyzer'}
+              {navigationLabel('diskmap', lang)}
             </Button>
             <Button
               className={styles.navBtn}
@@ -321,7 +347,7 @@ const AppShell: React.FC<{
               icon={<DeveloperBoardRegular style={{ fontSize: 22 }} />}
               onClick={() => navigate('drivers')}
             >
-              {lang === 'zh' ? '驱动管理' : 'Driver Manager'}
+              {navigationLabel('drivers', lang)}
             </Button>
             <Button
               className={styles.navBtn}
@@ -329,7 +355,7 @@ const AppShell: React.FC<{
               icon={<PuzzlePieceRegular style={{ fontSize: 22 }} />}
               onClick={() => navigate('features')}
             >
-              {lang === 'zh' ? '可选功能' : 'Optional Features'}
+              {navigationLabel('features', lang)}
             </Button>
             <Button
               className={styles.navBtn}
@@ -337,7 +363,7 @@ const AppShell: React.FC<{
               icon={<Settings24Regular />}
               onClick={() => navigate('optimize')}
             >
-              {lang === 'zh' ? '系统优化' : 'Optimization'}
+              {navigationLabel('optimize', lang)}
             </Button>
             <Button
               className={styles.navBtn}
@@ -345,7 +371,7 @@ const AppShell: React.FC<{
               icon={<Rocket24Regular />}
               onClick={() => navigate('startup')}
             >
-              {lang === 'zh' ? '开机启动项' : 'Startup'}
+              {navigationLabel('startup', lang)}
             </Button>
             <Button
               className={styles.navBtn}
@@ -353,7 +379,7 @@ const AppShell: React.FC<{
               icon={<Apps24Regular />}
               onClick={() => navigate('appx')}
             >
-              {lang === 'zh' ? '应用卸载管理' : 'App Uninstaller'}
+              {navigationLabel('appx', lang)}
             </Button>
             <Button
               className={styles.navBtn}
@@ -361,7 +387,7 @@ const AppShell: React.FC<{
               icon={<ToolboxRegular style={{ fontSize: 22 }} />}
               onClick={() => navigate('rescue')}
             >
-              {lang === 'zh' ? '系统急救箱' : 'Rescue Center'}
+              {navigationLabel('rescue', lang)}
             </Button>
             <Button
               className={styles.navBtn}
@@ -369,7 +395,7 @@ const AppShell: React.FC<{
               icon={<History24Regular />}
               onClick={() => navigate('snapshots')}
             >
-              {lang === 'zh' ? '快照回滚' : 'Snapshots'}{snapshots && ` (${snapshots.length})`}
+              {navigationLabel('snapshots', lang)}{snapshots && ` (${snapshots.length})`}
             </Button>
           </div>
         </div>
@@ -489,7 +515,7 @@ const AppShell: React.FC<{
         <section className={styles.contentArea}>
           <MaintenanceStatusBar lang={lang} />
           {(scanning || tab === 'dashboard' || tab === 'cleanup') && (
-            <ScanStatusBar active={cleanupScan.active} cancelled={cleanupScan.cancelled} cancel={cleanupScan.cancel} lang={lang} />
+            <ScanStatusBar store={cleanupScan.statusStore} cancelled={cleanupScan.cancelled} cancel={cleanupScan.cancel} lang={lang} />
           )}
           {(tab === 'dashboard' || tab === 'cleanup') && scanError && resourceFeedback(
             lang === 'zh' ? '扫描清理规则' : 'Scan cleanup rules', scanError, handleScan,
@@ -499,7 +525,8 @@ const AppShell: React.FC<{
           {tab === 'optimize' && optGroups !== null && optimizer.error && resourceFeedback(
             lang === 'zh' ? '加载系统优化项' : 'Load optimization controls', optimizer.error, optimizer.reload,
           )}
-          {visitedCleanup && cleanupEntries !== null && (
+          <div className={styles.viewArea}>
+          {visitedTabs.has('cleanup') && cleanupEntries !== null && (
             <div hidden={tab !== 'cleanup'} style={{ height: '100%' }}>
               <Suspense fallback={viewLoading}>
               <SpaceRecycleView
@@ -524,7 +551,7 @@ const AppShell: React.FC<{
               </Suspense>
             </div>
           )}
-          {visitedDiskmap && (
+          {visitedTabs.has('diskmap') && (
             <div hidden={tab !== 'diskmap'} style={{ height: '100%' }}>
               <Suspense fallback={viewLoading}>
               <DiskAnalyzerView
@@ -538,7 +565,7 @@ const AppShell: React.FC<{
             </div>
           )}
           <Suspense fallback={viewLoading}>
-            {tab === 'dashboard' ? (
+            <div hidden={tab !== 'dashboard'} style={{ height: '100%' }}>
               <DashboardView
                 lang={lang}
                 sysPayload={sysPayload}
@@ -552,17 +579,24 @@ const AppShell: React.FC<{
                   setSysPayload((prev) => (prev ? { ...prev, system: sys } : prev))
                 }
               />
-            ) : tab === 'cleanup' ? (cleanupEntries === null ? cleanupFeedback(cleanup.error) : null
+            </div>
+            {visitedTabs.has('features') && (
+              <div hidden={tab !== 'features'} style={{ height: '100%' }}>
+                <FeaturesView lang={lang} isAdmin={Boolean(sysPayload?.system.is_admin)} />
+              </div>
+            )}
+            {visitedTabs.has('rescue') && (
+              <div hidden={tab !== 'rescue'} style={{ height: '100%' }}>
+                <RescueView lang={lang} isAdmin={Boolean(sysPayload?.system.is_admin)} />
+              </div>
+            )}
+            {tab === 'cleanup' ? (cleanupEntries === null ? cleanupFeedback(cleanup.error) : null
             ) : tab === 'diskmap' ? null : tab === 'drivers' ? (
               <DriverView lang={lang} isAdmin={Boolean(sysPayload?.system.is_admin)} />
-            ) : tab === 'features' ? (
-              <FeaturesView lang={lang} isAdmin={Boolean(sysPayload?.system.is_admin)} />
             ) : tab === 'startup' ? (
               <StartupView lang={lang} isAdmin={Boolean(sysPayload?.system.is_admin)} />
             ) : tab === 'appx' ? (
               <AppxView lang={lang} />
-            ) : tab === 'rescue' ? (
-              <RescueView lang={lang} isAdmin={Boolean(sysPayload?.system.is_admin)} />
             ) : tab === 'optimize' ? optGroups === null ? resourceFeedback(
               lang === 'zh' ? '加载系统优化项' : 'Load optimization controls', optimizer.error, optimizer.reload,
             ) : (
@@ -576,20 +610,38 @@ const AppShell: React.FC<{
                 onSnapshotCreated={(snap) => setSnapshots((prev) => prev && [snap, ...prev.filter((item) => item.id !== snap.id)])}
                 onJumpToSnapshots={() => navigate('snapshots')}
               />
-            ) : snapshots === null ? snapshotFeedback(snapshotList.error) : (
+            ) : tab === 'snapshots' && (snapshots === null ? snapshotFeedback(snapshotList.error) : (
               <SnapshotView
                 lang={lang}
                 snapshots={snapshots}
                 onRefresh={refreshSnapshots}
                 onGroupsUpdated={setOptGroups}
               />
-            )}
+            ))}
           </Suspense>
+          </div>
         </section>
       </main>
     </div>
   );
 };
+
+class AppErrorBoundary extends React.Component<{ children: React.ReactNode }, { failed: boolean }> {
+  state = { failed: false };
+
+  static getDerivedStateFromError() {
+    return { failed: true };
+  }
+
+  render() {
+    if (!this.state.failed) return this.props.children;
+    const zh = storedPreference(LANGUAGE_KEY) !== 'en';
+    return <div role="alert" style={{ padding: 24, display: 'flex', alignItems: 'center', gap: 12 }}>
+      <Text>{zh ? '界面加载失败。' : 'The interface could not be loaded.'}</Text>
+      <Button onClick={() => window.location.reload()}>{zh ? '重新加载' : 'Reload'}</Button>
+    </div>;
+  }
+}
 
 export default function App() {
   const [theme, setTheme] = useState<'dark' | 'light' | null>(() => {
@@ -611,9 +663,11 @@ export default function App() {
   };
   return (
     <FluentProvider theme={dark ? webDarkTheme : webLightTheme}>
-      <MaintenanceProvider>
-        <AppShell dark={dark} onToggleTheme={toggleTheme} />
-      </MaintenanceProvider>
+      <AppErrorBoundary>
+        <MaintenanceProvider>
+          <AppShell dark={dark} onToggleTheme={toggleTheme} />
+        </MaintenanceProvider>
+      </AppErrorBoundary>
     </FluentProvider>
   );
 }

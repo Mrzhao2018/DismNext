@@ -1,3 +1,4 @@
+import { VirtualList } from './VirtualList';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Badge,
@@ -244,15 +245,14 @@ export const OptimizationView: React.FC<Props> = ({
       })
       .filter((r): r is NonNullable<typeof r> => r !== null);
   }, [pendingBatch, itemLookup, lang]);
+  const changedEntries = diffPreviewRows.filter((row) => row.changed).map((row) => row.entry);
 
   const handleConfirmBatch = async () => {
-    if (!pendingBatch) return;
+    if (!pendingBatch || changedEntries.length === 0) return;
     setBatchApplying(true);
     setErrorMsg(null);
     try {
-      const changedEntries = diffPreviewRows.filter((r) => r.changed).map((r) => r.entry);
-      const toApply = changedEntries.length > 0 ? changedEntries : pendingBatch.entries;
-      const res = await api.applyOptBatch(toApply);
+      const res = await api.applyOptBatch(changedEntries);
       onGroupsUpdated(res.groups);
       setNotice({
         text:
@@ -450,7 +450,7 @@ export const OptimizationView: React.FC<Props> = ({
         </div>
 
         <div className={styles.itemsCard}>
-          {visibleItems.map(({ groupName, item, status }) => (
+          <VirtualList rows={visibleItems} getKey={(row) => row.item.id} label={lang === 'zh' ? '优化项' : 'Optimization settings'} renderRow={({ groupName, item, status }) => (
             <div key={item.id} className={styles.itemRow}>
               <div style={{ display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0, flex: 1 }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
@@ -477,12 +477,14 @@ export const OptimizationView: React.FC<Props> = ({
               <div style={{ flexShrink: 0 }}>
                 {status.kind === 'checkbox' ? (
                   <Switch
+                    aria-label={pickText(item.name, lang)}
                     checked={status.enabled}
-                    disabled={busyId === item.id}
+                    disabled={busyId !== null || batchApplying}
                     onChange={(_, d) => handleApply(item.id, d.checked)}
                   />
                 ) : (
                   <Dropdown
+                    aria-label={pickText(item.name, lang)}
                     value={
                       status.selected_index !== null
                         ? pickText(status.options[status.selected_index]?.name, lang)
@@ -493,10 +495,10 @@ export const OptimizationView: React.FC<Props> = ({
                     selectedOptions={
                       status.selected_index !== null ? [String(status.selected_index)] : []
                     }
-                    disabled={busyId === item.id}
+                    disabled={busyId !== null || batchApplying}
                     onOptionSelect={(_, d) => {
                       if (d.optionValue !== undefined) {
-                        handleApply(item.id, Number(d.optionValue));
+                        void handleApply(item.id, Number(d.optionValue));
                       }
                     }}
                     style={{ minWidth: 200 }}
@@ -510,7 +512,7 @@ export const OptimizationView: React.FC<Props> = ({
                 )}
               </div>
             </div>
-          ))}
+          )} />
           {visibleItems.length === 0 && (
             <Text style={{ padding: 20, color: tokens.colorNeutralForeground3 }}>
               {lang === 'zh' ? '当前筛选下无优化项。' : 'No matching optimization items.'}
@@ -566,8 +568,8 @@ export const OptimizationView: React.FC<Props> = ({
               </div>
               <Text size={100} block style={{ marginTop: 8, color: tokens.colorNeutralForeground3 }}>
                 {lang === 'zh'
-                  ? `共 ${diffPreviewRows.filter((r) => r.changed).length} 项待变更，应用前将自动生成注册表回滚快照。`
-                  : `${diffPreviewRows.filter((r) => r.changed).length} item(s) will change with automatic rollback snapshots.`}
+                  ? `共 ${changedEntries.length} 项待变更，应用前将自动生成注册表回滚快照。`
+                  : `${changedEntries.length} item(s) will change with automatic rollback snapshots.`}
               </Text>
             </DialogContent>
             <DialogActions>
@@ -578,7 +580,7 @@ export const OptimizationView: React.FC<Props> = ({
               >
                 {lang === 'zh' ? '取消' : 'Cancel'}
               </Button>
-              <Button appearance="primary" disabled={batchApplying} onClick={handleConfirmBatch}>
+              <Button appearance="primary" disabled={batchApplying || changedEntries.length === 0} onClick={handleConfirmBatch}>
                 {batchApplying ? (
                   <Spinner size="tiny" />
                 ) : lang === 'zh' ? (

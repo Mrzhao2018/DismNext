@@ -1,3 +1,4 @@
+import { VirtualList } from './VirtualList';
 import React, { useEffect, useMemo, useState } from 'react';
 import {
   Badge,
@@ -436,7 +437,7 @@ export const StartupView: React.FC<Props> = ({ lang, isAdmin }) => {
               {lang === 'zh' ? '当前筛选下没有启动项。' : 'No matching startup items found.'}
             </Text>
           ) : (
-            filteredRun.map((it) => {
+            <VirtualList rows={filteredRun} getKey={(it) => it.id} label={lang === 'zh' ? '启动项' : 'Startup items'} renderRow={(it) => {
               const lockedByPriv = it.scope === 'system' && !isAdmin;
               return (
                 <div key={it.id} className={styles.row}>
@@ -480,12 +481,13 @@ export const StartupView: React.FC<Props> = ({ lang, isAdmin }) => {
                         size="small"
                         appearance="subtle"
                         icon={<FolderOpen16Regular />}
-                        onClick={() => api.revealInExplorer(it.target_path!)}
+                        onClick={() => { void api.revealInExplorer(it.target_path!).catch((error) => setErrorMsg(String(error))); }}
                       >
                         {lang === 'zh' ? '定位' : 'Reveal'}
                       </Button>
                     )}
                     <Switch
+                      aria-label={it.name}
                       checked={it.enabled}
                       disabled={busyId === it.id || lockedByPriv}
                       onChange={(_, d) => handleToggleRun(it, d.checked)}
@@ -493,7 +495,7 @@ export const StartupView: React.FC<Props> = ({ lang, isAdmin }) => {
                   </div>
                 </div>
               );
-            })
+            }} />
           ))}
 
         {mode === 'services' &&
@@ -506,7 +508,7 @@ export const StartupView: React.FC<Props> = ({ lang, isAdmin }) => {
               {lang === 'zh' ? '当前筛选下没有匹配的第三方后台服务。' : 'No matching third-party services.'}
             </Text>
           ) : (
-            filteredServices.map((svc) => (
+            <VirtualList rows={filteredServices} getKey={(svc) => svc.name} label={lang === 'zh' ? '后台服务' : 'Services'} renderRow={(svc) => (
               <div key={svc.name} className={styles.row}>
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 3, minWidth: 0, flex: 1 }}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
@@ -571,7 +573,7 @@ export const StartupView: React.FC<Props> = ({ lang, isAdmin }) => {
                       size="small"
                       appearance="subtle"
                       icon={<FolderOpen16Regular />}
-                      onClick={() => api.revealInExplorer(svc.target_path!)}
+                      onClick={() => { void api.revealInExplorer(svc.target_path!).catch((error) => setErrorMsg(String(error))); }}
                     />
                   )}
                   <Button
@@ -600,7 +602,7 @@ export const StartupView: React.FC<Props> = ({ lang, isAdmin }) => {
                   </Button>
                 </div>
               </div>
-            ))
+            )} />
           ))}
 
         {mode === 'tasks' &&
@@ -613,7 +615,7 @@ export const StartupView: React.FC<Props> = ({ lang, isAdmin }) => {
               {lang === 'zh' ? '当前筛选下没有匹配的第三方计划任务。' : 'No matching scheduled tasks.'}
             </Text>
           ) : (
-            filteredTasks.map((t) => (
+            <VirtualList rows={filteredTasks} getKey={(t) => t.path} label={lang === 'zh' ? '计划任务' : 'Scheduled tasks'} renderRow={(t) => (
               <div key={t.path} className={styles.row}>
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 3, minWidth: 0, flex: 1 }}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
@@ -643,12 +645,13 @@ export const StartupView: React.FC<Props> = ({ lang, isAdmin }) => {
                 </div>
 
                 <Switch
+                  aria-label={t.name}
                   checked={t.enabled}
                   disabled={busyId === t.path}
                   onChange={(_, d) => handleToggleTask(t.path, d.checked)}
                 />
               </div>
-            ))
+            )} />
           ))}
       </div>
       <Dialog

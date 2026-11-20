@@ -1345,7 +1345,7 @@
       },
       "warning": {
         "zh": "如果未在Visual Studio的首选项中打开“允许NuGet下载缺少的程序包”，则应用生成将会失败。",
-        "en": "如果未在Visual Studio的首选项中打开“允许NuGet下载缺少的程序包”，则应用生成将会失败。"
+        "en": "The application build will fail unless Visual Studio allows NuGet to download missing packages."
       },
       "level": 2,
       "work": null,
@@ -9107,7 +9107,7 @@
                 ],
                 "warning": {
                   "zh": "将导致桌面壁纸质量降低，影响视觉效果。",
-                  "en": "将导致桌面壁纸质量降低，影响视觉效果。"
+                  "en": "This reduces desktop wallpaper quality."
                 },
                 "restart": null
               },
@@ -9186,7 +9186,7 @@
                 ],
                 "warning": {
                   "zh": "将增加系统资源消耗。",
-                  "en": "将增加系统资源消耗。"
+                  "en": "This increases system resource usage."
                 },
                 "restart": null
               }
@@ -9223,7 +9223,7 @@
                 ],
                 "warning": {
                   "zh": "将导致桌面壁纸质量降低，影响视觉效果。",
-                  "en": "将导致桌面壁纸质量降低，影响视觉效果。"
+                  "en": "This reduces desktop wallpaper quality."
                 },
                 "restart": null
               },
@@ -9302,7 +9302,7 @@
                 ],
                 "warning": {
                   "zh": "将增加系统资源消耗。",
-                  "en": "将增加系统资源消耗。"
+                  "en": "This increases system resource usage."
                 },
                 "restart": null
               }
@@ -25904,7 +25904,7 @@
       "id": "grp-13",
       "name": {
         "zh": "微软注音输入法",
-        "en": "微软注音输入法"
+        "en": "Microsoft Bopomofo IME"
       },
       "applicable": {
         "type": "RegExist",
@@ -25939,7 +25939,7 @@
               {
                 "name": {
                   "zh": "中文模式",
-                  "en": "中文模式"
+                  "en": "Chinese mode"
                 },
                 "applicable": {
                   "type": "RegExist",
@@ -25968,7 +25968,7 @@
               {
                 "name": {
                   "zh": "英数模式",
-                  "en": "英数模式"
+                  "en": "Alphanumeric mode"
                 },
                 "applicable": {
                   "type": "RegExist",

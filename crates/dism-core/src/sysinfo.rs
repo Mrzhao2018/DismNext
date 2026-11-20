@@ -248,13 +248,7 @@ pub fn relaunch_as_admin(extra_args: &[String]) -> Result<()> {
     let file: Vec<u16> = exe.as_os_str().encode_wide().chain(Some(0)).collect();
     let params_str = extra_args
         .iter()
-        .map(|a| {
-            if a.contains(' ') {
-                format!("\"{}\"", a)
-            } else {
-                a.clone()
-            }
-        })
+        .map(|arg| crate::win_util::quote_windows_arg(arg))
         .collect::<Vec<_>>()
         .join(" ");
     let params: Vec<u16> = OsStr::new(&params_str)

@@ -216,7 +216,7 @@ export const DashboardView: React.FC<Props> = ({
   };
 
   useEffect(() => {
-    loadMetrics();
+    void loadMetrics();
   }, []);
 
   const handleRunComponentCleanup = async () => {

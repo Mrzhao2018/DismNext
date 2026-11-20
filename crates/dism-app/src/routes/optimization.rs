@@ -36,7 +36,7 @@ pub(super) fn handle(req: &mut Request, path: &str, state: &AppState) -> Result<
         }
         (&Method::Post, "/api/optimizer/apply") => {
             let payload: OptApplyReq = read_json_body(req)?;
-            let _operation = state.begin_cleanup_mutation();
+            let _operation = state.begin_cleanup_mutation()?;
             let cat = state.catalog.read().unwrap();
             let outcome = apply_optimization(
                 &cat.optimization_groups,
@@ -57,7 +57,7 @@ pub(super) fn handle(req: &mut Request, path: &str, state: &AppState) -> Result<
         }
         (&Method::Post, "/api/optimizer/batch") => {
             let payload: OptBatchReq = read_json_body(req)?;
-            let _operation = state.begin_cleanup_mutation();
+            let _operation = state.begin_cleanup_mutation()?;
             let cat = state.catalog.read().unwrap();
             let outcome = apply_optimization_batch(
                 &cat.optimization_groups,
@@ -81,7 +81,7 @@ pub(super) fn handle(req: &mut Request, path: &str, state: &AppState) -> Result<
         }
         (&Method::Post, "/api/snapshots/restore") => {
             let payload: RestoreReq = read_json_body(req)?;
-            let _operation = state.begin_cleanup_mutation();
+            let _operation = state.begin_cleanup_mutation()?;
             let restored = state.snap_mgr.restore(&payload.snapshot_id)?;
             let cat = state.catalog.read().unwrap();
             let refreshed_groups = evaluate_all_groups(&cat.optimization_groups, &sys);

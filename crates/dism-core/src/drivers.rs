@@ -1,11 +1,15 @@
 use crate::ttl_cache::TtlCache;
+use crate::win_util::{
+    has_reparse_point_in_ancestors, is_local_drive_path, normalize_win_path, pin_directory,
+    windows_dir_or_default, CREATE_NO_WINDOW, FILE_ATTRIBUTE_REPARSE_POINT,
+};
 use anyhow::{anyhow, Context, Result};
 use chrono::DateTime;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
-use std::fs;
-use std::io;
+use std::fs::{self, File, OpenOptions};
+use std::io::{self, Write};
 use std::os::windows::ffi::OsStrExt;
 use std::os::windows::fs::MetadataExt;
 use std::os::windows::process::CommandExt;
@@ -20,8 +24,6 @@ use windows_sys::Win32::Foundation::{ERROR_NOT_FOUND, ERROR_NO_MORE_ITEMS, INVAL
 use winreg::enums::{HKEY_LOCAL_MACHINE, KEY_READ};
 use winreg::RegKey;
 
-const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
 const DRIVER_PACKAGES_KEY: &str = r"SYSTEM\DriverDatabase\DriverPackages";
 const CONTROL_CLASS_KEY: &str = r"SYSTEM\CurrentControlSet\Control\Class";
 
@@ -105,8 +107,7 @@ pub(crate) fn compute_drivers_uncached() -> Vec<DriverPackageInfo> {
     };
 
     let class_map = load_class_guid_map(&hklm);
-    let sys_root = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".to_string());
-    let file_repo_base = PathBuf::from(&sys_root).join(r"System32\DriverStore\FileRepository");
+    let file_repo_base = windows_dir_or_default().join(r"System32\DriverStore\FileRepository");
 
     let mut raw_entries = Vec::new();
     for repo_folder in pkg_root.enum_keys().flatten() {
@@ -224,17 +225,20 @@ pub fn export_drivers(
     target_dir: &Path,
     published_names: Option<&[String]>,
 ) -> Result<DriverBackupReport> {
+    anyhow::ensure!(
+        !published_names.is_some_and(|names| names.is_empty()),
+        "No driver packages selected for backup"
+    );
     if target_dir.as_os_str().is_empty() {
         return Err(anyhow!("Backup target directory cannot be empty"));
     }
+    let target_dir = std::path::absolute(target_dir)?;
+    validate_backup_destination(&target_dir)?;
 
     let all_drivers = list_drivers();
     let selected: Vec<DriverPackageInfo> = match published_names {
         None => all_drivers,
         Some(names) => {
-            if names.is_empty() {
-                return Err(anyhow!("No driver packages selected for backup"));
-            }
             let wanted: HashSet<String> = names
                 .iter()
                 .map(|s| s.trim().to_ascii_lowercase())
@@ -252,8 +256,18 @@ pub fn export_drivers(
         ));
     }
 
-    fs::create_dir_all(target_dir)
-        .with_context(|| format!("Failed to create backup directory {}", target_dir.display()))?;
+    let _destination = pin_directory(&target_dir, true)
+        .with_context(|| format!("Cannot open backup directory {}", target_dir.display()))?;
+    let manifest_path = target_dir.join("driver_backup_manifest.json");
+    let restore_script = target_dir.join("Restore-Drivers.cmd");
+    for path in [&manifest_path, &restore_script] {
+        anyhow::ensure!(
+            path.symlink_metadata()
+                .is_err_and(|error| error.kind() == io::ErrorKind::NotFound),
+            "Choose a new backup folder. '{}' already exists or cannot be checked",
+            path.display()
+        );
+    }
 
     let mut exported_count = 0usize;
     let mut total_bytes = 0u64;
@@ -304,22 +318,19 @@ pub fn export_drivers(
         }));
     }
 
-    let manifest_path = target_dir.join("driver_backup_manifest.json");
     let manifest_json = serde_json::to_string_pretty(&serde_json::json!({
         "created_at": chrono::Local::now().to_rfc3339(),
         "exported_count": exported_count,
         "total_bytes": total_bytes,
         "drivers": manifest_entries,
     }))?;
-    fs::write(&manifest_path, manifest_json)?;
-
-    let restore_script = target_dir.join("Restore-Drivers.cmd");
     let script_body = "@echo off\r\n\
 echo Restoring backed-up drivers via Windows PnPUtil (Run as Administrator)...\r\n\
 pnputil.exe /add-driver \"%~dp0*.inf\" /subdirs /install\r\n\
 echo.\r\n\
 pause\r\n";
-    fs::write(restore_script, script_body)?;
+    create_backup_file(&restore_script)?.write_all(script_body.as_bytes())?;
+    create_backup_file(&manifest_path)?.write_all(manifest_json.as_bytes())?;
 
     Ok(DriverBackupReport {
         target_dir: target_dir.to_string_lossy().into_owned(),
@@ -327,6 +338,43 @@ pause\r\n";
         total_bytes,
         manifest_path: manifest_path.to_string_lossy().into_owned(),
     })
+}
+
+fn validate_backup_destination(path: &Path) -> Result<()> {
+    let windows = normalize_win_path(&crate::system_tools::windows_dir()?);
+    anyhow::ensure!(
+        is_local_drive_path(path)
+            && !has_reparse_point_in_ancestors(path, true)
+            && !normalize_win_path(path).starts_with(&windows),
+        "Choose a local backup folder outside protected locations: {}",
+        path.display()
+    );
+    for ancestor in path.ancestors() {
+        match ancestor.canonicalize() {
+            Ok(existing) => {
+                let suffix = path.strip_prefix(ancestor)?;
+                let candidate = if suffix.as_os_str().is_empty() {
+                    existing
+                } else {
+                    existing.join(suffix)
+                };
+                anyhow::ensure!(
+                    !normalize_win_path(&candidate).starts_with(&windows)
+                        && !crate::diskmap::is_protected_recycle_target(&candidate),
+                    "Choose a backup folder outside protected locations: {}",
+                    path.display()
+                );
+                break;
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(())
+}
+
+fn create_backup_file(path: &Path) -> io::Result<File> {
+    OpenOptions::new().write(true).create_new(true).open(path)
 }
 
 /// Deletes an `oemXX.inf` driver package safely using `pnputil.exe /delete-driver <published_name>`
@@ -657,7 +705,8 @@ fn dir_size_bytes(dir: &Path) -> u64 {
 }
 
 fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<u64> {
-    fs::create_dir_all(dst)?;
+    fs::create_dir(dst)?;
+    let _destination = pin_directory(dst, false)?;
     let mut total = 0u64;
     for entry in fs::read_dir(src)? {
         let entry = entry?;
@@ -670,7 +719,7 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<u64> {
         if meta.is_dir() {
             total += copy_dir_recursive(&p, &target)?;
         } else if meta.is_file() {
-            let bytes = fs::copy(&p, &target)?;
+            let bytes = io::copy(&mut File::open(&p)?, &mut create_backup_file(&target)?)?;
             total += bytes;
         }
     }

@@ -87,7 +87,7 @@ fn is_local_drive_path(path: &Path) -> bool {
 }
 
 fn read_shortcut_target(path: &Path) -> Option<String> {
-    let _apartment = Apartment::initialize().ok()?;
+    let _apartment = Apartment::initialize_any().ok()?;
     let wide: Vec<_> = path.as_os_str().encode_wide().chain(Some(0)).collect();
     let mut target = vec![0; 32_768];
     unsafe {
@@ -103,7 +103,7 @@ fn read_shortcut_target(path: &Path) -> Option<String> {
 
 pub(super) fn compute_scheduled_tasks_uncached() -> Vec<ScheduledTaskItem> {
     let loaded = || -> windows::core::Result<Vec<ScheduledTaskItem>> {
-        let _apartment = Apartment::initialize()?;
+        let _apartment = Apartment::initialize_any()?;
         let empty = VARIANT::default();
         unsafe {
             let service: ITaskService =

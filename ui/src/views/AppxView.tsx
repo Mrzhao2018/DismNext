@@ -1,3 +1,4 @@
+import { VirtualList } from './VirtualList';
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   Badge,
@@ -559,7 +560,7 @@ export const AppxView: React.FC<Props> = ({ lang }) => {
               {lang === 'zh' ? '没有匹配的桌面软件。' : 'No matching desktop software found.'}
             </Text>
           ) : (
-            filteredWin32.map((app) => (
+            <VirtualList rows={filteredWin32} getKey={(app) => app.id} label={lang === 'zh' ? '桌面应用' : 'Desktop apps'} renderRow={(app) => (
               <div key={app.id} className={styles.row}>
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 3, minWidth: 0, flex: 1 }}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
@@ -600,7 +601,7 @@ export const AppxView: React.FC<Props> = ({ lang }) => {
                       size="small"
                       appearance="subtle"
                       icon={<FolderOpen16Regular />}
-                      onClick={() => api.revealInExplorer(app.install_location)}
+                      onClick={() => { void api.revealInExplorer(app.install_location).catch((error) => setErrorMsg(String(error))); }}
                     >
                       {lang === 'zh' ? '目录' : 'Folder'}
                     </Button>
@@ -627,7 +628,7 @@ export const AppxView: React.FC<Props> = ({ lang }) => {
                   </Button>
                 </div>
               </div>
-            ))
+            )} />
           )
         ) : loadingAppx ? (
           <div style={{ padding: 40, display: 'flex', justifyContent: 'center' }}>
@@ -638,7 +639,7 @@ export const AppxView: React.FC<Props> = ({ lang }) => {
             {lang === 'zh' ? '当前分类下没有匹配的应用。' : 'No matching packages found.'}
           </Text>
         ) : (
-          filteredAppx.map((pkg) => (
+          <VirtualList rows={filteredAppx} getKey={(pkg) => pkg.package_full_name} label={lang === 'zh' ? '现代应用' : 'AppX packages'} renderRow={(pkg) => (
             <div key={pkg.package_full_name} className={styles.row}>
               <div style={{ display: 'flex', flexDirection: 'column', gap: 3, minWidth: 0, flex: 1 }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
@@ -667,7 +668,7 @@ export const AppxView: React.FC<Props> = ({ lang }) => {
                     size="small"
                     appearance="subtle"
                     icon={<FolderOpen16Regular />}
-                    onClick={() => api.revealInExplorer(pkg.install_location)}
+                    onClick={() => { void api.revealInExplorer(pkg.install_location).catch((error) => setErrorMsg(String(error))); }}
                   >
                     {lang === 'zh' ? '目录' : 'Folder'}
                   </Button>
@@ -689,7 +690,7 @@ export const AppxView: React.FC<Props> = ({ lang }) => {
                 </Button>
               </div>
             </div>
-          ))
+          )} />
         )}
       </div>
 
@@ -864,7 +865,7 @@ export const AppxView: React.FC<Props> = ({ lang }) => {
                           size="small"
                           appearance="subtle"
                           icon={<FolderOpen16Regular />}
-                          onClick={() => api.revealInExplorer(item.path)}
+                          onClick={() => { void api.revealInExplorer(item.path).catch((error) => setLeftoverError(String(error))); }}
                         />
                       </div>
                     );

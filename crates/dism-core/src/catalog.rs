@@ -1,9 +1,11 @@
 use crate::diskmap::is_protected_recycle_target;
-use crate::evaluator::expand_expression;
+use crate::evaluator::{expand_expression, has_balanced_inline_calls};
+use crate::win_util::{has_reparse_point_in_ancestors, is_local_drive_path, is_unc_path};
 use anyhow::{anyhow, ensure, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 const EMBEDDED_CATALOG: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/rules.json.gz"));
 
@@ -246,6 +248,8 @@ impl Catalog {
             parse_embedded_catalog()?
         };
 
+        validate_catalog_baseline(&catalog)?;
+
         let mut existing_ids: HashSet<String> =
             catalog.cleanup_rules.iter().map(|r| r.id.clone()).collect();
         for custom_rule in Self::load_custom_rules() {
@@ -297,8 +301,10 @@ impl Catalog {
             .filter(|s| !s.is_empty())
             .map(|s| s.to_string())
             .unwrap_or_else(|| {
-                let ts = chrono::Local::now().format("%Y%m%d%H%M%S").to_string();
-                format!("custom-{}", ts)
+                static CUSTOM_RULE_SEQ: AtomicU64 = AtomicU64::new(1);
+                let ts = chrono::Local::now().format("%Y%m%d%H%M%S%3f").to_string();
+                let seq = CUSTOM_RULE_SEQ.fetch_add(1, Ordering::Relaxed);
+                format!("custom-{ts}-{seq}")
             });
         validate_custom_id(&id)?;
 
@@ -508,30 +514,100 @@ fn validate_custom_id(id: &str) -> Result<()> {
     Ok(())
 }
 
+fn validate_catalog_baseline(catalog: &Catalog) -> Result<()> {
+    ensure!(
+        catalog.schema_version == 1,
+        "Unsupported catalog schema_version {}",
+        catalog.schema_version
+    );
+    let mut ids = HashSet::new();
+    for id in catalog.cleanup_rules.iter().map(|rule| &rule.id).chain(
+        catalog.optimization_groups.iter().flat_map(|group| {
+            std::iter::once(&group.id).chain(group.items.iter().map(|item| &item.id))
+        }),
+    ) {
+        ensure!(
+            !id.trim().is_empty() && ids.insert(id.as_str()),
+            "Duplicate or empty catalog ID: '{id}'"
+        );
+    }
+    let val = serde_json::to_value(catalog)?;
+    check_catalog_value_expressions(&val, false)?;
+    Ok(())
+}
+
+fn check_catalog_value_expressions(
+    value: &serde_json::Value,
+    interactive_data: bool,
+) -> Result<()> {
+    match value {
+        serde_json::Value::String(text) => {
+            ensure!(
+                has_balanced_inline_calls(text),
+                "Unclosed inline expression in catalog: {text}"
+            );
+            ensure!(
+                interactive_data || !text.contains("?ColorDialog("),
+                "Unmarked ColorDialog expression in catalog: {text}"
+            );
+        }
+        serde_json::Value::Array(values) => {
+            for item in values {
+                check_catalog_value_expressions(item, false)?;
+            }
+        }
+        serde_json::Value::Object(fields) => {
+            let interactive = fields.get("type").and_then(serde_json::Value::as_str)
+                == Some("RegWrite")
+                && fields.get("fun").and_then(serde_json::Value::as_bool) == Some(true);
+            for (name, v) in fields {
+                check_catalog_value_expressions(v, interactive && name == "data")?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
 fn validate_custom_action(root_path: &str, queries: &[String]) -> Result<()> {
+    ensure!(
+        !is_unc_path(Path::new(root_path.trim())),
+        "Custom cleanup root '{root_path}' cannot be a network/UNC path"
+    );
     let expanded = expand_expression(root_path, None)
         .filter(|path| !path.trim().is_empty())
         .ok_or_else(|| anyhow!("Could not resolve custom cleanup root '{root_path}'"))?;
     let normalized = expanded.trim().replace('/', "\\");
-    let mut root = normalized.as_str();
-    if queries.is_empty() {
-        if let Some((parent, leaf)) = root.rsplit_once('\\') {
-            if leaf.contains(['*', '?']) {
-                root = parent;
-            }
-        }
-    }
-    let system_drive_pattern;
-    if let Some(suffix) = root.strip_prefix(r"*\") {
+    ensure!(
+        !is_unc_path(Path::new(&normalized)),
+        "Custom cleanup root '{root_path}' cannot be a network/UNC path"
+    );
+    ensure!(
+        !Path::new(&normalized)
+            .components()
+            .any(|part| matches!(part, Component::ParentDir)),
+        "Custom cleanup root '{root_path}' must not contain '..'"
+    );
+
+    let mut root_buf = normalized.clone();
+    if let Some(suffix) = root_buf.strip_prefix(r"*\") {
         let windows_dir = crate::system_tools::windows_dir()?;
         let volume = windows_dir.ancestors().last().unwrap_or(&windows_dir);
-        system_drive_pattern = volume.join(suffix);
-        root = system_drive_pattern
-            .to_str()
-            .ok_or_else(|| anyhow!("Invalid custom cleanup root"))?;
+        root_buf = volume.join(suffix).to_string_lossy().into_owned();
     }
+
+    // Always evaluate the deepest static prefix before any wildcard (`*` / `?`),
+    // regardless of whether `queries` is empty or non-empty.
+    let prefix = static_root_prefix(&root_buf);
     ensure!(
-        !root.is_empty() && root != "*" && !is_protected_recycle_target(Path::new(root)),
+        !prefix.is_empty(),
+        "Custom cleanup root '{root_path}' has no static directory"
+    );
+    let prefix = std::path::absolute(prefix)?;
+    ensure!(
+        is_local_drive_path(&prefix)
+            && !is_protected_recycle_target(&prefix)
+            && !has_reparse_point_in_ancestors(&prefix, true),
         "Custom cleanup root '{root_path}' is protected"
     );
     ensure!(
@@ -540,11 +616,26 @@ fn validate_custom_action(root_path: &str, queries: &[String]) -> Result<()> {
                 && !query.starts_with(['\\', '/'])
                 && query
                     .split(['\\', '/'])
-                    .all(|part| !part.ends_with(['.', ' ']))
+                    .all(|part| part != ".." && !part.ends_with(['.', ' ']))
         }),
         "Custom rule queries must stay within the cleanup root"
     );
     Ok(())
+}
+
+fn static_root_prefix(root: &str) -> String {
+    let mut parts = Vec::new();
+    for seg in root.split('\\') {
+        if seg.contains(['*', '?']) {
+            break;
+        }
+        parts.push(seg);
+    }
+    let mut joined = parts.join("\\");
+    if joined.len() == 2 && joined.ends_with(':') {
+        joined.push('\\');
+    }
+    joined
 }
 
 #[cfg(test)]
@@ -626,6 +717,8 @@ mod tests {
         assert!(validate_custom_action(r"C:\", &["*".into()]).is_err());
         assert!(validate_custom_action(r"%SystemRoot%\.", &["*".into()]).is_err());
         assert!(validate_custom_action(r"*\Windows", &["*".into()]).is_err());
+        assert!(validate_custom_action(r"%SystemRoot%\*", &["*".into()]).is_err());
+        assert!(validate_custom_action(r"%SystemRoot%\Servicing\*", &[]).is_err());
         assert!(validate_custom_action(r"C:\example", &[r"..\*".into()]).is_err());
         assert!(validate_custom_id("clean-042").is_err());
 

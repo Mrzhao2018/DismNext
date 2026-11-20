@@ -41,6 +41,10 @@ cargo build --release --workspace --locked
 
 使用 Vite 开发时，以标准用户运行 `cargo run -p dism-app -- --no-window --dev-origin`，然后把终端输出链接的 `#token=…` 附到 Vite 页面地址 `http://127.0.0.1:5173/`。默认使用内嵌规则库。可用 `--catalog` 指定受信任的外部规则库，或用 `--ui-dir` 托管受信任的已构建前端。
 
+桌面端的提权按钮适用于内嵌界面和规则库。若需要在管理员会话使用外部规则库或界面，请确认文件可信后，从管理员终端直接启动并指定路径。
+
+管理员窗口使用系统安装的 Microsoft Edge WebView2 Runtime 和独立的受保护配置目录。再次启动同权限的桌面端会唤回已有窗口。
+
 ## 能做什么
 
 | 功能 | 你可以用它做什么 |
@@ -62,6 +66,8 @@ DISM、SFC、CompactOS 和 Windows 可选功能操作会在后台运行。桌面
 
 回收卸载残留前，桌面端会复核目录及其内容。已变更、被移走或包含重定向的目录会跳过，批量结果会列出每项状态及原因。
 
+按用户安装的 Win32 应用，请在标准权限窗口卸载。驱动备份请选择新的本地目录，每次备份会生成独立的清单和恢复脚本。
+
 从磁盘分析回收普通文件或目录时，确认窗口会核对所选目标并显示当前逻辑大小。自扫描后发生变化的目标需要重新扫描，确认后跳过的项目仍保留在扫描统计中。
 
 切换页面时，空间分析和空间回收会保留已加载的结果及正在运行的扫描。主题和语言偏好会保存在浏览器中，首次使用时主题跟随系统设置。
@@ -82,13 +88,17 @@ $cli = '.\target\release\dism-cli.exe'
 & $cli snapshot list
 ```
 
-`clean-042` 是内置的「临时文件」规则。`clean` 默认执行 Dry Run，确认目标后，用 `clean clean-042 --execute` 执行实际清理。用 `--help` 查看所有命令，或用 `drivers --help`、`snapshot --help` 查看子命令。`info`、`scan` 和 `preview` 等命令支持 `--json`。
+`clean-042` 是内置的「临时文件」规则。`clean` 默认执行 Dry Run。运行 `clean clean-042 --execute` 会在终端展示本次复核结果，输入 `CLEAN` 后执行这份计划。用 `--help` 查看子命令。`info`、`scan` 和 `preview` 等命令支持 `--json`。
 
 `diskmap --allocated` 会额外读取 NTFS 文件数据的分配空间，并报告无法测量的文件。目录树、文件类型和大文件排名按逻辑大小计算。
+
+`startup toggle` 和 `features toggle` 都需要显式传入 `--enable` 或 `--disable`。
 
 用 `wim "D:\sources\install.wim" --json` 查看离线镜像的索引、版本和架构。Windows 允许时，报告也会列出系统 WIM 挂载记录。
 
 ## MCP 接入
+
+实际清理时，先用 `dismnext_review_cleanup` 取得计划和预估影响，向用户展示并确认后，再用 `dismnext_confirm_cleanup` 提交该计划 ID。计划在当前 MCP 会话内有效，五分钟内可用一次。桌面端、CLI 和 MCP 共享清理互斥锁。
 
 支持 stdio 的 MCP 客户端可以直接启动 `dism-cli.exe mcp`。以下示例使用 `mcpServers` 配置格式，请把 `command` 换成你机器上的绝对路径。
 
@@ -113,7 +123,7 @@ $cli = '.\target\release\dism-cli.exe'
 | [`crates/dism-cli`](crates/dism-cli) | CLI 和 stdio MCP 服务。 |
 | [`crates/dism-app`](crates/dism-app) | 本地 HTTP 服务、后台扫描任务和桌面启动器。 |
 | [`ui`](ui) | 使用 React、TypeScript、Fluent UI 9 和 Vite 构建的中英双语界面。 |
-| [`catalog/rules.json`](catalog/rules.json) | 构建时嵌入的清理与优化规则。 |
+| [`catalog/rules.json`](catalog/rules.json) | 构建时嵌入的清理与优化规则，请在此维护发布规则。旧 XML 导入工具只生成供人工审核的候选文件。 |
 
 注册表快照保存在数据目录下的 `snapshots/`，自定义清理规则保存在 `custom_rules.json`。应用优先沿用工作目录或 EXE 所在目录下已有的可写 `data/`。新安装默认在 EXE 旁写入，便携位置不可写时使用 `%LOCALAPPDATA%\DismNext`。应用仍会查找旧位置中的已有数据。
 

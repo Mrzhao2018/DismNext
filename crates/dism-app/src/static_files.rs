@@ -15,6 +15,19 @@ struct EmbeddedAsset {
 
 include!(concat!(env!("OUT_DIR"), "/embedded_ui.rs"));
 
+pub(crate) fn add_security_headers<R: Read>(response: &mut Response<R>) {
+    for (name, value) in [
+        (
+            "Content-Security-Policy",
+            "frame-ancestors 'none'; object-src 'none'; base-uri 'none'",
+        ),
+        ("X-Frame-Options", "DENY"),
+        ("X-Content-Type-Options", "nosniff"),
+    ] {
+        response.add_header(Header::from_bytes(name, value).unwrap());
+    }
+}
+
 pub fn embedded_asset_count() -> usize {
     EMBEDDED_UI_ASSETS.len()
 }
@@ -65,13 +78,9 @@ pub fn serve_embedded(req: Request, url_path: &str) {
     if use_gzip {
         headers.push(Header::from_bytes("Content-Encoding", "gzip").unwrap());
     }
-    let _ = req.respond(Response::new(
-        StatusCode(200),
-        headers,
-        data,
-        Some(size),
-        None,
-    ));
+    let mut response = Response::new(StatusCode(200), headers, data, Some(size), None);
+    add_security_headers(&mut response);
+    let _ = req.respond(response);
 }
 
 /// `Some(true)` selects gzip, `Some(false)` selects identity, and `None` is HTTP 406.
@@ -126,6 +135,7 @@ pub fn serve(req: Request, ui_dir: &Path, url_path: &str) {
                 return;
             }
             let mut resp = Response::from_data(bytes);
+            add_security_headers(&mut resp);
             if let Ok(header) = Header::from_bytes("Content-Type", content_type_for(&path)) {
                 resp.add_header(header);
             }

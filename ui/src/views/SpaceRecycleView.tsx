@@ -1,6 +1,6 @@
 import { calculateSelectedBytes } from '../cleanupSelection';
 import { useMaintenance } from '../MaintenanceJobs';
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Badge,
   Button,
@@ -359,6 +359,8 @@ export const SpaceRecycleView: React.FC<Props> = ({
   );
   const [previewItem, setPreviewItem] = useState<CleanupScanResult | null>(null);
   const [previewLoading, setPreviewLoading] = useState(false);
+  const previewRequest = useRef<AbortController | null>(null);
+  const selectionRevision = useRef(0);
   const [cleanupPhase, setCleanupPhase] = useState<'preview' | 'simulate' | 'execute' | null>(null);
   const [taskRunning, setTaskRunning] = useState<string | null>(null);
   const [pendingSysTask, setPendingSysTask] = useState<string | null>(null);
@@ -368,6 +370,15 @@ export const SpaceRecycleView: React.FC<Props> = ({
   const [lastReport, setLastReport] = useState<CleanupExecutionReport | null>(null);
   const [reportOpen, setReportOpen] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+
+  useEffect(() => {
+    selectionRevision.current += 1;
+    setPreviewItem(null);
+    setPreviewLoading(false);
+    setActiveId((id) => entries.some((entry) => entry.rule.id === id)
+      ? id : entries[0]?.rule.id ?? null);
+    return () => previewRequest.current?.abort();
+  }, [entries]);
 
   const groups = useMemo(() => {
     const map = new Map<string, string>();
@@ -434,19 +445,26 @@ export const SpaceRecycleView: React.FC<Props> = ({
   };
 
   const handleSelectRow = async (entry: CleanupRuleEntry) => {
+    selectionRevision.current += 1;
+    previewRequest.current?.abort();
+    setPreviewItem(null);
+    setPreviewLoading(false);
     setActiveId(entry.rule.id);
     if (!entry.scanned || entry.rule.preview_files.length === 0) {
+      const controller = new AbortController();
+      previewRequest.current = controller;
       setPreviewLoading(true);
       try {
-        const res = await api.previewCleanup(entry.rule.id);
-        setPreviewItem(res);
+        const res = await api.previewCleanup(entry.rule.id, controller.signal);
+        if (!controller.signal.aborted) setPreviewItem(res);
       } catch (e) {
-        setErrorMsg(String(e));
+        if (!controller.signal.aborted) setErrorMsg(String(e));
       } finally {
-        setPreviewLoading(false);
+        if (previewRequest.current === controller) {
+          previewRequest.current = null;
+          setPreviewLoading(false);
+        }
       }
-    } else {
-      setPreviewItem(entry.rule);
     }
   };
 
@@ -467,6 +485,9 @@ export const SpaceRecycleView: React.FC<Props> = ({
         }
       } else if (action === 'execute' && planId) {
         const { report, system } = await api.confirmCleanup(planId);
+        previewRequest.current?.abort();
+        selectionRevision.current += 1;
+        setPreviewItem(null);
         setLastReport(report);
         setReportOpen(true);
         onExecuted(system);
@@ -501,10 +522,6 @@ export const SpaceRecycleView: React.FC<Props> = ({
       if (!result) return;
       const { outcome, system } = result;
       setTaskNotice(outcome.output || (lang === 'zh' ? '系统任务执行完成' : 'Task completed'));
-      if (activeId) {
-        const refreshed = await api.previewCleanup(activeId);
-        setPreviewItem(refreshed);
-      }
       if (onSystemTaskDone) {
         await onSystemTaskDone(system);
       } else {
@@ -518,22 +535,25 @@ export const SpaceRecycleView: React.FC<Props> = ({
   };
 
   const handleInspectLocks = async (filePath: string) => {
+    if (!activeEntry) return;
+    const revision = selectionRevision.current;
     setLockBusyKey(filePath);
     setErrorMsg(null);
     try {
       const { processes } = await api.inspectFileLocks(filePath);
+      if (revision !== selectionRevision.current) return;
       setPreviewItem((prev) => {
-        if (!prev) return prev;
+        const current = prev?.id === activeEntry.id ? prev : activeEntry;
         return {
-          ...prev,
-          preview_files: prev.preview_files.map((pf) =>
+          ...current,
+          preview_files: current.preview_files.map((pf) =>
             pf.path === filePath
               ? {
                   ...pf,
                   locking_processes: processes,
                   reason:
                     processes.length > 0
-                      ? `被进程占用: ${processes
+                      ? `${lang === 'zh' ? '被进程占用' : 'Locked by'}: ${processes
                           .map((p) => `${p.app_name} (PID ${p.pid})`)
                           .join(', ')}`
                       : lang === 'zh'
@@ -552,6 +572,7 @@ export const SpaceRecycleView: React.FC<Props> = ({
   };
 
   const handleKillLockPid = async (path: string, pid: number, startTime: string, appName: string) => {
+    const revision = selectionRevision.current;
     setLockBusyKey(`pid:${pid}`);
     setErrorMsg(null);
     try {
@@ -563,7 +584,7 @@ export const SpaceRecycleView: React.FC<Props> = ({
       );
       if (activeId) {
         const refreshed = await api.previewCleanup(activeId);
-        setPreviewItem(refreshed);
+        if (revision === selectionRevision.current) setPreviewItem(refreshed);
       }
     } catch (e) {
       setErrorMsg(String(e));
@@ -647,6 +668,11 @@ export const SpaceRecycleView: React.FC<Props> = ({
 
   return (
     <div className={styles.root}>
+      {taskNotice && (
+        <MessageBar intent="success">
+          <MessageBarBody><Text style={{ whiteSpace: 'pre-wrap' }}>{taskNotice}</Text></MessageBarBody>
+        </MessageBar>
+      )}
       {errorMsg && (
         <MessageBar intent="error">
           <MessageBarBody>{errorMsg}</MessageBarBody>
@@ -943,18 +969,6 @@ export const SpaceRecycleView: React.FC<Props> = ({
                       </Button>
                     )}
                   </div>
-                  {taskNotice && (
-                    <Text
-                      size={100}
-                      style={{
-                        fontFamily: 'Consolas, monospace',
-                        whiteSpace: 'pre-wrap',
-                        color: tokens.colorPaletteGreenForeground1,
-                      }}
-                    >
-                      {taskNotice}
-                    </Text>
-                  )}
                 </div>
               )}
 

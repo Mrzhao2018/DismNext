@@ -1,10 +1,17 @@
 use crate::catalog::Condition;
 use crate::sysinfo::SystemInfo;
+use crate::win_util::{
+    has_reparse_point_in_ancestors, is_local_drive_path, windows_dir_or_default,
+    FILE_ATTRIBUTE_REPARSE_POINT,
+};
 use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::os::windows::ffi::OsStrExt;
+use std::os::windows::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::{OnceLock, RwLock};
+use std::time::{Duration, Instant};
+use windows_sys::Win32::Globalization::GetUserDefaultLocaleName;
 use windows_sys::Win32::Storage::FileSystem::{
     GetFileVersionInfoSizeW, GetFileVersionInfoW, VerQueryValueW, VS_FIXEDFILEINFO,
 };
@@ -72,7 +79,7 @@ pub fn parse_hex_bytes(s: &str) -> Option<Vec<u8>> {
         .chars()
         .filter(|c| !c.is_whitespace() && *c != ',')
         .collect();
-    if !cleaned.len().is_multiple_of(2) {
+    if !cleaned.is_ascii() || !cleaned.len().is_multiple_of(2) {
         return None;
     }
     let mut out = Vec::with_capacity(cleaned.len() / 2);
@@ -186,7 +193,6 @@ fn split_inline_call(call: &str) -> Option<(&str, &str, &str)> {
     Some((name, &body[..close], &body[close + 1..]))
 }
 
-#[cfg(test)]
 pub(crate) fn has_balanced_inline_calls(mut value: &str) -> bool {
     while let Some(start) = find_inline_func_start(value) {
         let Some((_, _, tail)) = split_inline_call(&value[start..]) else {
@@ -219,10 +225,23 @@ fn eval_inline_func(name: &str, args: &[&str]) -> Option<String> {
             let dir = args.first()?;
             newest_version_child(Path::new(dir))
         }
-        "GetLocaleName" => Some("zh-Hans".to_string()),
+        "GetLocaleName" => Some(user_locale_name()),
         "ColorDialog" => None,
         _ => None,
     }
+}
+
+fn user_locale_name() -> String {
+    let mut buf = [0u16; 85];
+    let len = unsafe { GetUserDefaultLocaleName(buf.as_mut_ptr(), buf.len() as i32) };
+    if len > 1 {
+        let end = (len as usize).saturating_sub(1).min(buf.len());
+        let s = String::from_utf16_lossy(&buf[..end]).trim().to_string();
+        if !s.is_empty() {
+            return s;
+        }
+    }
+    "zh-Hans".to_string()
 }
 
 fn newest_version_child(dir: &Path) -> Option<String> {
@@ -305,7 +324,7 @@ fn resolve_var(name: &str, root_ctx: Option<&str>) -> Option<String> {
         return Some(dir);
     }
 
-    let sys_root = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".to_string());
+    let sys_root = windows_dir_or_default().to_string_lossy().into_owned();
     let user_prof = std::env::var("USERPROFILE").unwrap_or_default();
 
     let resolved = match name.to_ascii_lowercase().as_str() {
@@ -346,19 +365,31 @@ pub fn read_reg_sz(full_key: &str, value_name: &str, wow64: Option<&str>) -> Opt
     None
 }
 
-static FILE_VERSION_CACHE: OnceLock<RwLock<HashMap<String, Option<String>>>> = OnceLock::new();
+const FILE_VERSION_TTL: Duration = Duration::from_secs(60);
+const FILE_VERSION_MAX_ENTRIES: usize = 2048;
+
+type FileVersionEntries = HashMap<String, (Instant, Option<String>)>;
+static FILE_VERSION_CACHE: OnceLock<RwLock<FileVersionEntries>> = OnceLock::new();
 
 pub fn read_file_version(path: &Path) -> Option<String> {
     let cache = FILE_VERSION_CACHE.get_or_init(|| RwLock::new(HashMap::new()));
     let key = path.to_string_lossy().to_ascii_lowercase();
     if let Ok(guard) = cache.read() {
-        if let Some(hit) = guard.get(&key) {
-            return hit.clone();
+        if let Some((cached_at, hit)) = guard.get(&key) {
+            if cached_at.elapsed() < FILE_VERSION_TTL {
+                return hit.clone();
+            }
         }
     }
     let val = read_file_version_uncached(path);
     if let Ok(mut guard) = cache.write() {
-        guard.insert(key, val.clone());
+        if guard.len() >= FILE_VERSION_MAX_ENTRIES {
+            guard.retain(|_, (cached_at, _)| cached_at.elapsed() < FILE_VERSION_TTL);
+            if guard.len() >= FILE_VERSION_MAX_ENTRIES {
+                guard.clear();
+            }
+        }
+        guard.insert(key, (Instant::now(), val.clone()));
     }
     val
 }
@@ -448,7 +479,7 @@ pub fn eval_condition(cond: &Condition, sys: &SystemInfo) -> bool {
         Condition::False => false,
         Condition::And { children } => children.iter().all(|c| eval_condition(c, sys)),
         Condition::Or { children } => children.iter().any(|c| eval_condition(c, sys)),
-        Condition::Not { children } => !children.iter().all(|c| eval_condition(c, sys)),
+        Condition::Not { children } => !children.iter().any(|c| eval_condition(c, sys)),
         Condition::ImageFlags { mask } => (1 & mask) == *mask,
         Condition::Arch { arch } => sys.arch_code == *arch,
         Condition::OSVersion { compare, version } => {
@@ -461,7 +492,10 @@ pub fn eval_condition(cond: &Condition, sys: &SystemInfo) -> bool {
             if path_or_wildcard_exists(&expanded, &sys.fixed_drives) {
                 return true;
             }
-            if matches!(wow64.as_deref(), Some("True") | Some("All")) {
+            if wow64
+                .as_deref()
+                .is_some_and(|w| w.eq_ignore_ascii_case("true") || w.eq_ignore_ascii_case("all"))
+            {
                 if let Some(alt) = wow64_path_variant(&expanded) {
                     if path_or_wildcard_exists(&alt, &sys.fixed_drives) {
                         return true;
@@ -528,35 +562,51 @@ fn compare_version_parts(actual: &[u32], target_str: &str, op: &str) -> bool {
     if target.is_empty() {
         return false;
     }
-    let n = target.len().min(actual.len());
-    let lhs = &actual[..n];
-    let rhs = &target[..n];
+    let lhs: Vec<u32> = (0..target.len())
+        .map(|idx| actual.get(idx).copied().unwrap_or(0))
+        .collect();
+    let rhs = target.as_slice();
     match op.trim() {
-        "==" | "=" => lhs == rhs,
-        "!=" => lhs != rhs,
-        "<" => lhs < rhs,
-        "<=" => lhs <= rhs,
-        ">" => lhs > rhs,
-        ">=" => lhs >= rhs,
+        "==" | "=" => lhs.as_slice() == rhs,
+        "!=" => lhs.as_slice() != rhs,
+        "<" => lhs.as_slice() < rhs,
+        "<=" => lhs.as_slice() <= rhs,
+        ">" => lhs.as_slice() > rhs,
+        ">=" => lhs.as_slice() >= rhs,
         _ => false,
     }
 }
 
+fn strip_dir_prefix_ci<'a>(path: &'a str, prefix: &str) -> Option<&'a str> {
+    let prefix = prefix.trim_end_matches('\\');
+    if path.len() < prefix.len() || !path.get(..prefix.len())?.eq_ignore_ascii_case(prefix) {
+        return None;
+    }
+    let rest = &path[prefix.len()..];
+    if rest.is_empty() || rest.starts_with('\\') {
+        Some(rest)
+    } else {
+        None
+    }
+}
+
 fn wow64_path_variant(path: &str) -> Option<String> {
-    let lower = path.to_ascii_lowercase();
     if let (Ok(pf64), Ok(pf86)) = (
         std::env::var("ProgramW6432"),
         std::env::var("ProgramFiles(x86)"),
     ) {
-        let pf64_l = pf64.to_ascii_lowercase();
-        if lower.starts_with(&pf64_l) {
-            return Some(format!("{}{}", pf86, &path[pf64.len()..]));
+        if let Some(rest) = strip_dir_prefix_ci(path, &pf64) {
+            return Some(format!("{}{}", pf86.trim_end_matches('\\'), rest));
         }
     }
-    let sys_root = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".to_string());
-    let sys32 = format!(r"{}\system32", sys_root).to_ascii_lowercase();
-    if lower.starts_with(&sys32) {
-        return Some(format!(r"{}\SysWOW64{}", sys_root, &path[sys32.len()..]));
+    let sys_root = windows_dir_or_default().to_string_lossy().into_owned();
+    let sys32 = format!(r"{}\System32", sys_root.trim_end_matches('\\'));
+    if let Some(rest) = strip_dir_prefix_ci(path, &sys32) {
+        return Some(format!(
+            r"{}\SysWOW64{}",
+            sys_root.trim_end_matches('\\'),
+            rest
+        ));
     }
     None
 }
@@ -602,12 +652,20 @@ pub(crate) fn resolve_wildcard_roots_until(
     }
 
     if !trimmed.contains('*') && !trimmed.contains('?') {
-        let p = PathBuf::from(trimmed);
-        return if p.exists() { vec![p] } else { Vec::new() };
+        let Ok(p) = std::path::absolute(trimmed) else {
+            return Vec::new();
+        };
+        if is_local_drive_path(&p) && !has_reparse_point_in_ancestors(&p, false) && p.exists() {
+            return vec![p];
+        }
+        return Vec::new();
     }
 
     // Split into prefix (no wildcards) + remaining segments
-    let parts: Vec<&str> = trimmed.split('\\').collect();
+    let mut parts: Vec<&str> = trimmed.split('\\').collect();
+    while parts.last() == Some(&"") && parts.len() > 1 {
+        parts.pop();
+    }
     let mut base_parts = Vec::new();
     let mut idx = 0;
     while idx < parts.len() {
@@ -618,6 +676,7 @@ pub(crate) fn resolve_wildcard_roots_until(
         idx += 1;
     }
 
+    let remaining = &parts[idx..];
     let mut current: Vec<PathBuf> = if base_parts.is_empty() {
         Vec::new()
     } else {
@@ -626,18 +685,26 @@ pub(crate) fn resolve_wildcard_roots_until(
         if base.len() == 2 && base.ends_with(':') {
             base.push('\\');
         }
-        let pb = PathBuf::from(base);
-        if pb.exists() {
+        let Ok(pb) = std::path::absolute(base) else {
+            return Vec::new();
+        };
+        let safe = is_local_drive_path(&pb)
+            && !has_reparse_point_in_ancestors(&pb, false)
+            && pb.symlink_metadata().is_ok_and(|meta| {
+                meta.is_dir() && (meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT) == 0
+            });
+        if safe {
             vec![pb]
         } else {
             Vec::new()
         }
     };
 
-    for seg in &parts[idx..] {
+    for (offset, seg) in remaining.iter().enumerate() {
         if seg.is_empty() {
             continue;
         }
+        let is_last = offset + 1 == remaining.len();
         let mut next = Vec::new();
         if *seg == "." {
             continue;
@@ -652,13 +719,23 @@ pub(crate) fn resolve_wildcard_roots_until(
             continue;
         }
         let has_wild = seg.contains('*') || seg.contains('?');
+        let accept_candidate = |candidate: &Path| -> bool {
+            let Ok(meta) = candidate.symlink_metadata() else {
+                return false;
+            };
+            if is_last {
+                true
+            } else {
+                meta.is_dir() && (meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT) == 0
+            }
+        };
         for dir in current {
             if cancelled() {
                 return Vec::new();
             }
             if !has_wild {
                 let candidate = dir.join(seg);
-                if candidate.exists() {
+                if accept_candidate(&candidate) {
                     next.push(candidate);
                 }
             } else if let Ok(rd) = std::fs::read_dir(&dir) {
@@ -669,7 +746,10 @@ pub(crate) fn resolve_wildcard_roots_until(
                     let name = entry.file_name();
                     let name_str = name.to_string_lossy();
                     if wildcard_match_ci(seg, &name_str) {
-                        next.push(entry.path());
+                        let candidate = entry.path();
+                        if accept_candidate(&candidate) {
+                            next.push(candidate);
+                        }
                     }
                 }
             }
@@ -883,7 +963,7 @@ mod tests {
 
     #[test]
     fn test_inline_get_file_version_and_wildcard() {
-        let sys_root = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".to_string());
+        let sys_root = windows_dir_or_default().to_string_lossy().into_owned();
         let notepad = format!(r"{}\System32\notepad.exe", sys_root);
         if Path::new(&notepad).exists() {
             let ver = expand_expression("?GetFileVersion(%System%\\notepad.exe)", None);

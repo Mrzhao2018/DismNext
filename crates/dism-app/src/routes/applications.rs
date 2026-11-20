@@ -45,7 +45,7 @@ pub(super) fn handle(req: &mut Request, path: &str, state: &AppState) -> Result<
         }
         (&Method::Post, "/api/appx/remove") => {
             let payload: AppxRemoveReq = read_json_body(req)?;
-            let _operation = state.begin_cleanup_mutation();
+            let _operation = state.begin_cleanup_mutation()?;
             remove_appx_package(&payload.package_full_name)?;
             let packages = list_appx_packages();
             Ok(serde_json::json!({
@@ -68,7 +68,7 @@ pub(super) fn handle(req: &mut Request, path: &str, state: &AppState) -> Result<
         }
         (&Method::Post, "/api/uninstaller/leftovers/recycle") => {
             let payload: RecycleLeftoversReq = read_json_body(req)?;
-            let _operation = state.begin_cleanup_mutation();
+            let _operation = state.begin_cleanup_mutation()?;
             let items = recycle_app_leftovers(&payload.targets);
             Ok(serde_json::json!({ "items": items }))
         }
@@ -84,7 +84,7 @@ pub(super) fn handle(req: &mut Request, path: &str, state: &AppState) -> Result<
                     "An uninstallation is still in progress or awaiting verification"
                 );
             }
-            let _operation = state.begin_cleanup_mutation();
+            let _operation = state.begin_cleanup_mutation()?;
             let job = current.insert(launch_win32_uninstaller(
                 payload.app_id.trim(),
                 payload.use_quiet.unwrap_or(false),

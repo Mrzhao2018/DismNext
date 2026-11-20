@@ -1,5 +1,6 @@
 use anyhow::Result;
 use clap::Parser;
+use dism_core::cleaner::{CleanupBusy, CleanupReviewUnavailable};
 use dism_core::drivers::list_drivers;
 use dism_core::startup::list_scheduled_tasks;
 use dism_core::sysinfo::{is_administrator, open_in_browser};
@@ -7,13 +8,22 @@ use dism_core::systasks::get_system_task_status;
 use dism_core::uninstaller::UninstallState;
 use dism_core::{Catalog, SnapshotManager, SystemInfo};
 use serde::Serialize;
+use std::io;
+use std::net::TcpListener;
+use std::os::windows::io::AsRawSocket;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
+use windows_sys::Win32::Networking::WinSock::{
+    setsockopt, WSAGetLastError, SOL_SOCKET, SO_RCVTIMEO, SO_SNDTIMEO,
+};
 
+mod admin_window;
 mod desktop_lifecycle;
+mod desktop_security;
 mod http_workers;
 mod request_security;
 mod routes;
@@ -28,7 +38,7 @@ use request_security::{
 };
 use routes::{HttpBodyTooLarge, MAX_HTTP_BODY};
 use scan_jobs::{ScanBusy, ScanJobs};
-use state::{AppState, CleanupReviewUnavailable, CleanupScanCache};
+use state::{AppState, CleanupScanCache};
 
 #[derive(Parser)]
 #[command(
@@ -75,6 +85,9 @@ fn main() -> Result<()> {
         };
         Some(event)
     };
+    let mut admin_desktop = (is_admin && wake_event.is_some())
+        .then(admin_window::AdminDesktop::new)
+        .transpose()?;
     let catalog_path = args
         .catalog
         .as_deref()
@@ -97,6 +110,8 @@ fn main() -> Result<()> {
         uninstall: Mutex::new(None),
         ui_dir,
         desktop: wake_event.as_ref().map(|_| DesktopLifecycle::new()),
+        requests: RwLock::new(()),
+        relaunching: AtomicBool::new(false),
     });
 
     let addr = format!("127.0.0.1:{}", args.port);
@@ -115,7 +130,7 @@ fn main() -> Result<()> {
     }
 
     if state.desktop.is_some() {
-        open_desktop(&state, &url)?;
+        open_desktop(&state, &url, admin_desktop.as_mut())?;
     } else {
         println!(
             "DismNext session URL: {url}/#token={}",
@@ -131,15 +146,39 @@ fn main() -> Result<()> {
         let _ = list_scheduled_tasks();
     });
 
-    let workers = HttpWorkers::new(&state)?;
+    let workers = Arc::new(HttpWorkers::new(&state)?);
+    let dispatcher = {
+        let workers = Arc::clone(&workers);
+        let state = Arc::clone(&state);
+        std::thread::Builder::new()
+            .name("dismnext-http-dispatch".into())
+            .spawn(move || -> Result<()> {
+                while !state.relaunching.load(Ordering::Acquire) {
+                    if let Some(req) = server.recv_timeout(Duration::from_millis(200))? {
+                        workers.submit(req, &state);
+                    }
+                }
+                Ok(())
+            })?
+    };
     let mut last_window_check = Instant::now();
     loop {
-        if let Some(req) = server.recv_timeout(Duration::from_millis(250))? {
-            workers.submit(req, &state);
+        if state.relaunching.load(Ordering::Acquire) {
+            if !workers.has_work() {
+                break;
+            }
+            std::thread::park_timeout(Duration::from_millis(25));
+            continue;
+        }
+        if dispatcher.is_finished() {
+            dispatcher
+                .join()
+                .map_err(|_| anyhow::anyhow!("HTTP dispatcher stopped unexpectedly"))??;
+            break;
         }
         if let (Some(event), Some(desktop)) = (&wake_event, &state.desktop) {
             if event.requested()? {
-                if let Err(error) = open_desktop(&state, &url) {
+                if let Err(error) = open_desktop(&state, &url, admin_desktop.as_mut()) {
                     eprintln!("Could not reopen DismNext: {error:#}");
                 }
             }
@@ -154,14 +193,23 @@ fn main() -> Result<()> {
                 }
             }
         }
+        std::thread::park_timeout(Duration::from_millis(100));
     }
 
     Ok(())
 }
 
-fn open_desktop(state: &AppState, url: &str) -> Result<()> {
-    let token = state.session.issue_browser_launch()?;
-    launch_desktop_window(&format!("{url}/#launch={token}"))?;
+fn open_desktop(
+    state: &AppState,
+    url: &str,
+    admin: Option<&mut admin_window::AdminDesktop>,
+) -> Result<()> {
+    if let Some(admin) = admin {
+        admin.open(url, state.session.api_token())?;
+    } else {
+        let token = state.session.issue_browser_launch()?;
+        launch_desktop_window(&format!("{url}/#launch={token}"))?;
+    }
     if let Some(desktop) = &state.desktop {
         desktop.launching();
     }
@@ -180,8 +228,13 @@ fn uninstall_running(state: &AppState) -> bool {
 fn bind_with_retry(addr: &str) -> Result<Server> {
     let mut last_err = String::new();
     for attempt in 0..20 {
-        match Server::http(addr) {
-            Ok(srv) => return Ok(srv),
+        match TcpListener::bind(addr) {
+            Ok(listener) => {
+                set_socket_timeouts(&listener, 10_000)?;
+                return Server::from_listener(listener, None).map_err(|error| {
+                    anyhow::anyhow!("Could not start desktop HTTP server: {error}")
+                });
+            }
             Err(e) => {
                 last_err = e.to_string();
                 if attempt < 19 {
@@ -191,6 +244,24 @@ fn bind_with_retry(addr: &str) -> Result<Server> {
         }
     }
     Err(anyhow::anyhow!("Failed to bind {}: {}", addr, last_err))
+}
+
+fn set_socket_timeouts(listener: &TcpListener, millis: u32) -> io::Result<()> {
+    for option in [SO_RCVTIMEO, SO_SNDTIMEO] {
+        let result = unsafe {
+            setsockopt(
+                listener.as_raw_socket() as usize,
+                SOL_SOCKET,
+                option,
+                (&millis as *const u32).cast(),
+                std::mem::size_of_val(&millis) as i32,
+            )
+        };
+        if result != 0 {
+            return Err(io::Error::from_raw_os_error(unsafe { WSAGetLastError() }));
+        }
+    }
+    Ok(())
 }
 
 fn resolve_ui_dir(explicit: Option<PathBuf>, dev_origin: bool) -> Result<Option<PathBuf>> {
@@ -305,16 +376,40 @@ fn handle_request(mut req: Request, state: &Arc<AppState>) {
                 }
                 Ok(serde_json::json!({ "ok": true }))
             })()
-        } else {
+        } else if path == "/api/sys/elevate" && req.method() == &Method::Post {
             routes::dispatch(&mut req, path, query, state)
+        } else {
+            state
+                .requests
+                .try_read()
+                .map_err(|_| ScanBusy("desktop relaunch"))
+                .map_err(anyhow::Error::from)
+                .and_then(|_permit| {
+                    if state.relaunching.load(Ordering::Acquire) {
+                        return Err(ScanBusy("desktop relaunch").into());
+                    }
+                    routes::dispatch(&mut req, path, query, state)
+                })
         };
         match result {
             Ok(json_val) => respond_json(req, StatusCode(200), &json_val, state, origin),
             Err(err) => {
                 let code = if err.is::<HttpBodyTooLarge>() {
                     413
-                } else if err.is::<ScanBusy>() || err.is::<CleanupReviewUnavailable>() {
+                } else if err.is::<ScanBusy>()
+                    || err.is::<CleanupReviewUnavailable>()
+                    || err.is::<CleanupBusy>()
+                {
                     409
+                } else if err.is::<routes::UnknownEndpoint>() {
+                    404
+                } else if let Some(io) = err.downcast_ref::<std::io::Error>() {
+                    match io.kind() {
+                        std::io::ErrorKind::NotFound => 404,
+                        std::io::ErrorKind::PermissionDenied => 403,
+                        std::io::ErrorKind::InvalidData | std::io::ErrorKind::InvalidInput => 400,
+                        _ => 500,
+                    }
                 } else {
                     400
                 };
@@ -357,11 +452,13 @@ fn respond_json<T: Serialize>(
         resp.add_header(header);
     }
     add_cors_headers(&mut resp, state.port, state.dev_origin, origin);
+    static_files::add_security_headers(&mut resp);
     let _ = req.respond(resp);
 }
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use crate::request_security::{is_allowed_host, is_allowed_origin};
 
     #[test]
@@ -380,5 +477,16 @@ mod tests {
         );
         assert!(!is_allowed_origin("https://evil.example.com", 9527, false));
         assert!(!is_allowed_origin("null", 9527, false));
+    }
+
+    #[test]
+    fn accepted_connections_inherit_http_read_and_write_timeouts() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        set_socket_timeouts(&listener, 200).unwrap();
+        let _client = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (connection, _) = listener.accept().unwrap();
+        let timeout = Some(Duration::from_millis(200));
+        assert_eq!(connection.read_timeout().unwrap(), timeout);
+        assert_eq!(connection.write_timeout().unwrap(), timeout);
     }
 }

@@ -1,3 +1,4 @@
+import { DuplicateResults } from './DuplicateResults';
 import { recyclePathKey, removeNodeFromTree, sameOrBelow } from '../diskAnalysis';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
@@ -37,7 +38,6 @@ import {
   DiskAnalysisReport,
   DiskPreset,
   DiskTreeNode,
-  DuplicateGroup,
   DuplicateRecycleResult,
   DuplicateRecycleTarget,
   DuplicateScanReport,
@@ -507,7 +507,7 @@ export const DiskAnalyzerView: React.FC<Props> = ({ visible, lang, onSystemUpdat
       if (targetNode && targetNode.children.length > 0) {
         setZoomStack((prev) => [...prev, targetDir]);
       } else {
-        runAnalyze(targetDir);
+        void runAnalyze(targetDir);
       }
     }
   };
@@ -744,7 +744,7 @@ export const DiskAnalyzerView: React.FC<Props> = ({ visible, lang, onSystemUpdat
               value={targetPath}
               onChange={(_, d) => setTargetPath(d.value)}
               onKeyDown={(e) => {
-                if (e.key === 'Enter') runAnalyze(targetPath);
+                if (e.key === 'Enter') void runAnalyze(targetPath);
               }}
             />
             <Button
@@ -811,7 +811,7 @@ export const DiskAnalyzerView: React.FC<Props> = ({ visible, lang, onSystemUpdat
       </div>
 
       {!recycleConfirmTarget && (
-        <ScanStatusBar active={scan.active} cancelled={scan.cancelled} cancel={scan.cancel} lang={lang} />
+        <ScanStatusBar store={scan.statusStore} cancelled={scan.cancelled} cancel={scan.cancel} lang={lang} />
       )}
 
       {!report ? (
@@ -866,7 +866,7 @@ export const DiskAnalyzerView: React.FC<Props> = ({ visible, lang, onSystemUpdat
                             onClick={() => setSelectedPath(row.node.path)}
                             onDoubleClick={() => {
                               if (row.node.is_dir && !row.node.is_aggregate) {
-                                toggleExpand(row.node);
+                                void toggleExpand(row.node);
                               }
                             }}
                           >
@@ -883,7 +883,7 @@ export const DiskAnalyzerView: React.FC<Props> = ({ visible, lang, onSystemUpdat
                                 <span
                                   onClick={(e) => {
                                     e.stopPropagation();
-                                    toggleExpand(row.node);
+                                    void toggleExpand(row.node);
                                   }}
                                   style={{
                                     display: 'inline-flex',
@@ -1043,7 +1043,7 @@ export const DiskAnalyzerView: React.FC<Props> = ({ visible, lang, onSystemUpdat
                     </div>
                   </>
                 ) : leftTab === 'duplicates' ? (
-                  <div className={styles.scrollBody} style={{ padding: 10 }}>
+                  <div className={styles.scrollBody} style={{ padding: 10, display: 'flex', flexDirection: 'column' }}>
                     <div
                       style={{
                         display: 'flex',
@@ -1076,92 +1076,23 @@ export const DiskAnalyzerView: React.FC<Props> = ({ visible, lang, onSystemUpdat
                         {lang === 'zh' ? '该目录下未发现大于 512 KB 的重复文件。' : 'No duplicate files (>512 KB) found.'}
                       </Text>
                     ) : (
-                      <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-                        {dupReport.groups.map((g: DuplicateGroup) => (
-                          <div
-                            key={g.hash_hex}
-                            style={{
-                              padding: 8,
-                              borderRadius: tokens.borderRadiusMedium,
-                              backgroundColor: tokens.colorNeutralBackground1,
-                              border: `1px solid ${tokens.colorNeutralStroke2}`,
-                              display: 'flex',
-                              flexDirection: 'column',
-                              gap: 4,
-                            }}
-                          >
-                            <div
-                              style={{
-                                display: 'flex',
-                                justifyContent: 'space-between',
-                                alignItems: 'center',
-                                gap: 8,
-                              }}
-                            >
-                              <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                                <Badge size="small" appearance="tint" color="warning">
-                                  {g.files.length}x
-                                </Badge>
-                                <Text size={200} weight="semibold">
-                                  {g.files[0]?.name} · {formatBytes(g.size_bytes)} (
-                                  {lang === 'zh' ? '候选副本' : 'candidate copies'} {formatBytes(g.wasted_bytes)})
-                                </Text>
-                              </div>
-                              <Button
-                                size="small"
-                                appearance="primary"
-                                icon={<Delete16Regular />}
-                                disabled={Boolean(scan.active) || recycling || g.files.some((file) => !file.stamp)}
-                                onClick={() => {
-                                  const [kept, ...copies] = g.files;
-                                  if (!kept?.stamp) return;
-                                  const candidates = copies.flatMap((file) => file.stamp ? [{ path: file.path, stamp: file.stamp }] : []);
-                                  const toRecycle = candidates.map((file) => file.path);
-                                  if (toRecycle.length === 0) return;
-                                  setRecycleConfirmTarget({
-                                    paths: toRecycle,
-                                    size_bytes: g.wasted_bytes,
-                                    duplicateGroup: { hash: g.hash_hex, keeper: { path: kept.path, stamp: kept.stamp }, candidates },
-                                    label:
-                                      lang === 'zh'
-                                        ? `保留最新 (${g.files[0].path})，其余 ${toRecycle.length} 个副本移入回收站`
-                                        : `Keep newest (${g.files[0].path}), recycle ${toRecycle.length} older copies`,
-                                  });
-                                }}
-                              >
-                                {lang === 'zh' ? '保留最新，清理副本' : 'Keep Newest'}
-                              </Button>
-                            </div>
-                            {g.files.map((f, idx) => (
-                              <div
-                                key={f.path}
-                                style={{
-                                  display: 'flex',
-                                  justifyContent: 'space-between',
-                                  alignItems: 'center',
-                                  gap: 8,
-                                  fontSize: 11,
-                                  color: tokens.colorNeutralForeground2,
-                                }}
-                              >
-                                <span
-                                  style={{
-                                    overflow: 'hidden',
-                                    textOverflow: 'ellipsis',
-                                    whiteSpace: 'nowrap',
-                                    fontFamily: 'Consolas, monospace',
-                                  }}
-                                  title={f.path}
-                                >
-                                  {idx === 0 ? '★ ' : '• '}
-                                  {f.path}
-                                </span>
-                                <span style={{ flexShrink: 0 }}>{f.modified_date}</span>
-                              </div>
-                            ))}
-                          </div>
-                        ))}
-                      </div>
+                      <DuplicateResults lang={lang} groups={dupReport.groups} busy={Boolean(scan.active) || recycling}
+                        onRecycle={(group) => {
+                          const [kept, ...copies] = group.files;
+                          if (!kept?.stamp) return;
+                          const candidates = copies.flatMap((file) => file.stamp ? [{ path: file.path, stamp: file.stamp }] : []);
+                          const paths = candidates.map((file) => file.path);
+                          if (!paths.length) return;
+                          setRecycleConfirmTarget({
+                            paths,
+                            size_bytes: group.wasted_bytes,
+                            duplicateGroup: { hash: group.hash_hex, keeper: { path: kept.path, stamp: kept.stamp }, candidates },
+                            label: lang === 'zh'
+                              ? `保留最新 (${kept.path})，其余 ${paths.length} 个副本移入回收站`
+                              : `Keep newest (${kept.path}), recycle ${paths.length} older copies`,
+                          });
+                        }}
+                      />
                     )}
                   </div>
                 ) : (
@@ -1401,7 +1332,7 @@ export const DiskAnalyzerView: React.FC<Props> = ({ visible, lang, onSystemUpdat
                         if (selectedNode.children.length > 0) {
                           setZoomStack((prev) => [...prev, selectedNode.path]);
                         } else {
-                          runAnalyze(selectedNode.path);
+                          void runAnalyze(selectedNode.path);
                         }
                       }
                     }}
@@ -1472,10 +1403,14 @@ export const DiskAnalyzerView: React.FC<Props> = ({ visible, lang, onSystemUpdat
                   size="small"
                   appearance="subtle"
                   icon={<Copy16Regular />}
-                  onClick={() => {
-                    navigator.clipboard?.writeText(selectedNode.path);
-                    setCopiedNotice(true);
-                    setTimeout(() => setCopiedNotice(false), 1500);
+                  onClick={async () => {
+                    try {
+                      await navigator.clipboard.writeText(selectedNode.path);
+                      setCopiedNotice(true);
+                      setTimeout(() => setCopiedNotice(false), 1500);
+                    } catch (error) {
+                      setErrorMsg(String(error));
+                    }
                   }}
                 >
                   {copiedNotice
@@ -1578,7 +1513,7 @@ export const DiskAnalyzerView: React.FC<Props> = ({ visible, lang, onSystemUpdat
               )}
               {(scan.active?.kind === 'recycle_review' || scan.active?.kind === 'recycle_path') && (
                 <div style={{ marginTop: 8 }}>
-                  <ScanStatusBar active={scan.active} cancelled={false} cancel={scan.cancel} lang={lang} />
+                  <ScanStatusBar store={scan.statusStore} cancelled={false} cancel={scan.cancel} lang={lang} />
                 </div>
               )}
             </DialogContent>

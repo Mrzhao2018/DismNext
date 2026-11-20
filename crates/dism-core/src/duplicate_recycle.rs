@@ -1,5 +1,6 @@
 use crate::diskmap::{invalidate_orphans_cache, is_protected_recycle_target};
 use crate::recycle_bin::{move_batch, RecycleRequest, Verified};
+use crate::win_util::{has_reparse_point_in_ancestors, is_local_drive_path};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -123,7 +124,10 @@ fn open_verified(
     target: &DuplicateRecycleTarget,
     share_mode: u32,
 ) -> std::result::Result<(File, FileState), DuplicateRecycleOutcome> {
-    if is_protected_recycle_target(&target.path) {
+    if !is_local_drive_path(&target.path)
+        || has_reparse_point_in_ancestors(&target.path, false)
+        || is_protected_recycle_target(&target.path)
+    {
         return Err(skipped(DuplicateSkipReason::Protected));
     }
     let file = OpenOptions::new()

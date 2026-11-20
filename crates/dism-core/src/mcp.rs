@@ -1,12 +1,18 @@
 use crate::catalog::Catalog;
-use crate::cleaner::{execute_cleanup, scan_all_with_summary, scan_rule_preview};
-use crate::diskmap::{analyze_path_with_options, find_duplicate_files, find_orphaned_app_dirs};
+use crate::cleaner::{
+    execute_cleanup, scan_all_with_progress, scan_rule_preview, CleanupLease,
+    CleanupReviewUnavailable, CleanupReviews, ReviewedCleanup, CLEANUP_REVIEW_TTL,
+};
+use crate::diskmap::{
+    analyze_path_with_options, find_duplicate_files_with_progress, find_orphaned_app_dirs,
+};
 use crate::drivers::{default_backup_dir, export_drivers, list_drivers};
 use crate::features::{list_optional_features, FeatureCategory};
 use crate::lockcheck::find_locking_processes;
 use crate::optimizer::{evaluate_all_groups, get_optimization_presets};
 use crate::report::generate_health_report;
 use crate::rescue::{create_restore_point, list_restore_points, run_rescue_action};
+use crate::scan_progress::ScanProgress;
 use crate::snapshot::{snapshot_summary, SnapshotManager, SnapshotSummary};
 use crate::startup::{list_scheduled_tasks, list_startup_items, list_third_party_services};
 use crate::sysinfo::SystemInfo;
@@ -14,146 +20,40 @@ use crate::systasks::get_system_task_status;
 use crate::uninstaller::{list_win32_apps, scan_app_leftovers};
 use anyhow::{anyhow, Result};
 use serde_json::{json, Value};
-use std::io::{BufRead, BufReader, BufWriter, Read, Write};
+#[cfg(test)]
+use std::io::{BufReader, Read};
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 const SERVER_NAME: &str = "dismnext-mcp";
-const SERVER_VERSION: &str = "2.0.0";
+const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 const DEFAULT_PROTOCOL_VERSION: &str = "2024-11-05";
-const MAX_MCP_BODY: usize = 16 * 1024 * 1024;
-const MAX_MCP_HEADERS: usize = 8 * 1024;
 
-enum FramingMode {
-    Newline,
-    ContentLength,
-}
+mod schema;
+mod transport;
+pub use schema::tool_definitions;
+pub use transport::run_mcp_stdio;
 
-/// Starts the Model Context Protocol (MCP) JSON-RPC 2.0 server over stdio.
-/// Supports both newline-delimited JSON-RPC messages and `Content-Length` framed payloads.
-pub fn run_mcp_stdio(catalog: &Catalog) -> Result<()> {
-    let stdin = std::io::stdin();
-    let stdout = std::io::stdout();
-    let mut reader = BufReader::new(stdin.lock());
-    let mut writer = BufWriter::new(stdout.lock());
-
-    loop {
-        let Some((payload, framing)) = read_next_message(&mut reader)? else {
-            break;
-        };
-
-        let response = match serde_json::from_str::<Value>(&payload) {
-            Ok(req) => handle_mcp_request(&req, catalog),
-            Err(err) => Some(json!({
-                "jsonrpc": "2.0",
-                "id": Value::Null,
-                "error": {
-                    "code": -32700,
-                    "message": format!("Parse error: {}", err)
-                }
-            })),
-        };
-
-        if let Some(resp) = response {
-            write_message(&mut writer, &resp, framing)?;
-        }
-    }
-
-    Ok(())
-}
-
-fn read_next_message<R: BufRead>(reader: &mut R) -> Result<Option<(String, FramingMode)>> {
-    let mut first_line = String::new();
-    loop {
-        first_line.clear();
-        let n = (&mut *reader)
-            .take((MAX_MCP_BODY + 3) as u64)
-            .read_line(&mut first_line)?;
-        if n == 0 {
-            return Ok(None);
-        }
-        let line = first_line.strip_suffix('\n').unwrap_or(&first_line);
-        let line = line.strip_suffix('\r').unwrap_or(line);
-        if n == MAX_MCP_BODY + 3 || line.len() > MAX_MCP_BODY {
-            return Err(anyhow!("MCP message exceeds {MAX_MCP_BODY} bytes"));
-        }
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-
-        if let Some(rest) = strip_ascii_prefix_ci(trimmed, "content-length:") {
-            let content_len: usize = rest
-                .trim()
-                .parse()
-                .map_err(|_| anyhow!("Invalid MCP Content-Length header"))?;
-            if content_len > MAX_MCP_BODY {
-                return Err(anyhow!("MCP message exceeds {MAX_MCP_BODY} bytes"));
-            }
-
-            let mut header_line = String::new();
-            let mut remaining_headers = MAX_MCP_HEADERS
-                .checked_sub(n)
-                .ok_or_else(|| anyhow!("MCP headers exceed {MAX_MCP_HEADERS} bytes"))?;
-            loop {
-                header_line.clear();
-                let hn = (&mut *reader)
-                    .take(remaining_headers as u64 + 1)
-                    .read_line(&mut header_line)?;
-                if hn == 0 {
-                    return Err(anyhow!("Unexpected EOF while reading MCP headers"));
-                }
-                remaining_headers = remaining_headers
-                    .checked_sub(hn)
-                    .ok_or_else(|| anyhow!("MCP headers exceed {MAX_MCP_HEADERS} bytes"))?;
-                let ht = header_line.trim();
-                if ht.is_empty() {
-                    break;
-                }
-                if strip_ascii_prefix_ci(ht, "content-length:").is_some() {
-                    return Err(anyhow!("Duplicate MCP Content-Length header"));
-                }
-            }
-
-            let mut body = vec![0u8; content_len];
-            reader.read_exact(&mut body)?;
-            let text = String::from_utf8(body)?;
-            return Ok(Some((text, FramingMode::ContentLength)));
-        }
-
-        return Ok(Some((trimmed.to_string(), FramingMode::Newline)));
-    }
-}
-
-fn strip_ascii_prefix_ci<'a>(s: &'a str, prefix_lower: &str) -> Option<&'a str> {
-    if s.len() < prefix_lower.len() {
-        return None;
-    }
-    let head = s.get(..prefix_lower.len())?;
-    if head.eq_ignore_ascii_case(prefix_lower) {
-        Some(&s[prefix_lower.len()..])
-    } else {
-        None
-    }
-}
-
-fn write_message<W: Write>(writer: &mut W, value: &Value, framing: FramingMode) -> Result<()> {
-    let body = serde_json::to_string(value)?;
-    match framing {
-        FramingMode::Newline => {
-            writer.write_all(body.as_bytes())?;
-            writer.write_all(b"\n")?;
-        }
-        FramingMode::ContentLength => {
-            write!(writer, "Content-Length: {}\r\n\r\n{}", body.len(), body)?;
-        }
-    }
-    writer.flush()?;
-    Ok(())
-}
+#[cfg(test)]
+use transport::{read_next_message, FramingMode, MAX_MCP_BODY};
 
 /// Processes a single parsed JSON-RPC 2.0 MCP message and returns an optional JSON-RPC response.
 /// Notifications (messages without an `id` or explicit notification methods) return `None`.
 pub fn handle_mcp_request(req: &Value, catalog: &Catalog) -> Option<Value> {
+    handle_request(
+        req,
+        catalog,
+        &mut CleanupReviews::default(),
+        &ScanProgress::default(),
+    )
+}
+
+fn handle_request(
+    req: &Value,
+    catalog: &Catalog,
+    reviews: &mut CleanupReviews,
+    progress: &ScanProgress,
+) -> Option<Value> {
     let method = req.get("method").and_then(|v| v.as_str()).unwrap_or("");
     let id_val = req.get("id");
 
@@ -221,7 +121,7 @@ pub fn handle_mcp_request(req: &Value, catalog: &Catalog) -> Option<Value> {
                 .cloned()
                 .unwrap_or_else(|| json!({}));
 
-            match dispatch_tool_call(name, &args, catalog) {
+            match dispatch_tool_call(name, &args, catalog, reviews, progress) {
                 Ok(payload) => {
                     let text = serde_json::to_string_pretty(&payload)
                         .unwrap_or_else(|_| payload.to_string());
@@ -265,276 +165,14 @@ pub fn handle_mcp_request(req: &Value, catalog: &Catalog) -> Option<Value> {
     }
 }
 
-pub fn tool_definitions() -> Vec<Value> {
-    vec![
-        json!({
-            "name": "dismnext_system_overview",
-            "description": "Get Windows environment info (OS version, architecture, admin privilege, C: disk free/total space), catalog counts, CompactOS state, outdated driver duplicates, and orphaned Windows Installer file summary.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {},
-                "additionalProperties": false
-            }
-        }),
-        json!({
-            "name": "dismnext_scan_cleanup",
-            "description": "Scan Windows system cleanup & space-recycle rules (read-only). Omit rule_id to scan all applicable rules across the system; provide rule_id to run deep file-level diagnostics with Windows Restart Manager lock detection.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "rule_id": {
-                        "type": "string",
-                        "description": "Optional cleanup rule ID for detailed file preview and lock inspection."
-                    }
-                },
-                "additionalProperties": false
-            }
-        }),
-        json!({
-            "name": "dismnext_execute_cleanup",
-            "description": "Execute cleanup for specified space-recycle rule IDs. Defaults to dry_run=true for safety; set dry_run=false only when ready to delete or recycle matched files.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "rule_ids": {
-                        "type": "array",
-                        "items": { "type": "string" },
-                        "description": "List of cleanup rule IDs to evaluate or clean."
-                    },
-                    "dry_run": {
-                        "type": "boolean",
-                        "description": "If true (default), simulate cleanup without deleting files."
-                    }
-                },
-                "required": ["rule_ids"],
-                "additionalProperties": false
-            }
-        }),
-        json!({
-            "name": "dismnext_analyze_disk",
-            "description": "Parallel multi-threaded disk space analyzer returning directory tree breakdown, top file extensions, and top largest files for a target path.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "path": {
-                        "type": "string",
-                        "description": "Directory path to analyze (defaults to %LOCALAPPDATA%)."
-                    },
-                    "max_depth": {
-                        "type": "integer",
-                        "minimum": 1,
-                        "maximum": 8,
-                        "description": "Maximum tree recursion depth (default 3)."
-                    },
-                    "measure_allocation": {
-                        "type": "boolean",
-                        "description": "Also measure allocated file data on NTFS and count hard links once (default false)."
-                    }
-                },
-                "additionalProperties": false
-            }
-        }),
-        json!({
-            "name": "dismnext_find_duplicates",
-            "description": "Three-stage parallel duplicate file detector (size grouping, hard-link deduplication, partial fingerprint, full BLAKE3 verification) returning duplicate groups and potential wasted bytes.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "path": {
-                        "type": "string",
-                        "description": "Root directory path to scan for duplicate files."
-                    },
-                    "min_size_bytes": {
-                        "type": "integer",
-                        "minimum": 1,
-                        "description": "Minimum file size threshold in bytes (default 1048576 = 1 MiB)."
-                    }
-                },
-                "required": ["path"],
-                "additionalProperties": false
-            }
-        }),
-        json!({
-            "name": "dismnext_find_orphan_dirs",
-            "description": "Scan %LOCALAPPDATA%, %APPDATA%, and %ProgramData% to detect leftover data folders belonging to uninstalled software.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {},
-                "additionalProperties": false
-            }
-        }),
-        json!({
-            "name": "dismnext_inspect_file_locks",
-            "description": "Inspect which running Windows processes (PID, application name, critical-process status) are currently locking a file using native Restart Manager (rstrtmgr.dll).",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "path": {
-                        "type": "string",
-                        "description": "Full file path to inspect for open locks."
-                    }
-                },
-                "required": ["path"],
-                "additionalProperties": false
-            }
-        }),
-        json!({
-            "name": "dismnext_list_drivers",
-            "description": "List third-party oem*.inf DriverStore packages with provider, version, size, and strict hardware-descriptor-verified outdated duplicate detection.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "outdated_only": {
-                        "type": "boolean",
-                        "description": "If true, return only superseded duplicate driver packages."
-                    }
-                },
-                "additionalProperties": false
-            }
-        }),
-        json!({
-            "name": "dismnext_backup_drivers",
-            "description": "Back up third-party DriverStore packages to a destination folder alongside driver_backup_manifest.json and a one-click Restore-Drivers.cmd script.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "target_dir": {
-                        "type": "string",
-                        "description": "Destination folder path for driver backups (defaults to C:\\DismNext_DriverBackup)."
-                    },
-                    "published_names": {
-                        "type": "array",
-                        "items": { "type": "string" },
-                        "description": "Optional list of oem*.inf published names to export; exports all third-party drivers if omitted."
-                    }
-                },
-                "additionalProperties": false
-            }
-        }),
-        json!({
-            "name": "dismnext_list_startup",
-            "description": "Inspect Windows startup governance across Run registry/Startup folders, third-party background services, and non-Windows scheduled tasks.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "category": {
-                        "type": "string",
-                        "enum": ["all", "run", "services", "tasks"],
-                        "description": "Startup governance category filter (default 'all')."
-                    }
-                },
-                "additionalProperties": false
-            }
-        }),
-        json!({
-            "name": "dismnext_list_features",
-            "description": "List Windows Optional Features (WSL, Hyper-V, NetFx3, Sandbox, Recall, SMB1, etc.) and their live enable/disable status.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "category": {
-                        "type": "string",
-                        "enum": ["virtualization", "developer", "security_ai", "network_smb", "print_media", "iis_web"],
-                        "description": "Optional feature category filter."
-                    }
-                },
-                "additionalProperties": false
-            }
-        }),
-        json!({
-            "name": "dismnext_list_optimizations",
-            "description": "Evaluate live Windows system optimization items across registry scopes and optionally list built-in curated optimization preset packs.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "search": {
-                        "type": "string",
-                        "description": "Optional keyword filter matching item/group names or IDs."
-                    },
-                    "include_presets": {
-                        "type": "boolean",
-                        "description": "Include curated preset pack definitions (default true)."
-                    }
-                },
-                "additionalProperties": false
-            }
-        }),
-        json!({
-            "name": "dismnext_list_snapshots",
-            "description": "List saved DismNext registry snapshots available for safe rollback before/after optimization changes.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {},
-                "additionalProperties": false
-            }
-        }),
-        json!({
-            "name": "dismnext_system_rescue",
-            "description": "Run Windows System Rescue & Health First-Aid actions or query/create System Restore Points.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "action": {
-                        "type": "string",
-                        "enum": [
-                            "list_restore_points",
-                            "create_restore_point",
-                            "rebuild_icon_cache",
-                            "flush_dns_network",
-                            "reset_windows_update",
-                            "clear_print_spooler",
-                            "dism_check_health",
-                            "dism_restore_health",
-                            "sfc_scannow"
-                        ],
-                        "description": "Rescue operation ID or restore-point action."
-                    },
-                    "description": {
-                        "type": "string",
-                        "description": "Description text when action='create_restore_point'."
-                    }
-                },
-                "required": ["action"],
-                "additionalProperties": false
-            }
-        }),
-        json!({
-            "name": "dismnext_list_installed_apps",
-            "description": "List installed classic desktop software (Win32/MSI) from HKLM/HKCU Uninstall keys, optionally filtering by keyword or scanning leftover folders for a specific app ID.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "search": {
-                        "type": "string",
-                        "description": "Optional keyword filter matching display name or publisher."
-                    },
-                    "scan_leftovers_for_id": {
-                        "type": "string",
-                        "description": "Optional app ID (from list output) to scan candidate AppData/ProgramData/install leftovers."
-                    }
-                },
-                "additionalProperties": false
-            }
-        }),
-        json!({
-            "name": "dismnext_export_health_report",
-            "description": "Generate a comprehensive Windows health audit report (score 0-100, disk usage, reclaimable space, drivers, startup items, and installed apps) in Markdown or structured JSON.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "format": {
-                        "type": "string",
-                        "enum": ["markdown", "json"],
-                        "description": "Output format ('markdown' or 'json'; defaults to 'json')."
-                    }
-                },
-                "additionalProperties": false
-            }
-        }),
-    ]
-}
-
-fn dispatch_tool_call(name: &str, args: &Value, catalog: &Catalog) -> Result<Value> {
+fn dispatch_tool_call(
+    name: &str,
+    args: &Value,
+    catalog: &Catalog,
+    reviews: &mut CleanupReviews,
+    progress: &ScanProgress,
+) -> Result<Value> {
+    progress.check()?;
     let sys = SystemInfo::collect();
 
     match name {
@@ -566,7 +204,7 @@ fn dispatch_tool_call(name: &str, args: &Value, catalog: &Catalog) -> Result<Val
                 let res = scan_rule_preview(rule, &sys);
                 Ok(serde_json::to_value(res)?)
             } else {
-                let scan = scan_all_with_summary(&catalog.cleanup_rules, &sys);
+                let scan = scan_all_with_progress(&catalog.cleanup_rules, &sys, progress)?;
                 Ok(json!({
                     "applicable_rule_count": scan.items.len(),
                     "total_cleanable_bytes": scan.summary.cleanable_bytes,
@@ -576,24 +214,42 @@ fn dispatch_tool_call(name: &str, args: &Value, catalog: &Catalog) -> Result<Val
                 }))
             }
         }
-        "dismnext_execute_cleanup" => {
-            let arr = args
-                .get("rule_ids")
-                .and_then(|v| v.as_array())
-                .ok_or_else(|| anyhow!("Missing required array argument 'rule_ids'"))?;
-            let rule_ids: Vec<String> = arr
-                .iter()
-                .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                .collect();
-            if rule_ids.is_empty() {
-                return Err(anyhow!("'rule_ids' must contain at least one rule ID"));
+        "dismnext_execute_cleanup" | "dismnext_review_cleanup" => {
+            let rule_ids: Vec<String> = serde_json::from_value(args["rule_ids"].clone())?;
+            anyhow::ensure!(
+                !rule_ids.is_empty(),
+                "'rule_ids' must contain at least one rule ID"
+            );
+            if name == "dismnext_review_cleanup" {
+                let (plan, report) =
+                    ReviewedCleanup::prepare(&catalog.cleanup_rules, &rule_ids, &sys);
+                progress.check()?;
+                let plan_id =
+                    (!report.outcomes.is_empty()).then(|| reviews.store(plan, Instant::now()));
+                return Ok(
+                    json!({ "plan_id": plan_id, "expires_in_seconds": CLEANUP_REVIEW_TTL.as_secs(), "report": report }),
+                );
             }
-            let dry_run = args
-                .get("dry_run")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(true);
-            let report = execute_cleanup(&catalog.cleanup_rules, &rule_ids, &sys, dry_run);
+            anyhow::ensure!(
+                args.get("dry_run").is_none_or(|value| value.as_bool() == Some(true)),
+                "Review and confirm cleanup using dismnext_review_cleanup and dismnext_confirm_cleanup"
+            );
+            let report = execute_cleanup(&catalog.cleanup_rules, &rule_ids, &sys, true);
             Ok(serde_json::to_value(report)?)
+        }
+        "dismnext_confirm_cleanup" | "dismnext_discard_cleanup_review" => {
+            let id = args["plan_id"]
+                .as_str()
+                .ok_or_else(|| anyhow!("Missing cleanup plan_id"))?;
+            if name == "dismnext_discard_cleanup_review" {
+                return Ok(json!({ "discarded": reviews.take(id, Instant::now()).is_some() }));
+            }
+            let lease = CleanupLease::try_acquire()?;
+            progress.begin_recycling()?;
+            let plan = reviews
+                .take(id, Instant::now())
+                .ok_or(CleanupReviewUnavailable)?;
+            Ok(serde_json::to_value(plan.confirm(&lease))?)
         }
         "dismnext_analyze_disk" => {
             let target = args
@@ -615,7 +271,8 @@ fn dispatch_tool_call(name: &str, args: &Value, catalog: &Catalog) -> Result<Val
                 .get("measure_allocation")
                 .and_then(|value| value.as_bool())
                 .unwrap_or(false);
-            let report = analyze_path_with_options(&target, max_depth, measure_allocation, None)?;
+            let report =
+                analyze_path_with_options(&target, max_depth, measure_allocation, Some(progress))?;
             Ok(serde_json::to_value(report)?)
         }
         "dismnext_find_duplicates" => {
@@ -628,7 +285,8 @@ fn dispatch_tool_call(name: &str, args: &Value, catalog: &Catalog) -> Result<Val
                 .get("min_size_bytes")
                 .and_then(|v| v.as_u64())
                 .unwrap_or(1024 * 1024);
-            let report = find_duplicate_files(Path::new(path_str), min_size_bytes)?;
+            let report =
+                find_duplicate_files_with_progress(Path::new(path_str), min_size_bytes, progress)?;
             Ok(serde_json::to_value(report)?)
         }
         "dismnext_find_orphan_dirs" => {
@@ -678,16 +336,12 @@ fn dispatch_tool_call(name: &str, args: &Value, catalog: &Catalog) -> Result<Val
                 .filter(|s| !s.trim().is_empty())
                 .map(|s| s.to_string())
                 .unwrap_or_else(default_backup_dir);
-            let filter_names: Option<Vec<String>> = args
+            let filter_names = args
                 .get("published_names")
-                .and_then(|v| v.as_array())
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|x| x.as_str().map(|s| s.to_string()))
-                        .collect()
-                });
-            let slice_ref = filter_names.as_deref().filter(|s| !s.is_empty());
-            let report = export_drivers(Path::new(&target_dir), slice_ref)?;
+                .map(|value| serde_json::from_value::<Vec<String>>(value.clone()))
+                .transpose()?;
+            progress.begin_recycling()?;
+            let report = export_drivers(Path::new(&target_dir), filter_names.as_deref())?;
             Ok(serde_json::to_value(report)?)
         }
         "dismnext_list_startup" => {
@@ -818,6 +472,8 @@ fn dispatch_tool_call(name: &str, args: &Value, catalog: &Catalog) -> Result<Val
                     }))
                 }
                 "create_restore_point" => {
+                    let _lease = CleanupLease::try_acquire()?;
+                    progress.begin_recycling()?;
                     let desc = args
                         .get("description")
                         .and_then(|v| v.as_str())
@@ -829,6 +485,8 @@ fn dispatch_tool_call(name: &str, args: &Value, catalog: &Catalog) -> Result<Val
                     }))
                 }
                 other => {
+                    let _lease = CleanupLease::try_acquire()?;
+                    progress.begin_recycling()?;
                     let outcome = run_rescue_action(other)?;
                     Ok(serde_json::to_value(outcome)?)
                 }
@@ -876,7 +534,9 @@ fn dispatch_tool_call(name: &str, args: &Value, catalog: &Catalog) -> Result<Val
                 .and_then(|v| v.as_str())
                 .unwrap_or("json")
                 .to_ascii_lowercase();
-            let report = generate_health_report(catalog, None);
+            let scan = scan_all_with_progress(&catalog.cleanup_rules, &sys, progress)?;
+            progress.check()?;
+            let report = generate_health_report(catalog, Some(&scan));
             if fmt == "markdown" {
                 Ok(json!({
                     "health_score": report.health_score,
@@ -905,6 +565,32 @@ fn legacy_snapshot_dir() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reads_content_type_before_content_length_without_losing_the_next_frame() {
+        let raw = b"Content-Type: application/json\r\nContent-Length: 2\r\n\r\n{}\n{\"id\":2}\n";
+        let mut input = &raw[..];
+        let (first, framing) = read_next_message(&mut input).unwrap().unwrap();
+        assert_eq!(first, "{}");
+        assert!(matches!(framing, FramingMode::ContentLength));
+        let (second, framing) = read_next_message(&mut input).unwrap().unwrap();
+        assert_eq!(second, "{\"id\":2}");
+        assert!(matches!(framing, FramingMode::Newline));
+        assert!(read_next_message(&mut &b"Content-Type: application/json\r\n\r\n"[..]).is_err());
+    }
+
+    #[test]
+    fn empty_driver_filter_requests_no_backup() {
+        let error = dispatch_tool_call(
+            "dismnext_backup_drivers",
+            &json!({ "published_names": [] }),
+            &test_catalog(),
+            &mut CleanupReviews::default(),
+            &ScanProgress::default(),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("No driver packages selected"));
+    }
 
     #[test]
     fn rejects_oversized_messages_in_both_framing_modes() {
@@ -946,6 +632,10 @@ mod tests {
         assert_eq!(resp["id"], 1);
         assert_eq!(resp["result"]["protocolVersion"], "2025-03-26");
         assert_eq!(resp["result"]["serverInfo"]["name"], "dismnext-mcp");
+        assert_eq!(
+            resp["result"]["serverInfo"]["version"],
+            env!("CARGO_PKG_VERSION")
+        );
 
         let notif = json!({
             "jsonrpc": "2.0",
@@ -965,7 +655,10 @@ mod tests {
         });
         let resp = handle_mcp_request(&req, &catalog).expect("tools/list returns response");
         let tools = resp["result"]["tools"].as_array().expect("tools array");
-        assert_eq!(tools.len(), 16);
+        assert_eq!(tools.len(), 19);
+        assert!(tools
+            .iter()
+            .any(|tool| tool["name"] == "dismnext_confirm_cleanup"));
         for t in tools {
             assert!(t["name"].as_str().unwrap().starts_with("dismnext_"));
             assert_eq!(t["inputSchema"]["type"], "object");

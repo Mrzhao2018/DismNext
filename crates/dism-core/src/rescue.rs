@@ -1,18 +1,22 @@
 use crate::file_stamp::{delete_open_target, open_for_verification};
 use crate::maintenance::{run_system_command, MaintenanceProgress};
+use crate::win_util::{
+    has_reparse_point_in_ancestors, pin_directory, CREATE_NO_WINDOW, FILE_ATTRIBUTE_REPARSE_POINT,
+};
 use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io;
+use std::os::windows::ffi::OsStrExt;
 use std::os::windows::fs::MetadataExt;
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
-use windows_sys::Win32::Storage::FileSystem::{
-    DELETE, FILE_ATTRIBUTE_REPARSE_POINT, FILE_SHARE_READ,
+use windows_sys::Win32::Storage::FileSystem::{DELETE, FILE_SHARE_READ};
+use windows_sys::Win32::System::Services::{
+    CloseServiceHandle, OpenSCManagerW, OpenServiceW, QueryServiceStatus, SC_MANAGER_CONNECT,
+    SERVICE_QUERY_STATUS, SERVICE_RUNNING, SERVICE_STATUS,
 };
 use windows_sys::Win32::UI::Shell::{SHChangeNotify, SHCNE_ASSOCCHANGED, SHCNF_IDLIST};
-
-const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RestorePointInfo {
@@ -32,7 +36,7 @@ pub struct RescueActionOutcome {
 
 /// Lists existing Windows System Restore points (returns empty list if unavailable or non-elevated).
 pub fn list_restore_points() -> Vec<RestorePointInfo> {
-    let ps_cmd = "Get-ComputerRestorePoint -ErrorAction SilentlyContinue | Select-Object SequenceNumber,Description,CreationTime | ConvertTo-Json -Compress";
+    let ps_cmd = "Get-ComputerRestorePoint -ErrorAction SilentlyContinue | Select-Object SequenceNumber,Description,CreationTime,RestorePointType,EventType | ConvertTo-Json -Compress";
     let Ok(output) = crate::system_tools::powershell_command().and_then(|mut command| {
         command
             .creation_flags(CREATE_NO_WINDOW)
@@ -78,47 +82,70 @@ pub fn list_restore_points() -> Vec<RestorePointInfo> {
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
+        let event_type = format_restore_point_type(
+            item.get("RestorePointType").and_then(|v| v.as_u64()),
+            item.get("EventType").and_then(|v| v.as_u64()),
+        );
         points.push(RestorePointInfo {
             sequence_number: seq,
             description: desc,
             creation_time: format_wmi_time(&ctime),
-            event_type: "MODIFY_SETTINGS".to_string(),
+            event_type,
         });
     }
     points.sort_by_key(|entry| std::cmp::Reverse(entry.sequence_number));
     points
 }
 
-/// Creates a new Windows System Restore point with the given description (Administrator required).
-pub fn create_restore_point(description: &str) -> Result<String> {
-    if !crate::sysinfo::SystemInfo::collect().is_admin {
-        return Err(anyhow!(
-            "Creating a Windows System Restore Point requires Administrator privileges. Please click '一键提权为管理员' first."
-        ));
+fn format_restore_point_type(rp_type: Option<u64>, event_type: Option<u64>) -> String {
+    match rp_type {
+        Some(0) => "APPLICATION_INSTALL".to_string(),
+        Some(1) => "APPLICATION_UNINSTALL".to_string(),
+        Some(10) => "DEVICE_DRIVER_INSTALL".to_string(),
+        Some(12) => "MODIFY_SETTINGS".to_string(),
+        Some(13) => "CANCELLED_OPERATION".to_string(),
+        Some(other) => format!("TYPE_{other}"),
+        None => match event_type {
+            Some(100) => "BEGIN_SYSTEM_CHANGE".to_string(),
+            Some(101) => "END_SYSTEM_CHANGE".to_string(),
+            Some(102) => "BEGIN_NESTED_SYSTEM_CHANGE".to_string(),
+            Some(103) => "END_NESTED_SYSTEM_CHANGE".to_string(),
+            _ => "MODIFY_SETTINGS".to_string(),
+        },
     }
+}
 
-    let clean_desc: String = description
+fn sanitize_restore_point_description(description: &str) -> String {
+    let clean: String = description
         .trim()
         .chars()
-        .filter(|c| !matches!(c, '\'' | '"' | '`' | '$' | ';' | '\r' | '\n'))
+        .filter(|c| !c.is_control() && *c != '\0')
         .take(96)
         .collect();
-    let final_desc = if clean_desc.is_empty() {
+    if clean.is_empty() {
         format!(
             "DismNext Checkpoint {}",
             chrono::Local::now().format("%Y-%m-%d %H:%M")
         )
     } else {
-        clean_desc
-    };
+        clean
+    }
+}
 
-    let ps_script = format!(
-        "$ErrorActionPreference='Stop'; Checkpoint-Computer -Description '{}' -RestorePointType 'MODIFY_SETTINGS'",
-        final_desc
-    );
+/// Creates a new Windows System Restore point with the given description (Administrator required).
+pub fn create_restore_point(description: &str) -> Result<String> {
+    if !crate::sysinfo::SystemInfo::collect().is_admin {
+        return Err(anyhow!(
+            "Creating a Windows System Restore Point requires Administrator privileges."
+        ));
+    }
+
+    let final_desc = sanitize_restore_point_description(description);
+    let ps_script = "$ErrorActionPreference='Stop'; Checkpoint-Computer -Description $env:DISMNEXT_RP_DESC -RestorePointType 'MODIFY_SETTINGS'";
     let output = crate::system_tools::powershell_command()?
         .creation_flags(CREATE_NO_WINDOW)
-        .args(["-NoProfile", "-NonInteractive", "-Command", &ps_script])
+        .env("DISMNEXT_RP_DESC", &final_desc)
+        .args(["-NoProfile", "-NonInteractive", "-Command", ps_script])
         .output()
         .context("Failed to execute PowerShell Checkpoint-Computer")?;
 
@@ -164,18 +191,20 @@ fn run_rescue_action_impl(
             let mut removed = 0usize;
             if !local_app.is_empty() {
                 let single = PathBuf::from(&local_app).join("IconCache.db");
-                if single.is_file() && fs::remove_file(&single).is_ok() {
+                if remove_unlocked_regular_file(&single) {
                     removed += 1;
                 }
                 let explorer_dir = PathBuf::from(&local_app).join(r"Microsoft\Windows\Explorer");
-                if let Ok(rd) = fs::read_dir(&explorer_dir) {
-                    for entry in rd.flatten() {
-                        let name = entry.file_name().to_string_lossy().to_ascii_lowercase();
-                        if (name.starts_with("iconcache") || name.starts_with("thumbcache"))
-                            && name.ends_with(".db")
-                            && fs::remove_file(entry.path()).is_ok()
-                        {
-                            removed += 1;
+                if !has_reparse_point_in_ancestors(&explorer_dir, true) {
+                    if let Ok(rd) = fs::read_dir(&explorer_dir) {
+                        for entry in rd.flatten() {
+                            let name = entry.file_name().to_string_lossy().to_ascii_lowercase();
+                            if (name.starts_with("iconcache") || name.starts_with("thumbcache"))
+                                && name.ends_with(".db")
+                                && remove_unlocked_regular_file(&entry.path())
+                            {
+                                removed += 1;
+                            }
                         }
                     }
                 }
@@ -218,42 +247,84 @@ fn run_rescue_action_impl(
         }
         "reset_windows_update" => {
             require_admin(&sys, "Resetting Windows Update cache")?;
+            if let Some(progress) = progress {
+                progress.check()?;
+            }
             let dl_dir = crate::system_tools::windows_dir()?.join(r"SoftwareDistribution\Download");
-            let _ = exec_simple("net.exe", &["stop", "wuauserv"], None);
-            let _ = exec_simple("net.exe", &["stop", "bits"], None);
+            let wuauserv_running = is_service_running("wuauserv");
+            let bits_running = is_service_running("bits");
+            let mut notes = Vec::new();
+            if wuauserv_running {
+                if let Err(err) = exec_simple("net.exe", &["stop", "wuauserv"], progress) {
+                    notes.push(format!("stop wuauserv warning: {err}"));
+                }
+            }
+            if bits_running {
+                if let Err(err) = exec_simple("net.exe", &["stop", "bits"], progress) {
+                    notes.push(format!("stop bits warning: {err}"));
+                }
+            }
 
             let deleted = purge_unlocked_contents(&dl_dir);
 
-            let _ = exec_simple("net.exe", &["start", "bits"], None);
-            let _ = exec_simple("net.exe", &["start", "wuauserv"], None);
+            if bits_running {
+                if let Err(err) = exec_simple("net.exe", &["start", "bits"], None) {
+                    notes.push(format!("start bits warning: {err}"));
+                }
+            }
+            if wuauserv_running {
+                if let Err(err) = exec_simple("net.exe", &["start", "wuauserv"], None) {
+                    notes.push(format!("start wuauserv warning: {err}"));
+                }
+            }
             let deleted = deleted?;
+            let mut summary = format!(
+                "Windows Update cache cleanup cleared {} cached download entries in {}.",
+                deleted,
+                dl_dir.display()
+            );
+            if !notes.is_empty() {
+                summary.push('\n');
+                summary.push_str(&notes.join("\n"));
+            }
 
             Ok(RescueActionOutcome {
                 action_id: action_id.to_string(),
                 success: true,
                 requires_restart: false,
-                output: format!(
-                    "Windows Update services restarted and cleared {} cached download entries in {}.",
-                    deleted,
-                    dl_dir.display()
-                ),
+                output: summary,
             })
         }
         "clear_print_spooler" => {
             require_admin(&sys, "Clearing Print Spooler queue")?;
+            if let Some(progress) = progress {
+                progress.check()?;
+            }
             let spool_dir = crate::system_tools::system32_dir()?.join(r"spool\PRINTERS");
-            let _ = exec_simple("net.exe", &["stop", "Spooler"], None);
+            let spooler_running = is_service_running("Spooler");
+            let mut notes = Vec::new();
+            if spooler_running {
+                if let Err(err) = exec_simple("net.exe", &["stop", "Spooler"], progress) {
+                    notes.push(format!("stop Spooler warning: {err}"));
+                }
+            }
             let deleted = purge_unlocked_contents(&spool_dir);
-            let _ = exec_simple("net.exe", &["start", "Spooler"], None);
+            if spooler_running {
+                if let Err(err) = exec_simple("net.exe", &["start", "Spooler"], None) {
+                    notes.push(format!("start Spooler warning: {err}"));
+                }
+            }
             let deleted = deleted?;
+            let mut summary = format!("Print Spooler cleared {} stuck spool file(s).", deleted);
+            if !notes.is_empty() {
+                summary.push('\n');
+                summary.push_str(&notes.join("\n"));
+            }
             Ok(RescueActionOutcome {
                 action_id: action_id.to_string(),
                 success: true,
                 requires_restart: false,
-                output: format!(
-                    "Print Spooler restarted and cleared {} stuck spool file(s).",
-                    deleted
-                ),
+                output: summary,
             })
         }
         "dism_check_health" => {
@@ -300,12 +371,50 @@ fn run_rescue_action_impl(
 
 fn require_admin(sys: &crate::sysinfo::SystemInfo, label: &str) -> Result<()> {
     if !sys.is_admin {
-        return Err(anyhow!(
-            "{} requires Administrator privileges. Please click '一键提权为管理员' first.",
-            label
-        ));
+        return Err(anyhow!("{} requires Administrator privileges.", label));
     }
     Ok(())
+}
+
+fn is_service_running(name: &str) -> bool {
+    let wide_name: Vec<u16> = std::ffi::OsStr::new(name)
+        .encode_wide()
+        .chain(Some(0))
+        .collect();
+    unsafe {
+        let scm = OpenSCManagerW(std::ptr::null(), std::ptr::null(), SC_MANAGER_CONNECT);
+        if scm.is_null() {
+            return false;
+        }
+        let svc = OpenServiceW(scm, wide_name.as_ptr(), SERVICE_QUERY_STATUS);
+        if svc.is_null() {
+            CloseServiceHandle(scm);
+            return false;
+        }
+        let mut status: SERVICE_STATUS = std::mem::zeroed();
+        let ok = QueryServiceStatus(svc, &mut status);
+        CloseServiceHandle(svc);
+        CloseServiceHandle(scm);
+        ok != 0 && status.dwCurrentState == SERVICE_RUNNING
+    }
+}
+
+fn remove_unlocked_regular_file(path: &Path) -> bool {
+    let Some(parent) = path.parent() else {
+        return false;
+    };
+    let Ok(_parents) = pin_directory(parent, false) else {
+        return false;
+    };
+    let Ok(file) = open_for_verification(path, false, DELETE, FILE_SHARE_READ) else {
+        return false;
+    };
+    let Ok(meta) = file.metadata() else {
+        return false;
+    };
+    meta.is_file()
+        && (meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT) == 0
+        && delete_open_target(&file, false).is_ok()
 }
 
 fn exec_simple(
@@ -325,25 +434,13 @@ fn exec_simple(
 }
 
 fn purge_unlocked_contents(dir: &Path) -> Result<usize> {
-    let ancestors: Vec<_> = dir.ancestors().collect();
-    let mut pinned = Vec::with_capacity(ancestors.len());
-    // Hold each verified directory without delete sharing while resolving its children.
-    for path in ancestors.into_iter().rev() {
-        let file = match open_for_verification(path, true, 0, FILE_SHARE_READ) {
-            Ok(file) => file,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(0),
-            Err(error) => {
-                return Err(error).with_context(|| format!("Could not open {}", path.display()))
-            }
-        };
-        let metadata = file.metadata()?;
-        anyhow::ensure!(
-            metadata.is_dir() && metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT == 0,
-            "Refusing to clean through a reparse point or non-directory at {}",
-            path.display()
-        );
-        pinned.push(file);
-    }
+    let _parents = match pin_directory(dir, false) {
+        Ok(handles) => handles,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(0),
+        Err(error) => {
+            return Err(error).with_context(|| format!("Could not open {}", dir.display()))
+        }
+    };
     Ok(purge_children(dir)?)
 }
 
@@ -361,9 +458,15 @@ fn purge_children(dir: &Path) -> io::Result<usize> {
             continue;
         }
         let directory = metadata.is_dir();
-        if directory && purge_children(&path).is_err() {
-            continue;
-        }
+        let child_removed = if directory {
+            match purge_children(&path) {
+                Ok(count) => count,
+                Err(_) => continue,
+            }
+        } else {
+            0
+        };
+        removed += child_removed;
         if (directory || metadata.is_file()) && delete_open_target(&file, directory).is_ok() {
             removed += 1;
         }
@@ -422,7 +525,7 @@ mod tests {
         let kept_folder = folder.exists();
         drop(lock);
         fs::remove_dir_all(&root).unwrap();
-        assert_eq!(result.unwrap(), 2);
+        assert_eq!(result.unwrap(), 3);
         assert!(kept_lock);
         assert!(!kept_folder);
     }

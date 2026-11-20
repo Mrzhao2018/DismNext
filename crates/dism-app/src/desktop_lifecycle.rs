@@ -8,14 +8,19 @@ use std::ptr::{null, null_mut};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use windows_sys::Win32::Foundation::{
-    GetLastError, SetLastError, ERROR_ALREADY_EXISTS, WAIT_OBJECT_0, WAIT_TIMEOUT,
+    GetLastError, LocalFree, SetLastError, ERROR_ALREADY_EXISTS, ERROR_FILE_NOT_FOUND, HANDLE,
+    WAIT_OBJECT_0, WAIT_TIMEOUT,
 };
 use windows_sys::Win32::Security::{
-    GetLengthSid, GetTokenInformation, TokenUser, TOKEN_QUERY, TOKEN_USER,
+    Authorization::ConvertStringSidToSidW, GetLengthSid, GetTokenInformation, TokenLogonSid,
+    TokenSessionId, TokenUser, TOKEN_GROUPS, TOKEN_QUERY, TOKEN_USER,
 };
 use windows_sys::Win32::System::Threading::{
-    CreateEventExW, GetCurrentProcess, OpenProcessToken, SetEvent, WaitForSingleObject,
-    EVENT_MODIFY_STATE, SYNCHRONIZATION_SYNCHRONIZE,
+    AddIntegrityLabelToBoundaryDescriptor, AddSIDToBoundaryDescriptor, ClosePrivateNamespace,
+    CreateBoundaryDescriptorW, CreateEventExW, CreatePrivateNamespaceW, DeleteBoundaryDescriptor,
+    GetCurrentProcess, OpenEventW, OpenPrivateNamespaceW, OpenProcessToken, SetEvent,
+    WaitForSingleObject, EVENT_MODIFY_STATE, PRIVATE_NAMESPACE_FLAG_DESTROY,
+    SYNCHRONIZATION_SYNCHRONIZE,
 };
 
 pub(crate) const WINDOW_PATH: &str = "/api/desktop/window";
@@ -24,15 +29,26 @@ const WINDOW_TTL: Duration = Duration::from_secs(180);
 const EXIT_GRACE: Duration = Duration::from_secs(5);
 const MAX_WINDOWS: usize = 64;
 
-pub(crate) struct WakeEvent(OwnedHandle);
+pub(crate) struct WakeEvent(OwnedHandle, Option<PrivateNamespace>);
 
 impl WakeEvent {
     pub(crate) fn launch_or_signal(port: u16, elevated: bool) -> Result<Option<Self>> {
         // The Local namespace scopes the signal to this Windows session. A signal
         // only asks the existing host to open its UI with a new launch token.
-        let scope = if elevated { "elevated" } else { "standard" };
-        let name = format!(r"Local\DismNext-{}-{scope}-{port}", process_user_id()?);
-        let (event, existed) = Self::create(&name)?;
+        let namespace = if elevated {
+            Some(PrivateNamespace::open(port)?)
+        } else {
+            None
+        };
+        let name = match &namespace {
+            Some(namespace) => format!(r"{}\Wake", namespace.alias),
+            None => format!(r"Local\DismNext-{}-standard-{port}", process_user_id()?),
+        };
+        if namespace.as_ref().is_some_and(|namespace| !namespace.owner) {
+            signal_existing_event(&name)?;
+            return Ok(None);
+        }
+        let (mut event, existed) = Self::create(&name)?;
         if existed {
             ensure!(
                 unsafe { SetEvent(event.0.as_raw_handle()) } != 0,
@@ -40,6 +56,7 @@ impl WakeEvent {
             );
             Ok(None)
         } else {
+            event.1 = namespace;
             Ok(Some(event))
         }
     }
@@ -62,7 +79,7 @@ impl WakeEvent {
                 GetLastError() == ERROR_ALREADY_EXISTS,
             )
         };
-        Ok((Self(handle), existed))
+        Ok((Self(handle, None), existed))
     }
 
     pub(crate) fn requested(&self) -> Result<bool> {
@@ -74,12 +91,134 @@ impl WakeEvent {
     }
 }
 
-fn process_user_id() -> Result<String> {
+fn signal_existing_event(name: &str) -> Result<()> {
+    // Only the namespace creator creates the event, so the host owns both handles.
+    let name: Vec<_> = name.encode_utf16().chain(Some(0)).collect();
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        let raw = unsafe { OpenEventW(EVENT_MODIFY_STATE, 0, name.as_ptr()) };
+        if !raw.is_null() {
+            let _handle = unsafe { OwnedHandle::from_raw_handle(raw) };
+            ensure!(unsafe { SetEvent(raw) } != 0, io::Error::last_os_error());
+            return Ok(());
+        }
+        let error = unsafe { GetLastError() };
+        if error != ERROR_FILE_NOT_FOUND || Instant::now() >= deadline {
+            return Err(io::Error::from_raw_os_error(error as i32).into());
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+struct Boundary(HANDLE);
+
+impl Drop for Boundary {
+    fn drop(&mut self) {
+        unsafe { DeleteBoundaryDescriptor(self.0) };
+    }
+}
+
+struct PrivateNamespace {
+    handle: HANDLE,
+    alias: String,
+    owner: bool,
+}
+
+impl PrivateNamespace {
+    fn open(port: u16) -> Result<Self> {
+        let token = process_token()?;
+        let mut session: u32 = 0;
+        let mut required = 0;
+        let mut groups = [0usize; 32];
+        let ok = unsafe {
+            GetTokenInformation(
+                token.as_raw_handle(),
+                TokenSessionId,
+                (&mut session as *mut u32).cast(),
+                size_of::<u32>() as u32,
+                &mut required,
+            ) != 0
+                && GetTokenInformation(
+                    token.as_raw_handle(),
+                    TokenLogonSid,
+                    groups.as_mut_ptr().cast(),
+                    size_of_val(&groups) as u32,
+                    &mut required,
+                ) != 0
+        };
+        if !ok {
+            return Err(io::Error::last_os_error().into());
+        }
+        let logon = unsafe { &*groups.as_ptr().cast::<TOKEN_GROUPS>() };
+        ensure!(
+            logon.GroupCount == 1,
+            "Could not resolve the current Windows logon SID"
+        );
+        let alias = format!("DismNext.High.{session}.{port}");
+        let wide: Vec<_> = alias.encode_utf16().chain(Some(0)).collect();
+        let mut boundary = Boundary(unsafe { CreateBoundaryDescriptorW(wide.as_ptr(), 0) });
+        if boundary.0.is_null() {
+            return Err(io::Error::last_os_error().into());
+        }
+        if unsafe { AddSIDToBoundaryDescriptor(&mut boundary.0, logon.Groups[0].Sid) } == 0 {
+            return Err(io::Error::last_os_error().into());
+        }
+        let high: Vec<_> = "S-1-16-12288".encode_utf16().chain(Some(0)).collect();
+        let mut sid = null_mut();
+        if unsafe { ConvertStringSidToSidW(high.as_ptr(), &mut sid) } == 0 {
+            return Err(io::Error::last_os_error().into());
+        }
+        let added = unsafe { AddIntegrityLabelToBoundaryDescriptor(&mut boundary.0, sid) };
+        let error = io::Error::last_os_error();
+        unsafe { LocalFree(sid) };
+        if added == 0 {
+            return Err(error.into());
+        }
+        let (handle, owner) = crate::desktop_security::with_security(
+            "D:P(A;;GA;;;SY)(A;;GA;;;BA)S:(ML;;NRNW;;;HI)",
+            |attributes| {
+                let mut handle =
+                    unsafe { CreatePrivateNamespaceW(attributes, boundary.0, wide.as_ptr()) };
+                let owner = !handle.is_null();
+                if !owner && unsafe { GetLastError() } == ERROR_ALREADY_EXISTS {
+                    handle = unsafe { OpenPrivateNamespaceW(boundary.0, wide.as_ptr()) };
+                }
+                if handle.is_null() {
+                    Err(io::Error::last_os_error())
+                } else {
+                    Ok((handle, owner))
+                }
+            },
+        )?;
+        Ok(Self {
+            handle,
+            alias,
+            owner,
+        })
+    }
+}
+
+impl Drop for PrivateNamespace {
+    fn drop(&mut self) {
+        let flags = if self.owner {
+            PRIVATE_NAMESPACE_FLAG_DESTROY
+        } else {
+            0
+        };
+        unsafe { ClosePrivateNamespace(self.handle, flags) };
+    }
+}
+
+fn process_token() -> Result<OwnedHandle> {
     let mut handle = null_mut();
     if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut handle) } == 0 {
         return Err(io::Error::last_os_error().into());
     }
-    let token = unsafe { OwnedHandle::from_raw_handle(handle) };
+    Ok(unsafe { OwnedHandle::from_raw_handle(handle) })
+}
+
+fn process_user_id() -> Result<String> {
+    let token = process_token()?;
     // TOKEN_USER and its SID fit in this aligned buffer.
     let mut info = [0usize; 32];
     let mut required = 0;
@@ -281,5 +420,13 @@ mod tests {
         assert!(!leases.idle(now + WINDOW_TTL - Duration::from_secs(1), false));
         assert!(!leases.idle(now + WINDOW_TTL, false));
         assert!(leases.idle(now + WINDOW_TTL + EXIT_GRACE, false));
+    }
+}
+#[test]
+fn high_integrity_namespace_rejects_a_standard_host() {
+    if !dism_core::sysinfo::is_administrator() {
+        let fixture = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = fixture.local_addr().unwrap().port();
+        assert!(PrivateNamespace::open(port).is_err());
     }
 }

@@ -1,15 +1,21 @@
 use crate::systasks::{decode_cmd_output, decode_utf16le};
 use crate::system_tools::system32_command;
+use crate::win_util::CREATE_NO_WINDOW;
 use anyhow::{anyhow, Context, Result};
 use serde::Serialize;
 use std::io::{self, Read};
+use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::os::windows::process::CommandExt;
 use std::process::{Child, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Mutex};
 use std::time::{Duration, Instant};
+use windows_sys::Win32::System::JobObjects::{
+    AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
+    SetInformationJobObject, TerminateJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+    JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+};
 
-const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 const STREAM_LIMIT: usize = 128 * 1024;
 const DISPLAY_LIMIT: usize = 12 * 1024;
 
@@ -103,12 +109,14 @@ pub(crate) fn run_system_command(
     command.creation_flags(CREATE_NO_WINDOW).args(args);
     let (status, output) = if let Some(progress) = progress {
         progress.check()?;
+        let job =
+            MaintenanceJob::new().context("Could not create the maintenance process group")?;
         let child = command
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
             .with_context(|| format!("Failed to start {program}"))?;
-        capture_child(child, program, progress)?
+        capture_child(child, &job, program, progress)?
     } else {
         let output = command
             .output()
@@ -134,12 +142,62 @@ impl Drop for RunningChild {
     }
 }
 
+struct MaintenanceJob(OwnedHandle);
+
+impl MaintenanceJob {
+    fn new() -> io::Result<Self> {
+        let raw = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
+        if raw.is_null() {
+            return Err(io::Error::last_os_error());
+        }
+        let job = Self(unsafe { OwnedHandle::from_raw_handle(raw) });
+        let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { std::mem::zeroed() };
+        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        let ok = unsafe {
+            SetInformationJobObject(
+                job.0.as_raw_handle(),
+                JobObjectExtendedLimitInformation,
+                (&limits as *const JOBOBJECT_EXTENDED_LIMIT_INFORMATION).cast(),
+                std::mem::size_of_val(&limits) as u32,
+            )
+        };
+        if ok == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(job)
+    }
+
+    fn attach(&self, child: &mut Child) -> io::Result<()> {
+        if unsafe { AssignProcessToJobObject(self.0.as_raw_handle(), child.as_raw_handle()) } != 0 {
+            return Ok(());
+        }
+        let error = io::Error::last_os_error();
+        // A very short command can exit before assignment.
+        if child.try_wait()?.is_some() {
+            Ok(())
+        } else {
+            Err(error)
+        }
+    }
+
+    fn terminate(&self) -> io::Result<()> {
+        if unsafe { TerminateJobObject(self.0.as_raw_handle(), 1) } == 0 {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(())
+        }
+    }
+}
+
 fn capture_child(
     child: Child,
+    job: &MaintenanceJob,
     program: &str,
     progress: &MaintenanceProgress,
 ) -> Result<(ExitStatus, String)> {
     let mut child = RunningChild(child);
+    job.attach(&mut child.0)
+        .context("Could not group the maintenance process and its children")?;
     let (sender, receiver) = mpsc::sync_channel(16);
     let stdout = child
         .0
@@ -173,7 +231,7 @@ fn capture_child(
                 // Descendants can inherit a pipe. Do not wait indefinitely once the command exits.
                 drain_deadline = Some(Instant::now() + Duration::from_secs(1));
             } else if !cancelled && progress.is_cancelled() {
-                match child.0.kill() {
+                match job.terminate() {
                     Ok(()) => cancelled = true,
                     Err(_) if child.0.try_wait()?.is_some() => (),
                     Err(error) => {
@@ -201,9 +259,11 @@ fn capture_child(
                 buffer.extend(bytes?);
                 let overflow = buffer.len().saturating_sub(STREAM_LIMIT);
                 if overflow > 0 {
-                    // Drain complete UTF-16 units and retain a BOM if the stream supplied one.
-                    let start = usize::from(buffer.starts_with(b"\xff\xfe")) * 2;
-                    buffer.drain(start..start + overflow.next_multiple_of(2));
+                    truncate_stream_tail(
+                        buffer,
+                        overflow,
+                        stream == 0 && program.eq_ignore_ascii_case("sfc.exe"),
+                    );
                 }
                 pending_output = true;
             }
@@ -211,6 +271,35 @@ fn capture_child(
             Err(mpsc::RecvTimeoutError::Timeout) => (),
         }
     }
+}
+
+fn truncate_stream_tail(buffer: &mut Vec<u8>, overflow: usize, utf16: bool) {
+    if utf16 || buffer.starts_with(b"\xff\xfe") {
+        let start = usize::from(buffer.starts_with(b"\xff\xfe")) * 2;
+        let cut = start + overflow.next_multiple_of(2);
+        let skip = buffer[cut..].starts_with(&[b'\n', 0])
+            || buffer
+                .get(cut + 1)
+                .is_some_and(|high| (0xdc..=0xdf).contains(high));
+        buffer.drain(start..cut + usize::from(skip) * 2);
+        return;
+    }
+    let start = usize::from(buffer.starts_with(b"\xef\xbb\xbf")) * 3;
+    let mut cut = start + overflow;
+    // Prefer starting at a full line for both UTF-8 and the Windows OEM code page.
+    if let Some(offset) = buffer[cut..]
+        .iter()
+        .take(4096)
+        .position(|byte| *byte == b'\n')
+    {
+        cut += offset + 1;
+    } else {
+        cut += buffer[cut..]
+            .iter()
+            .take_while(|byte| **byte & 0xc0 == 0x80)
+            .count();
+    }
+    buffer.drain(start..cut);
 }
 
 fn read_pipe(
@@ -279,5 +368,61 @@ mod tests {
                 .is::<MaintenanceCancelled>());
         });
         assert_eq!(last_percent("[ 12.5% ]\r[ 54.2% ]"), Some(54.2));
+    }
+
+    #[test]
+    fn output_tail_begins_at_a_character_boundary() {
+        let mut utf8 = "€后续".as_bytes().to_vec();
+        truncate_stream_tail(&mut utf8, 1, false);
+        assert_eq!(String::from_utf8(utf8).unwrap(), "后续");
+        let mut utf16: Vec<u8> = "🙂后续".encode_utf16().flat_map(u16::to_le_bytes).collect();
+        truncate_stream_tail(&mut utf16, 2, true);
+        assert_eq!(decode_utf16le(&utf16), "后续");
+    }
+
+    #[test]
+    fn cancelling_a_job_stops_its_descendants() {
+        use windows_sys::Win32::Foundation::{WAIT_OBJECT_0, WAIT_TIMEOUT};
+        use windows_sys::Win32::System::Threading::{
+            OpenProcess, WaitForSingleObject, SYNCHRONIZATION_SYNCHRONIZE,
+        };
+
+        let progress = MaintenanceProgress::default();
+        let program = r"WindowsPowerShell\v1.0\powershell.exe";
+        let script = r#"$child = Start-Process "$env:SystemRoot\System32\ping.exe" -ArgumentList '-t','127.0.0.1' -WindowStyle Hidden -PassThru; $child.Id; Wait-Process -Id $child.Id"#;
+        std::thread::scope(|scope| {
+            let task = scope.spawn(|| {
+                run_system_command(
+                    program,
+                    &["-NoProfile", "-Command", script],
+                    Some(&progress),
+                )
+            });
+            let deadline = Instant::now() + Duration::from_secs(10);
+            let descendant = loop {
+                if let Ok(pid) = progress.snapshot().output.trim().parse::<u32>() {
+                    let handle = unsafe { OpenProcess(SYNCHRONIZATION_SYNCHRONIZE, 0, pid) };
+                    if !handle.is_null() {
+                        break Some(unsafe { OwnedHandle::from_raw_handle(handle) });
+                    }
+                }
+                if task.is_finished() || Instant::now() >= deadline {
+                    break None;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            };
+            progress.cancel();
+            assert!(
+                matches!(task.join().unwrap(), Err(error) if error.is::<MaintenanceCancelled>())
+            );
+            let descendant =
+                descendant.expect("maintenance command should report the running descendant");
+            let result = unsafe { WaitForSingleObject(descendant.as_raw_handle(), 5_000) };
+            assert_ne!(
+                result, WAIT_TIMEOUT,
+                "descendant still running after cancelling maintenance"
+            );
+            assert_eq!(result, WAIT_OBJECT_0);
+        });
     }
 }

@@ -35,6 +35,7 @@ impl HttpWorkers {
         if let Err(mpsc::TrySendError::Full(request) | mpsc::TrySendError::Disconnected(request)) =
             queue.try_send(request)
         {
+            self.pending.fetch_sub(1, Ordering::Release);
             let origin = header_value(&request, "origin").map(str::to_owned);
             respond_json(
                 request,
@@ -45,12 +46,11 @@ impl HttpWorkers {
                 state,
                 origin.as_deref(),
             );
-            self.pending.fetch_sub(1, Ordering::Relaxed);
         }
     }
 
     pub(crate) fn has_work(&self) -> bool {
-        self.pending.load(Ordering::Relaxed) != 0
+        self.pending.load(Ordering::Acquire) != 0
     }
 }
 
@@ -77,7 +77,7 @@ fn start_workers(
                 if catch_unwind(AssertUnwindSafe(|| handle_request(request, &state))).is_err() {
                     eprintln!("A desktop HTTP request stopped unexpectedly");
                 }
-                pending.fetch_sub(1, Ordering::Relaxed);
+                pending.fetch_sub(1, Ordering::Release);
             })?;
     }
     Ok(sender)

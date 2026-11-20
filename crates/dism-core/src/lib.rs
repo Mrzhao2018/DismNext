@@ -28,6 +28,7 @@ pub mod systasks;
 pub mod system_tools;
 mod ttl_cache;
 pub mod uninstaller;
+pub mod win_util;
 
 pub use appx::{list_appx_packages, remove_appx_package, AppxCategory, AppxPackageInfo};
 pub use catalog::{Catalog, CleanupRule, CustomRuleInput, OptimizationGroup};

@@ -1,20 +1,20 @@
 use crate::diskmap::{invalidate_orphans_cache, is_protected_recycle_target, measure_dir_stats};
 use crate::path_recycle::{recycle_paths, PathSnapshot};
 use crate::ttl_cache::TtlCache;
+use crate::win_util::{has_reparse_point_in_ancestors, is_local_drive_path, CREATE_NO_WINDOW};
 use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::os::windows::fs::MetadataExt;
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Child, ExitStatus};
+use std::process::{Child, Command, ExitStatus};
 use std::time::Duration;
 use winreg::enums::{
     HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ, KEY_WOW64_32KEY, KEY_WOW64_64KEY,
 };
 use winreg::RegKey;
 
-const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
 const UNINSTALL_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Uninstall";
 
@@ -527,12 +527,97 @@ fn normalize_lower_path(p: &Path) -> String {
     s
 }
 
+fn split_uninstall_command(command: &str) -> Result<(&str, &str)> {
+    let command = command.trim();
+    if let Some(quoted) = command.strip_prefix('"') {
+        let (exe, args) = quoted
+            .split_once('"')
+            .ok_or_else(|| anyhow!("Unterminated uninstall executable path"))?;
+        anyhow::ensure!(
+            args.is_empty() || args.starts_with([' ', '\t']),
+            "Expected a space after the quoted uninstall executable path"
+        );
+        return Ok((exe, args.trim_start()));
+    }
+    let first_word_end = command.find([' ', '\t']).unwrap_or(command.len());
+    let first_word = &command[..first_word_end];
+    if first_word.eq_ignore_ascii_case("msiexec") {
+        return Ok((first_word, command[first_word_end..].trim_start()));
+    }
+    let executable_end = command
+        .as_bytes()
+        .windows(4)
+        .enumerate()
+        .find_map(|(start, part)| {
+            let end = start + 4;
+            (part.eq_ignore_ascii_case(b".exe")
+                && command
+                    .as_bytes()
+                    .get(end)
+                    .is_none_or(|c| matches!(c, b' ' | b'\t')))
+            .then_some(end)
+        })
+        .unwrap_or(first_word_end);
+    let (exe, args) = command.split_at(executable_end);
+    Ok((exe, args.trim_start()))
+}
+
+#[cfg(test)]
+#[test]
+fn uninstall_command_separates_the_executable_from_native_arguments() {
+    let exe = r"C:\Program Files\Example\uninstall.exe";
+    let args = r#"/remove "a,b""#;
+    let quoted = format!("\"{exe}\" {args}");
+    let unquoted = format!("{exe} {args}");
+    assert_eq!(split_uninstall_command(&quoted).unwrap(), (exe, args));
+    assert_eq!(split_uninstall_command(&unquoted).unwrap(), (exe, args));
+    assert_eq!(
+        split_uninstall_command("MsiExec /X{product}").unwrap(),
+        ("MsiExec", "/X{product}")
+    );
+    assert!(split_uninstall_command("\"unclosed.exe").is_err());
+}
+
+fn uninstall_executable(executable: &str) -> Result<PathBuf> {
+    let expanded = crate::evaluator::expand_env_vars(executable, None);
+    let mut path = PathBuf::from(expanded);
+    if executable.eq_ignore_ascii_case("msiexec") || executable.eq_ignore_ascii_case("msiexec.exe")
+    {
+        path = crate::system_tools::system32_dir()?.join("msiexec.exe");
+    }
+    let file_name = path.file_name().unwrap_or_default().to_string_lossy();
+    anyhow::ensure!(
+        path.extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("exe"))
+            && ![
+                "cmd.exe",
+                "powershell.exe",
+                "pwsh.exe",
+                "cscript.exe",
+                "wscript.exe",
+                "mshta.exe"
+            ]
+            .iter()
+            .any(|name| file_name.eq_ignore_ascii_case(name))
+            && is_local_drive_path(&path)
+            && !has_reparse_point_in_ancestors(&path, true)
+            && path.is_file(),
+        "Unsupported uninstall executable '{}'",
+        path.display()
+    );
+    Ok(path)
+}
+
 /// Starts the registered uninstaller and retains its process and application identity.
 pub fn launch_win32_uninstaller(app_id: &str, use_quiet: bool) -> Result<Win32Uninstall> {
     let app = collect_win32_apps()
         .into_iter()
         .find(|a| a.id == app_id)
         .ok_or_else(|| anyhow!("Installed application '{}' not found in registry", app_id))?;
+    anyhow::ensure!(
+        app.scope != "user" || !crate::sysinfo::is_administrator(),
+        "Restart DismNext without administrator privileges to run this per-user uninstaller"
+    );
 
     let raw_cmd = if use_quiet && !app.quiet_uninstall_string.is_empty() {
         &app.quiet_uninstall_string
@@ -549,12 +634,14 @@ pub fn launch_win32_uninstaller(app_id: &str, use_quiet: bool) -> Result<Win32Un
         ));
     }
 
-    let child = crate::system_tools::system32_command("cmd.exe")?
-        .args(["/D", "/S", "/C"])
-        .raw_arg(format!("\"{raw_cmd}\""))
+    let (exe, args) = split_uninstall_command(raw_cmd)?;
+    let exe = uninstall_executable(exe)?;
+    let child = Command::new(&exe)
+        .current_dir(exe.parent().expect("absolute executable path"))
+        .raw_arg(args)
         .creation_flags(CREATE_NO_WINDOW)
         .spawn()
-        .with_context(|| format!("Failed to launch uninstaller command: {}", raw_cmd))?;
+        .with_context(|| format!("Failed to launch uninstaller {}", exe.display()))?;
 
     Ok(Win32Uninstall {
         app,

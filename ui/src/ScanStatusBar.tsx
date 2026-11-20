@@ -1,6 +1,7 @@
 import { Button, Spinner, Text } from '@fluentui/react-components';
 import { formatBytes, Lang } from './api';
-import type { ActiveScan } from './useScanJob';
+import { useSyncExternalStore } from 'react';
+import type { ActiveScan, ScanStatusStore } from './useScanJob';
 
 const phases = {
   walking: { zh: '遍历文件', en: 'Walking files' },
@@ -34,13 +35,14 @@ function describeProgress(active: ActiveScan, lang: Lang) {
 }
 
 interface Props {
-  active: ActiveScan | null;
+  store: ScanStatusStore;
   cancelled: boolean;
   cancel: () => void;
   lang: Lang;
 }
 
-export function ScanStatusBar({ active, cancelled, cancel, lang }: Props) {
+export function ScanStatusBar({ store, cancelled, cancel, lang }: Props) {
+  const active = useSyncExternalStore(store.subscribe, store.getSnapshot);
   if (!active) {
     return cancelled ? <Text role="status" size={200}>{lang === 'zh' ? '操作已取消。' : 'Operation cancelled.'}</Text> : null;
   }

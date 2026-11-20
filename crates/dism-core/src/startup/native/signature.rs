@@ -27,12 +27,14 @@ use windows_sys::Win32::Security::WinTrust::{
     WTD_CHOICE_CATALOG, WTD_CHOICE_FILE, WTD_REVOKE_NONE, WTD_STATEACTION_CLOSE,
     WTD_STATEACTION_VERIFY, WTD_UI_NONE,
 };
-use windows_sys::Win32::Storage::FileSystem::{VerQueryValueW, FILE_SHARE_READ};
+use windows_sys::Win32::Storage::FileSystem::{
+    VerQueryValueW, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+};
 
 pub(super) fn inspect(path: &Path) -> (StartupSignature, Option<String>) {
     let Ok(file) = OpenOptions::new()
         .read(true)
-        .share_mode(FILE_SHARE_READ)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
         .open(path)
     else {
         return (StartupSignature::Unavailable, None);
@@ -49,18 +51,18 @@ pub(super) fn inspect(path: &Path) -> (StartupSignature, Option<String>) {
         code,
         TRUST_E_NOSIGNATURE | TRUST_E_SUBJECT_FORM_UNKNOWN | TRUST_E_PROVIDER_UNKNOWN
     ) {
-        let mut best = None;
+        let mut best: Option<(StartupSignature, Option<String>)> = None;
         for algorithm in ["SHA256", "SHA1"] {
             if let Some((catalog_code, catalog_signer)) = catalog_signature(&file, &wide, algorithm)
             {
                 if catalog_code == 0 {
                     return (StartupSignature::Valid, catalog_signer);
                 }
-                if best.is_none() {
-                    best = Some((
-                        signature_status(catalog_code, catalog_signer.is_some()),
-                        catalog_signer,
-                    ));
+                let sig = signature_status(catalog_code, catalog_signer.is_some());
+                if best.as_ref().is_none_or(|(prev_sig, _)| {
+                    signature_failure_rank(sig) > signature_failure_rank(*prev_sig)
+                }) {
+                    best = Some((sig, catalog_signer));
                 }
             }
         }
@@ -69,6 +71,16 @@ pub(super) fn inspect(path: &Path) -> (StartupSignature, Option<String>) {
         }
     }
     (signature_status(code, signer.is_some()), signer)
+}
+
+fn signature_failure_rank(sig: StartupSignature) -> u8 {
+    match sig {
+        StartupSignature::HashMismatch => 4,
+        StartupSignature::Untrusted => 3,
+        StartupSignature::Unsigned => 2,
+        StartupSignature::Unsupported => 1,
+        _ => 0,
+    }
 }
 
 fn signature_status(code: i32, has_signer: bool) -> StartupSignature {
@@ -202,40 +214,67 @@ fn catalog_signature(file: &File, path: &[u16], algorithm: &str) -> Option<(i32,
     {
         return None;
     }
-    let catalog =
-        unsafe { CryptCATAdminEnumCatalogFromHash(admin.0, hash.as_ptr(), size, 0, null_mut()) };
-    if catalog == 0 {
-        return None;
-    }
-    let catalog = CatalogEntry(&admin, catalog);
-    let mut info: CATALOG_INFO = unsafe { zeroed() };
-    info.cbStruct = size_of::<CATALOG_INFO>() as u32;
-    if unsafe { CryptCATCatalogInfoFromContext(catalog.1, &mut info, 0) } == 0 {
-        return None;
-    }
     let mut tag = String::with_capacity(size as usize * 2);
     for byte in hash.get(..size as usize)? {
         write!(tag, "{byte:02X}").ok()?;
     }
     let tag: Vec<_> = tag.encode_utf16().chain(Some(0)).collect();
-    let mut subject = WINTRUST_CATALOG_INFO {
-        cbStruct: size_of::<WINTRUST_CATALOG_INFO>() as u32,
-        dwCatalogVersion: 0,
-        pcwszCatalogFilePath: info.wszCatalogFile.as_ptr(),
-        pcwszMemberTag: tag.as_ptr(),
-        pcwszMemberFilePath: path.as_ptr(),
-        hMemberFile: file.as_raw_handle(),
-        pbCalculatedFileHash: hash.as_mut_ptr(),
-        cbCalculatedFileHash: size,
-        pcCatalogContext: null_mut(),
-        hCatAdmin: admin.0,
-    };
-    Some(verify(
-        WTD_CHOICE_CATALOG,
-        WINTRUST_DATA_0 {
-            pCatalog: &mut subject,
-        },
-    ))
+
+    let mut prev: isize = 0;
+    let mut best: Option<(i32, Option<String>)> = None;
+    loop {
+        let mut handle = prev;
+        let catalog = unsafe {
+            CryptCATAdminEnumCatalogFromHash(
+                admin.0,
+                hash.as_ptr(),
+                size,
+                0,
+                if prev == 0 { null_mut() } else { &mut handle },
+            )
+        };
+        if catalog == 0 {
+            break;
+        }
+        let guard = CatalogEntry(&admin, catalog);
+        let mut info: CATALOG_INFO = unsafe { zeroed() };
+        info.cbStruct = size_of::<CATALOG_INFO>() as u32;
+        if unsafe { CryptCATCatalogInfoFromContext(guard.1, &mut info, 0) } != 0 {
+            let mut subject = WINTRUST_CATALOG_INFO {
+                cbStruct: size_of::<WINTRUST_CATALOG_INFO>() as u32,
+                dwCatalogVersion: 0,
+                pcwszCatalogFilePath: info.wszCatalogFile.as_ptr(),
+                pcwszMemberTag: tag.as_ptr(),
+                pcwszMemberFilePath: path.as_ptr(),
+                hMemberFile: file.as_raw_handle(),
+                pbCalculatedFileHash: hash.as_mut_ptr(),
+                cbCalculatedFileHash: size,
+                pcCatalogContext: null_mut(),
+                hCatAdmin: admin.0,
+            };
+            let (catalog_code, catalog_signer) = verify(
+                WTD_CHOICE_CATALOG,
+                WINTRUST_DATA_0 {
+                    pCatalog: &mut subject,
+                },
+            );
+            if catalog_code == 0 {
+                return Some((0, catalog_signer));
+            }
+            let cand_rank =
+                signature_failure_rank(signature_status(catalog_code, catalog_signer.is_some()));
+            if best.as_ref().is_none_or(|(prev_code, prev_signer)| {
+                cand_rank
+                    > signature_failure_rank(signature_status(*prev_code, prev_signer.is_some()))
+            }) {
+                best = Some((catalog_code, catalog_signer));
+            }
+        }
+        prev = guard.1;
+        // CryptCATAdminEnumCatalogFromHash frees the passed previous handle on the next iteration.
+        std::mem::forget(guard);
+    }
+    best
 }
 
 pub(super) fn file_company(path: &Path) -> Option<String> {

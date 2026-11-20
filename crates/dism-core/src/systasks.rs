@@ -182,8 +182,7 @@ pub(crate) fn compute_orphaned_installer_files_uncached() -> Vec<(PathBuf, u64)>
         return Vec::new();
     }
 
-    let sys_root = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".to_string());
-    let installer_dir = PathBuf::from(sys_root).join("Installer");
+    let installer_dir = crate::win_util::windows_dir_or_default().join("Installer");
     let Ok(rd) = fs::read_dir(&installer_dir) else {
         return Vec::new();
     };

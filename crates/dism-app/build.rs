@@ -22,8 +22,14 @@ fn main() -> io::Result<()> {
     let dist = manifest_dir.join("../../ui/dist");
     let out = PathBuf::from(env::var_os("OUT_DIR").unwrap());
     let packed = out.join("assets");
-    let mut source = fs::File::create(out.join("embedded_ui.rs"))?;
     println!("cargo:rerun-if-changed={}", dist.display());
+    if env::var("PROFILE").as_deref() == Ok("release") && !dist.join("index.html").is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            "Build the desktop UI first with npm run build in ui/",
+        ));
+    }
+    let mut source = fs::File::create(out.join("embedded_ui.rs"))?;
     writeln!(source, "static EMBEDDED_UI_ASSETS: &[EmbeddedAsset] = &[")?;
 
     let mut files = Vec::new();
@@ -32,6 +38,7 @@ fn main() -> io::Result<()> {
     }
     files.sort_unstable();
     for file in files {
+        println!("cargo:rerun-if-changed={}", file.display());
         let relative = file.strip_prefix(&dist).unwrap();
         let route = format!("/{}", relative.to_string_lossy().replace('\\', "/"));
         let bytes = fs::read(&file)?;

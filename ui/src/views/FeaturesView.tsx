@@ -108,7 +108,7 @@ export const FeaturesView: React.FC<Props> = ({ lang, isAdmin }) => {
   };
 
   useEffect(() => {
-    load();
+    void load();
   }, []);
 
   const counts = useMemo(() => {

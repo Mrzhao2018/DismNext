@@ -1,8 +1,9 @@
 use super::{parse_query_param, read_json_body, unknown_endpoint};
+use crate::scan_jobs::ScanLane;
 use crate::state::AppState;
 use crate::state::MaintenanceGuard;
 use anyhow::Result;
-use dism_core::cleaner::scan_all_with_progress;
+use dism_core::cleaner::{scan_all_with_progress, CleanupLease};
 use dism_core::diskmap::{analyze_path_with_options, find_duplicate_files_with_progress};
 use dism_core::features::{list_optional_features, set_feature_enabled_with_progress};
 use dism_core::maintenance::MaintenanceProgress;
@@ -59,7 +60,9 @@ pub(super) fn handle(
             let app = Arc::clone(state);
             let id = state
                 .maintenance_jobs
-                .start(move |progress| run_maintenance(&app, request, progress))?;
+                .start(ScanLane::Default, move |progress| {
+                    run_maintenance(&app, request, progress)
+                })?;
             Ok(serde_json::json!({ "id": id }))
         }
         (&Method::Get, "/api/maintenance/status") => {
@@ -75,8 +78,16 @@ pub(super) fn handle(
         }
         (&Method::Post, "/api/scans/start") => {
             let payload: ScanRequest = read_json_body(req)?;
+            let lane = match &payload {
+                ScanRequest::DiskAnalysis { .. } => ScanLane::DiskAnalysis,
+                ScanRequest::DuplicateFiles { .. } => ScanLane::Duplicates,
+                ScanRequest::CleanupRules => ScanLane::CleanupRules,
+                ScanRequest::RecycleReview { .. } | ScanRequest::RecyclePath(_) => {
+                    ScanLane::Recycle
+                }
+            };
             let app = Arc::clone(state);
-            let id = state.scan_jobs.start(move |progress| match payload {
+            let id = state.scan_jobs.start(lane, move |progress| match payload {
                 ScanRequest::DiskAnalysis {
                     path,
                     max_depth,
@@ -104,11 +115,8 @@ pub(super) fn handle(
                 ScanRequest::CleanupRules => {
                     let started = Instant::now();
                     let sys = SystemInfo::collect();
-                    let results = scan_all_with_progress(
-                        &app.catalog.read().unwrap().cleanup_rules,
-                        &sys,
-                        progress,
-                    )?;
+                    let rules = app.catalog.read().unwrap().cleanup_rules.clone();
+                    let results = scan_all_with_progress(&rules, &sys, progress)?;
                     if progress.is_cancelled() {
                         return Err(dism_core::scan_progress::ScanCancelled.into());
                     }
@@ -128,10 +136,7 @@ pub(super) fn handle(
                     Ok(serde_json::to_value(review)?)
                 }
                 ScanRequest::RecyclePath(target) => {
-                    let operation = app.begin_cleanup_mutation();
-                    if operation.maintenance_active {
-                        return Err(crate::scan_jobs::ScanBusy("maintenance task").into());
-                    }
+                    let _operation = app.begin_cleanup_mutation()?;
                     let item = recycle_reviewed_path_with_progress(&target, progress)?;
                     Ok(serde_json::json!({ "item": item, "system": SystemInfo::collect() }))
                 }
@@ -166,8 +171,10 @@ pub(super) fn run_maintenance(
     request: MaintenanceRequest,
     progress: &MaintenanceProgress,
 ) -> Result<serde_json::Value> {
+    let _lease = CleanupLease::try_acquire()?;
     {
-        let mut operation = state.begin_cleanup_mutation();
+        let mut operation = state.try_cleanup()?;
+        state.invalidate_cleanup(&mut operation);
         operation.maintenance_active = true;
     }
     let _guard = MaintenanceGuard(state);

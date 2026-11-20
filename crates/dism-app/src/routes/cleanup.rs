@@ -1,11 +1,10 @@
 use super::{parse_query_param, read_json_body, unknown_endpoint};
-use crate::scan_jobs::ScanBusy;
+use crate::scan_jobs::ScanLane;
 use crate::state::AppState;
-use crate::state::CleanupReviewUnavailable;
 use anyhow::Result;
 use dism_core::cleaner::{
     execute_cleanup, is_deferred_system_task_proc, scan_all_with_summary, scan_custom_proc_name,
-    scan_rule_preview, CleanupScanResult, ReviewedCleanup,
+    scan_rule_preview, CleanupLease, CleanupReviewUnavailable, CleanupScanResult, ReviewedCleanup,
 };
 use dism_core::evaluator::eval_condition;
 use dism_core::report::{generate_localized_health_report, ReportLanguage};
@@ -59,11 +58,9 @@ pub(super) fn handle(
         }
         (&Method::Post, "/api/cleanup/scan") => {
             let started = Instant::now();
-            let results = state.scan_jobs.run_inline(|| {
-                Ok(scan_all_with_summary(
-                    &state.catalog.read().unwrap().cleanup_rules,
-                    &sys,
-                ))
+            let results = state.scan_jobs.run_inline(ScanLane::CleanupRules, || {
+                let rules = state.catalog.read().unwrap().cleanup_rules.clone();
+                Ok(scan_all_with_summary(&rules, &sys))
             })?;
             Ok(state.publish_cleanup_scan(results, started))
         }
@@ -71,13 +68,16 @@ pub(super) fn handle(
             let started = Instant::now();
             let id = parse_query_param(query, "id")
                 .ok_or_else(|| anyhow::anyhow!("Missing ?id= parameter"))?;
-            let cat = state.catalog.read().unwrap();
-            let rule = cat
+            let rule = state
+                .catalog
+                .read()
+                .unwrap()
                 .cleanup_rules
                 .iter()
                 .find(|r| r.id == id)
+                .cloned()
                 .ok_or_else(|| anyhow::anyhow!("Rule '{}' not found", id))?;
-            let res = scan_rule_preview(rule, &sys);
+            let res = scan_rule_preview(&rule, &sys);
             let mut cache = state.scan_cache.write().unwrap();
             if cache.can_store(started) {
                 cache.rules.insert(res.id.clone(), res.clone());
@@ -87,9 +87,10 @@ pub(super) fn handle(
         (&Method::Post, "/api/cleanup/execute") => {
             let payload: ExecuteReq = read_json_body(req)?;
             anyhow::ensure!(payload.dry_run, "Desktop cleanup requires a reviewed plan");
-            let _operation = state.cleanup_operation.lock().unwrap();
-            let cat = state.catalog.read().unwrap();
-            let report = execute_cleanup(&cat.cleanup_rules, &payload.rule_ids, &sys, true);
+            let rules = state.catalog.read().unwrap().cleanup_rules.clone();
+            let report = state.scan_jobs.run_inline(ScanLane::CleanupRules, || {
+                Ok(execute_cleanup(&rules, &payload.rule_ids, &sys, true))
+            })?;
             Ok(serde_json::json!({
                 "report": report,
                 "system": sys,
@@ -97,35 +98,33 @@ pub(super) fn handle(
         }
         (&Method::Post, "/api/cleanup/review") => {
             let payload: CleanupReviewReq = read_json_body(req)?;
-            let mut operation = state.cleanup_operation.lock().unwrap();
-            if operation.maintenance_active {
-                return Err(ScanBusy("maintenance task").into());
-            }
-            operation.pending = None;
-            let cat = state.catalog.read().unwrap();
-            let (plan, report) =
-                ReviewedCleanup::prepare(&cat.cleanup_rules, &payload.rule_ids, &sys);
-            let plan_id =
-                (!report.outcomes.is_empty()).then(|| operation.store(plan, Instant::now()));
+            let _lease = CleanupLease::try_acquire()?;
+            let rules = state.catalog.read().unwrap().cleanup_rules.clone();
+            let (plan, report) = ReviewedCleanup::prepare(&rules, &payload.rule_ids, &sys);
+            let mut operation = state.try_cleanup()?;
+            let plan_id = (!report.outcomes.is_empty())
+                .then(|| operation.reviews.store(plan, Instant::now()));
             Ok(serde_json::json!({ "plan_id": plan_id, "report": report }))
         }
         (&Method::Post, "/api/cleanup/confirm") => {
             let payload: CleanupPlanReq = read_json_body(req)?;
-            let mut operation = state.cleanup_operation.lock().unwrap();
-            if operation.maintenance_active {
-                return Err(ScanBusy("maintenance task").into());
-            }
-            let plan = operation
-                .take(&payload.plan_id, Instant::now())
-                .ok_or(CleanupReviewUnavailable)?;
-            state.scan_cache.write().unwrap().invalidate();
-            let report = plan.execute();
+            let lease = CleanupLease::try_acquire()?;
+            let plan = {
+                let mut operation = state.try_cleanup()?;
+                let plan = operation
+                    .reviews
+                    .take(&payload.plan_id, Instant::now())
+                    .ok_or(CleanupReviewUnavailable)?;
+                state.invalidate_cleanup(&mut operation);
+                plan
+            };
+            let report = plan.confirm(&lease);
             Ok(serde_json::json!({ "report": report, "system": SystemInfo::collect() }))
         }
         (&Method::Post, "/api/cleanup/discard-review") => {
             let payload: CleanupPlanReq = read_json_body(req)?;
-            let mut operation = state.cleanup_operation.lock().unwrap();
-            operation.take(&payload.plan_id, Instant::now());
+            let mut operation = state.lock_cleanup();
+            operation.reviews.take(&payload.plan_id, Instant::now());
             Ok(serde_json::json!({ "ok": true }))
         }
         (&Method::Post, "/api/cleanup/custom/test") => {
@@ -136,7 +135,7 @@ pub(super) fn handle(
         }
         (&Method::Post, "/api/cleanup/custom/save") => {
             let payload: CustomRuleInput = read_json_body(req)?;
-            let _operation = state.begin_cleanup_mutation();
+            let mut operation = state.try_cleanup()?;
             if let Some(id) = payload.id.as_deref().map(str::trim) {
                 anyhow::ensure!(
                     !state
@@ -150,6 +149,7 @@ pub(super) fn handle(
                 );
             }
             let saved = Catalog::save_custom_rule(payload)?;
+            state.invalidate_cleanup(&mut operation);
             let scanned = scan_rule_preview(&saved, &sys);
             let mut cat = state.catalog.write().unwrap();
             if let Some(pos) = cat.cleanup_rules.iter().position(|r| r.id == saved.id) {
@@ -167,8 +167,9 @@ pub(super) fn handle(
         }
         (&Method::Post, "/api/cleanup/custom/delete") => {
             let payload: DeleteCustomRuleReq = read_json_body(req)?;
-            let _operation = state.begin_cleanup_mutation();
+            let mut operation = state.try_cleanup()?;
             Catalog::delete_custom_rule(&payload.rule_id)?;
+            state.invalidate_cleanup(&mut operation);
             let mut cat = state.catalog.write().unwrap();
             cat.cleanup_rules
                 .retain(|r| r.id != payload.rule_id || r.source != "custom");
@@ -194,9 +195,9 @@ pub(super) fn handle(
                     scans
                 } else {
                     let started = Instant::now();
-                    let results = state
-                        .scan_jobs
-                        .run_inline(|| Ok(scan_all_with_summary(&cat.cleanup_rules, &sys)))?;
+                    let results = state.scan_jobs.run_inline(ScanLane::CleanupRules, || {
+                        Ok(scan_all_with_summary(&cat.cleanup_rules, &sys))
+                    })?;
                     state
                         .scan_cache
                         .write()

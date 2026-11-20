@@ -2,7 +2,8 @@ use anyhow::{anyhow, Result};
 use clap::{Parser, Subcommand};
 use dism_core::appx::{list_appx_packages, remove_appx_package, AppxCategory};
 use dism_core::cleaner::{
-    execute_cleanup, scan_all, scan_all_with_summary, scan_rule_preview, FileStatus,
+    execute_cleanup, scan_all, scan_all_with_summary, scan_rule_preview, CleanupExecutionReport,
+    CleanupLease, FileStatus, ReviewedCleanup, CLEANUP_REVIEW_TTL,
 };
 use dism_core::diskmap::{analyze_path_with_options, DiskAllocation};
 use dism_core::drivers::{delete_driver, export_drivers, list_drivers};
@@ -16,7 +17,11 @@ use dism_core::optimizer::{
 };
 use dism_core::startup::{list_startup_items, set_startup_enabled};
 use dism_core::{Catalog, SnapshotManager, SystemInfo};
+use std::io::{self, IsTerminal, Write};
 use std::path::PathBuf;
+use std::time::Instant;
+
+mod tools;
 
 #[derive(Parser)]
 #[command(
@@ -50,7 +55,7 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
-    /// Execute cleanup for one or more rule IDs (defaults to dry-run unless --execute is passed)
+    /// Simulate cleanup, or review and confirm with --execute in an interactive terminal
     Clean {
         #[arg(required = true)]
         rule_ids: Vec<String>,
@@ -108,6 +113,8 @@ enum Commands {
     },
     /// Run the Model Context Protocol (MCP) server over stdio (JSON-RPC 2.0)
     Mcp,
+    #[command(flatten)]
+    Tools(tools::Tools),
 }
 
 #[derive(Subcommand)]
@@ -141,8 +148,10 @@ enum FeaturesCommands {
     /// Enable or disable a Windows Optional Feature via DISM (Admin required)
     Toggle {
         name: String,
-        #[arg(long)]
+        #[arg(long, required_unless_present = "disable", conflicts_with = "disable")]
         enable: bool,
+        #[arg(long)]
+        disable: bool,
     },
 }
 
@@ -156,8 +165,10 @@ enum StartupCommands {
     /// Enable or disable a startup entry via StartupApproved
     Toggle {
         id: String,
-        #[arg(long)]
+        #[arg(long, required_unless_present = "disable", conflicts_with = "disable")]
         enable: bool,
+        #[arg(long)]
+        disable: bool,
     },
 }
 
@@ -332,65 +343,64 @@ fn main() -> Result<()> {
             execute,
             json,
         } => {
-            let dry_run = !execute;
-            let report = execute_cleanup(&catalog.cleanup_rules, &rule_ids, &sys, dry_run);
+            let report = if execute {
+                anyhow::ensure!(
+                    io::stdin().is_terminal() && io::stderr().is_terminal(),
+                    "Cleanup confirmation requires an interactive terminal"
+                );
+                let (plan, preview) =
+                    ReviewedCleanup::prepare(&catalog.cleanup_rules, &rule_ids, &sys);
+                anyhow::ensure!(!preview.outcomes.is_empty(), "No matching cleanup rules");
+                let reviewed_at = Instant::now();
+                {
+                    let mut output = io::stderr().lock();
+                    write_cleanup_report(&mut output, &preview)?;
+                    write!(output, "Type CLEAN to apply exactly this plan: ")?;
+                    output.flush()?;
+                }
+                let mut answer = String::new();
+                io::stdin().read_line(&mut answer)?;
+                anyhow::ensure!(answer.trim() == "CLEAN", "Cleanup cancelled");
+                anyhow::ensure!(
+                    reviewed_at.elapsed() < CLEANUP_REVIEW_TTL,
+                    "Cleanup review expired. Run the review again."
+                );
+                let lease = CleanupLease::try_acquire()?;
+                plan.confirm(&lease)
+            } else {
+                execute_cleanup(&catalog.cleanup_rules, &rule_ids, &sys, true)
+            };
             if json {
                 println!("{}", serde_json::to_string_pretty(&report)?);
             } else {
-                println!(
-                    "{} complete: {} targets ({} total size), {} skipped",
-                    if dry_run { "Dry-Run" } else { "Cleanup" },
-                    report.total_deleted_files,
-                    fmt_bytes(report.total_deleted_bytes),
-                    report.total_skipped_files
-                );
-                for o in &report.outcomes {
-                    println!(
-                        "  {} ({}): permanent deletion {} ({}), Recycle Bin {} ({}), driver removal {} ({}), {} locked, {} protected, {} failed",
-                        o.id,
-                        o.name.zh,
-                        o.actions.permanent_delete.count,
-                        fmt_bytes(o.actions.permanent_delete.bytes),
-                        o.actions.recycle.count,
-                        fmt_bytes(o.actions.recycle.bytes),
-                        o.actions.remove_driver.count,
-                        fmt_bytes(o.actions.remove_driver.bytes),
-                        o.skipped_locked_files,
-                        o.skipped_protected_files,
-                        o.failed_files
-                    );
-                    for error in &o.errors {
-                        println!("    {error}");
-                    }
-                }
+                write_cleanup_report(io::stdout().lock(), &report)?;
             }
         }
         Commands::Opt { action } => match action {
             OptCommands::List { search, json } => {
-                let groups = evaluate_all_groups(&catalog.optimization_groups, &sys);
-                let kw = search.as_deref().map(|s| s.to_lowercase());
+                let mut groups = evaluate_all_groups(&catalog.optimization_groups, &sys);
+                if let Some(query) = search.as_deref().map(str::to_lowercase) {
+                    for group in &mut groups {
+                        let group_matches = group.name.zh.to_lowercase().contains(&query)
+                            || group.name.en.to_lowercase().contains(&query);
+                        group.items.retain(|item| {
+                            group_matches
+                                || item.name.zh.to_lowercase().contains(&query)
+                                || item.name.en.to_lowercase().contains(&query)
+                        });
+                    }
+                    groups.retain(|group| !group.items.is_empty());
+                }
                 if json {
                     println!("{}", serde_json::to_string_pretty(&groups)?);
                 } else {
                     let mut count = 0usize;
                     for g in &groups {
-                        let matched: Vec<_> = g
-                            .items
-                            .iter()
-                            .filter(|it| match &kw {
-                                None => true,
-                                Some(q) => {
-                                    it.name.zh.to_lowercase().contains(q)
-                                        || it.name.en.to_lowercase().contains(q)
-                                        || g.name.zh.to_lowercase().contains(q)
-                                }
-                            })
-                            .collect();
-                        if matched.is_empty() {
+                        if g.items.is_empty() {
                             continue;
                         }
                         println!("\n[{}] {}", g.id, g.name.zh);
-                        for it in matched {
+                        for it in &g.items {
                             count += 1;
                             println!(
                                 "  {:<8} {:<8} C:{} D:{} S:{}  {}",
@@ -411,6 +421,7 @@ fn main() -> Result<()> {
                 scope,
                 value,
             } => {
+                let _lease = CleanupLease::try_acquire()?;
                 let scope_enum = match scope.to_ascii_lowercase().as_str() {
                     "current" => ScopeName::Current,
                     "default" => ScopeName::Default,
@@ -464,6 +475,7 @@ fn main() -> Result<()> {
                 }
             }
             SnapshotCommands::Restore { snapshot_id } => {
+                let _lease = CleanupLease::try_acquire()?;
                 let restored = snap_mgr.restore(&snapshot_id)?;
                 println!(
                     "Restored snapshot {} ({})",
@@ -624,7 +636,8 @@ fn main() -> Result<()> {
                     println!("\nTotal startup items: {}", items.len());
                 }
             }
-            StartupCommands::Toggle { id, enable } => {
+            StartupCommands::Toggle { id, enable, .. } => {
+                let _lease = CleanupLease::try_acquire()?;
                 let item = set_startup_enabled(&id, enable)?;
                 println!("{}", serde_json::to_string_pretty(&item)?);
             }
@@ -658,6 +671,7 @@ fn main() -> Result<()> {
                 }
             }
             AppxCommands::Remove { package_full_name } => {
+                let _lease = CleanupLease::try_acquire()?;
                 remove_appx_package(&package_full_name)?;
                 println!("Removed AppX package: {}", package_full_name);
             }
@@ -721,6 +735,7 @@ fn main() -> Result<()> {
                 println!("Manifest: {}", report.manifest_path);
             }
             DriversCommands::Delete { published_name } => {
+                let _lease = CleanupLease::try_acquire()?;
                 let out = delete_driver(&published_name)?;
                 println!("{}", out);
             }
@@ -759,7 +774,8 @@ fn main() -> Result<()> {
                     println!("\nTotal matching features: {}", features.len());
                 }
             }
-            FeaturesCommands::Toggle { name, enable } => {
+            FeaturesCommands::Toggle { name, enable, .. } => {
+                let _lease = CleanupLease::try_acquire()?;
                 let res = set_feature_enabled(&name, enable)?;
                 println!("{}", serde_json::to_string_pretty(&res)?);
             }
@@ -767,9 +783,46 @@ fn main() -> Result<()> {
         Commands::Mcp => {
             run_mcp_stdio(&catalog)?;
         }
+        Commands::Tools(command) => command.run(&catalog)?,
     }
 
     let _ = eval_condition;
+    Ok(())
+}
+
+fn write_cleanup_report(mut output: impl Write, report: &CleanupExecutionReport) -> io::Result<()> {
+    writeln!(
+        output,
+        "{}: {} targets ({} total size), {} skipped",
+        if report.dry_run {
+            "Cleanup review"
+        } else {
+            "Cleanup complete"
+        },
+        report.total_deleted_files,
+        fmt_bytes(report.total_deleted_bytes),
+        report.total_skipped_files
+    )?;
+    for row in &report.outcomes {
+        writeln!(
+            output,
+            "  {} ({}): permanent deletion {} ({}), Recycle Bin {} ({}), driver removal {} ({}), {} locked, {} protected, {} failed",
+            row.id,
+            row.name.zh,
+            row.actions.permanent_delete.count,
+            fmt_bytes(row.actions.permanent_delete.bytes),
+            row.actions.recycle.count,
+            fmt_bytes(row.actions.recycle.bytes),
+            row.actions.remove_driver.count,
+            fmt_bytes(row.actions.remove_driver.bytes),
+            row.skipped_locked_files,
+            row.skipped_protected_files,
+            row.failed_files
+        )?;
+        for error in &row.errors {
+            writeln!(output, "    {error}")?;
+        }
+    }
     Ok(())
 }
 
@@ -781,5 +834,42 @@ fn fmt_scope(s: &Option<ScopeStatus>) -> String {
             .selected_index
             .map(|i| format!("#{}", i))
             .unwrap_or_else(|| "?".to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::error::ErrorKind;
+
+    #[test]
+    fn toggles_require_an_explicit_and_unambiguous_state() {
+        for command in ["startup", "features"] {
+            let base = ["dism-cli", command, "toggle", "example"];
+            assert_eq!(
+                Cli::try_parse_from(base).err().unwrap().kind(),
+                ErrorKind::MissingRequiredArgument
+            );
+            for flag in ["--enable", "--disable"] {
+                let cli = Cli::try_parse_from(base.into_iter().chain([flag])).unwrap();
+                let enable = match cli.command {
+                    Commands::Startup {
+                        action: StartupCommands::Toggle { enable, .. },
+                    }
+                    | Commands::Features {
+                        action: FeaturesCommands::Toggle { enable, .. },
+                    } => enable,
+                    _ => unreachable!(),
+                };
+                assert_eq!(enable, flag == "--enable");
+            }
+            assert_eq!(
+                Cli::try_parse_from(base.into_iter().chain(["--enable", "--disable"]))
+                    .err()
+                    .unwrap()
+                    .kind(),
+                ErrorKind::ArgumentConflict
+            );
+        }
     }
 }

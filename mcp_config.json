@@ -1,7 +1,7 @@
 {
   "mcpServers": {
     "dismnext": {
-      "command": "E:/code/dismplus/target/release/dism-cli.exe",
+      "command": "C:/path/to/DismNext/dism-cli.exe",
       "args": [
         "mcp"
       ]

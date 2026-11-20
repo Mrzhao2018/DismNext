@@ -3,11 +3,21 @@ use dism_core::maintenance::{MaintenanceCancelled, MaintenanceProgress};
 use dism_core::scan_progress::{ScanCancelled, ScanProgress};
 use serde::Serialize;
 use serde_json::{json, Value};
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::{Arc, Mutex};
 
-const MAX_FINISHED_JOBS: usize = 4;
+const MAX_FINISHED_JOBS: usize = 8;
+
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
+pub(crate) enum ScanLane {
+    #[default]
+    Default,
+    DiskAnalysis,
+    Duplicates,
+    CleanupRules,
+    Recycle,
+}
 
 #[derive(Debug)]
 pub struct ScanBusy(pub(crate) &'static str);
@@ -73,7 +83,7 @@ pub struct ScanJobs<P: JobProgress = ScanProgress> {
 #[derive(Default)]
 struct JobState<P> {
     sequence: u64,
-    active: Option<Arc<Job<P>>>,
+    active: HashMap<ScanLane, Arc<Job<P>>>,
     finished: VecDeque<(u64, Arc<Finished>)>,
 }
 
@@ -94,6 +104,7 @@ enum Finished {
 struct Reservation<P: JobProgress> {
     jobs: Arc<ScanJobs<P>>,
     job: Arc<Job<P>>,
+    lane: ScanLane,
 }
 
 impl<P: JobProgress> Reservation<P> {
@@ -113,7 +124,7 @@ impl<P: JobProgress> Reservation<P> {
         if state.finished.len() > MAX_FINISHED_JOBS {
             state.finished.pop_front();
         }
-        state.active = None;
+        state.active.remove(&self.lane);
     }
 }
 
@@ -122,22 +133,22 @@ impl<P: JobProgress> Drop for Reservation<P> {
         let mut state = self.jobs.state.lock().unwrap();
         if state
             .active
-            .as_ref()
+            .get(&self.lane)
             .is_some_and(|job| job.id == self.job.id)
         {
-            state.active = None;
+            state.active.remove(&self.lane);
         }
     }
 }
 
 impl<P: JobProgress> ScanJobs<P> {
     pub fn is_active(&self) -> bool {
-        self.state.lock().unwrap().active.is_some()
+        !self.state.lock().unwrap().active.is_empty()
     }
 
-    fn reserve(self: &Arc<Self>, observable: bool) -> Result<Reservation<P>> {
+    fn reserve(self: &Arc<Self>, lane: ScanLane, observable: bool) -> Result<Reservation<P>> {
         let mut state = self.state.lock().unwrap();
-        if state.active.is_some() {
+        if state.active.contains_key(&lane) {
             return Err(ScanBusy(P::KIND).into());
         }
         state.sequence += 1;
@@ -146,30 +157,37 @@ impl<P: JobProgress> ScanJobs<P> {
             observable,
             progress: P::default(),
         });
-        state.active = Some(Arc::clone(&job));
+        state.active.insert(lane, Arc::clone(&job));
         Ok(Reservation {
             jobs: Arc::clone(self),
             job,
+            lane,
         })
     }
 
-    pub fn run_inline<T>(self: &Arc<Self>, task: impl FnOnce() -> Result<T>) -> Result<T> {
-        self.run_inline_with_progress(|_| task())
+    pub fn run_inline<T>(
+        self: &Arc<Self>,
+        lane: ScanLane,
+        task: impl FnOnce() -> Result<T>,
+    ) -> Result<T> {
+        let _reservation = self.reserve(lane, false)?;
+        task()
     }
 
     pub fn run_inline_with_progress<T>(
         self: &Arc<Self>,
         task: impl FnOnce(&P) -> Result<T>,
     ) -> Result<T> {
-        let reservation = self.reserve(false)?;
+        let reservation = self.reserve(ScanLane::Default, false)?;
         task(&reservation.job.progress)
     }
 
     pub fn start(
         self: &Arc<Self>,
+        lane: ScanLane,
         task: impl FnOnce(&P) -> Result<Value> + Send + 'static,
     ) -> Result<u64> {
-        let reservation = self.reserve(true)?;
+        let reservation = self.reserve(lane, true)?;
         let id = reservation.job.id;
         std::thread::Builder::new()
             .name(format!("{}-{id}", P::KIND))
@@ -185,8 +203,8 @@ impl<P: JobProgress> ScanJobs<P> {
         let state = self.state.lock().unwrap();
         if let Some(job) = state
             .active
-            .as_ref()
-            .filter(|job| job.observable && job.id == id)
+            .values()
+            .find(|job| job.observable && job.id == id)
         {
             let phase = if job.progress.is_cancelled() {
                 "cancelling"
@@ -209,8 +227,8 @@ impl<P: JobProgress> ScanJobs<P> {
         let state = self.state.lock().unwrap();
         if let Some(job) = state
             .active
-            .as_ref()
-            .filter(|job| job.observable && job.id == id)
+            .values()
+            .find(|job| job.observable && job.id == id)
         {
             job.progress.cancel();
         } else if !state.finished.iter().any(|(job_id, _)| *job_id == id) {
@@ -247,7 +265,7 @@ mod tests {
         let (started, working) = mpsc::channel();
         let (release, wait) = mpsc::channel();
         let id = jobs
-            .start(move |progress| {
+            .start(ScanLane::CleanupRules, move |progress| {
                 started.send(()).unwrap();
                 wait.recv_timeout(Duration::from_secs(5)).unwrap();
                 assert!(progress.is_cancelled());
@@ -259,11 +277,21 @@ mod tests {
         let running = jobs.status(id).unwrap();
         assert_eq!(running["state"], "running");
         assert_eq!(running["progress"]["processed_files"], 0);
-        assert!(jobs.run_inline(|| Ok(())).unwrap_err().is::<ScanBusy>());
+        assert!(jobs
+            .run_inline(ScanLane::CleanupRules, || Ok(()))
+            .unwrap_err()
+            .is::<ScanBusy>());
+        let independent = jobs
+            .start(ScanLane::DiskAnalysis, |_| Ok(json!("disk")))
+            .unwrap();
+        assert_eq!(
+            wait_for_state(&jobs, independent, "completed")["result"],
+            "disk"
+        );
         jobs.cancel(id).unwrap();
         assert_eq!(jobs.status(id).unwrap()["state"], "cancelling");
         assert!(jobs
-            .start(|_| Ok(json!(null)))
+            .start(ScanLane::CleanupRules, |_| Ok(json!(null)))
             .unwrap_err()
             .is::<ScanBusy>());
         release.send(()).unwrap();
@@ -272,7 +300,9 @@ mod tests {
             json!({ "state": "cancelled" })
         );
 
-        let next = jobs.start(|_| Ok(json!({ "complete": true }))).unwrap();
+        let next = jobs
+            .start(ScanLane::CleanupRules, |_| Ok(json!({ "complete": true })))
+            .unwrap();
         jobs.cancel(id).unwrap();
         assert_eq!(
             wait_for_state(&jobs, next, "completed")["result"],

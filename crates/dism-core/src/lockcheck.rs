@@ -147,10 +147,12 @@ pub fn find_locking_processes_batch(paths: &[&Path]) -> Vec<LockingProcessInfo> 
         )
     };
 
-    if list_rc == ERROR_MORE_DATA && needed > 0 {
-        let cap = (needed as usize).min(64);
-        buf = vec![RmProcessInfo::default(); cap];
-        count = cap as u32;
+    for _ in 0..5 {
+        if list_rc != ERROR_MORE_DATA || needed as usize <= buf.len() || needed > 65_536 {
+            break;
+        }
+        buf.resize(needed as usize, RmProcessInfo::default());
+        count = needed;
         list_rc = unsafe {
             RmGetList(
                 session_handle,

@@ -1,3 +1,4 @@
+#Requires -Version 7.0
 param(
     [Parameter(Mandatory)]
     [string] $PackageDirectory
@@ -123,8 +124,29 @@ try {
         $init = $replies | Where-Object id -eq 1
         $tools = $replies | Where-Object id -eq 2
         if ($init.result.protocolVersion -cne '2025-03-26' -or
-            'dismnext_system_overview' -cnotin $tools.result.tools.name) {
+            'dismnext_system_overview' -cnotin $tools.result.tools.name -or
+            'dismnext_review_cleanup' -cnotin $tools.result.tools.name -or
+            'dismnext_confirm_cleanup' -cnotin $tools.result.tools.name) {
             throw 'The packaged CLI failed the MCP initialize or tools/list check.'
+        }
+        $mcpCleanupMessages = @(
+            '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"dismnext_review_cleanup","arguments":{"rule_ids":["custom-release-smoke"]}}}',
+            '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"dismnext_execute_cleanup","arguments":{"rule_ids":["custom-release-smoke"],"dry_run":false}}}',
+            '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"dismnext_confirm_cleanup","arguments":{"plan_id":"an-unreviewed-id"}}}'
+        )
+        $cleanupReplies = @($mcpCleanupMessages | & $cli mcp | ForEach-Object { $_ | ConvertFrom-Json })
+        if ($LASTEXITCODE -ne 0) { throw 'The MCP review process exited with an error.' }
+        $review = ($cleanupReplies | Where-Object id -eq 3).result.content[0].text | ConvertFrom-Json
+        if (!$review.plan_id -or $review.report.total_deleted_files -ne 1 -or
+            !($cleanupReplies | Where-Object id -eq 4).result.isError -or
+            !($cleanupReplies | Where-Object id -eq 5).result.isError -or
+            ![IO.File]::Exists($inputFile)) {
+            throw 'The packaged MCP process did not require a matching reviewed plan.'
+        }
+        $cliConfirmation = 'CLEAN' | & $cli clean custom-release-smoke --execute 2>&1
+        if ($LASTEXITCODE -eq 0 -or ($cliConfirmation -join ' ') -notmatch 'interactive terminal' -or
+            ![IO.File]::Exists($inputFile)) {
+            throw 'The packaged CLI allowed piped input to confirm a cleanup.'
         }
     } finally {
         $env:LOCALAPPDATA = $originalLocalAppData

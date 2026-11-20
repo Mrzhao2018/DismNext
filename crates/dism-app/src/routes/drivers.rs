@@ -1,5 +1,4 @@
 use super::{read_json_body, unknown_endpoint};
-use crate::scan_jobs::ScanBusy;
 use crate::state::AppState;
 use anyhow::Result;
 use dism_core::drivers::{default_backup_dir, delete_driver, export_drivers, list_drivers};
@@ -34,10 +33,7 @@ pub(super) fn handle(req: &mut Request, path: &str, state: &AppState) -> Result<
             if payload.published_names.is_empty() {
                 return Err(anyhow::anyhow!("No drivers specified for deletion"));
             }
-            let operation = state.begin_cleanup_mutation();
-            if operation.maintenance_active {
-                return Err(ScanBusy("maintenance task").into());
-            }
+            let _operation = state.begin_cleanup_mutation()?;
             let mut deleted = Vec::new();
             let mut errors = Vec::new();
             for name in &payload.published_names {

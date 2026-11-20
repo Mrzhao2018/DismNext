@@ -1,13 +1,13 @@
 use crate::{desktop_lifecycle::DesktopLifecycle, request_security::Session, scan_jobs::ScanJobs};
-use dism_core::cleaner::{CleanupBatchScan, CleanupScanResult, ReviewedCleanup};
+use dism_core::cleaner::{CleanupBatchScan, CleanupLease, CleanupReviews, CleanupScanResult};
 use dism_core::maintenance::MaintenanceProgress;
 use dism_core::systasks::invalidate_systasks_cache;
 use dism_core::uninstaller::Win32Uninstall;
 use dism_core::{Catalog, SnapshotManager};
 use std::collections::HashMap;
-use std::hash::{BuildHasher, RandomState};
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, MutexGuard, RwLock};
+use std::sync::atomic::AtomicBool;
+use std::sync::{Arc, Mutex, MutexGuard, RwLock, TryLockError};
 use std::time::{Duration, Instant};
 
 pub(crate) struct AppState {
@@ -24,49 +24,16 @@ pub(crate) struct AppState {
     pub(crate) uninstall: Mutex<Option<Win32Uninstall>>,
     pub(crate) ui_dir: Option<PathBuf>,
     pub(crate) desktop: Option<DesktopLifecycle>,
+    pub(crate) requests: RwLock<()>,
+    pub(crate) relaunching: AtomicBool,
 }
 
 const FULL_SCAN_TTL: Duration = Duration::from_secs(60);
-const CLEANUP_REVIEW_TTL: Duration = Duration::from_secs(5 * 60);
 #[derive(Default)]
 pub(crate) struct CleanupReviewSlot {
-    ids: RandomState,
-    sequence: u64,
-    pub(crate) pending: Option<(String, Instant, ReviewedCleanup)>,
+    pub(crate) reviews: CleanupReviews,
     pub(crate) maintenance_active: bool,
 }
-
-impl CleanupReviewSlot {
-    pub(crate) fn store(&mut self, plan: ReviewedCleanup, now: Instant) -> String {
-        self.sequence += 1;
-        let id = format!("{:016x}", self.ids.hash_one(self.sequence));
-        self.pending = Some((id.clone(), now, plan));
-        id
-    }
-
-    pub(crate) fn take(&mut self, id: &str, now: Instant) -> Option<ReviewedCleanup> {
-        let (pending_id, created, _) = self.pending.as_ref()?;
-        if now.saturating_duration_since(*created) >= CLEANUP_REVIEW_TTL {
-            self.pending = None;
-            return None;
-        }
-        if id != pending_id {
-            return None;
-        }
-        self.pending.take().map(|(_, _, plan)| plan)
-    }
-}
-
-#[derive(Debug)]
-pub(crate) struct CleanupReviewUnavailable;
-
-impl std::fmt::Display for CleanupReviewUnavailable {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("Cleanup review is no longer available. Review the selected rules again.")
-    }
-}
-
-impl std::error::Error for CleanupReviewUnavailable {}
 
 #[derive(Default)]
 pub(crate) struct CleanupScanCache {
@@ -106,11 +73,46 @@ impl CleanupScanCache {
 }
 
 impl AppState {
-    pub(crate) fn begin_cleanup_mutation(&self) -> MutexGuard<'_, CleanupReviewSlot> {
-        let mut operation = self.cleanup_operation.lock().unwrap();
-        operation.pending = None;
+    pub(crate) fn lock_cleanup(&self) -> MutexGuard<'_, CleanupReviewSlot> {
+        self.cleanup_operation.lock().unwrap_or_else(|poisoned| {
+            let mut operation = poisoned.into_inner();
+            operation.reviews.clear();
+            self.cleanup_operation.clear_poison();
+            operation
+        })
+    }
+
+    pub(crate) fn begin_cleanup_mutation(&self) -> anyhow::Result<CleanupLease> {
+        let lease = CleanupLease::try_acquire()?;
+        let mut operation = self.try_cleanup()?;
+        self.invalidate_cleanup(&mut operation);
+        Ok(lease)
+    }
+
+    pub(crate) fn try_cleanup(
+        &self,
+    ) -> Result<MutexGuard<'_, CleanupReviewSlot>, crate::scan_jobs::ScanBusy> {
+        let operation = match self.cleanup_operation.try_lock() {
+            Ok(operation) => operation,
+            Err(TryLockError::WouldBlock) => {
+                return Err(crate::scan_jobs::ScanBusy("cleanup operation"))
+            }
+            Err(TryLockError::Poisoned(poisoned)) => {
+                let mut operation = poisoned.into_inner();
+                operation.reviews.clear();
+                self.cleanup_operation.clear_poison();
+                operation
+            }
+        };
+        if operation.maintenance_active {
+            return Err(crate::scan_jobs::ScanBusy("maintenance task"));
+        }
+        Ok(operation)
+    }
+
+    pub(crate) fn invalidate_cleanup(&self, operation: &mut CleanupReviewSlot) {
+        operation.reviews.clear();
         self.scan_cache.write().unwrap().invalidate();
-        operation
     }
 
     pub(crate) fn publish_cleanup_scan(
@@ -134,10 +136,9 @@ pub(crate) struct MaintenanceGuard<'a>(pub(crate) &'a AppState);
 impl Drop for MaintenanceGuard<'_> {
     fn drop(&mut self) {
         invalidate_systasks_cache();
-        let mut operation = self.0.cleanup_operation.lock().unwrap();
+        let mut operation = self.0.lock_cleanup();
         operation.maintenance_active = false;
-        operation.pending = None;
-        self.0.scan_cache.write().unwrap().invalidate();
+        self.0.invalidate_cleanup(&mut operation);
     }
 }
 
@@ -145,13 +146,14 @@ impl Drop for MaintenanceGuard<'_> {
 mod tests {
     use super::*;
     use crate::routes::cleanup::cleanup_rules_stub_list;
+    use dism_core::cleaner::{ReviewedCleanup, CLEANUP_REVIEW_TTL};
     use dism_core::SystemInfo;
 
     #[test]
     fn cleanup_reviews_are_single_use_and_expire() {
         let sys = SystemInfo::collect();
         let new_plan = || ReviewedCleanup::prepare(&[], &[], &sys).0;
-        let mut slot = CleanupReviewSlot::default();
+        let mut slot = CleanupReviews::default();
         let now = Instant::now();
         let first = slot.store(new_plan(), now);
         let current = slot.store(new_plan(), now);
@@ -169,7 +171,6 @@ mod tests {
             .is_some());
         let expiring = slot.store(new_plan(), now);
         assert!(slot.take(&expiring, now + CLEANUP_REVIEW_TTL).is_none());
-        assert!(slot.pending.is_none());
     }
 
     #[test]

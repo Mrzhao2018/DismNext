@@ -223,20 +223,46 @@ export class ApiError extends Error {
 }
 
 const SESSION_STORAGE_KEY = 'dismnext-session-token';
-const sessionParams = new URLSearchParams(window.location.hash.slice(1));
-const launchToken = sessionParams.get('launch');
-const manualToken = sessionParams.get('token');
-const sessionToken = manualToken && /^[0-9a-f]{64}$/.test(manualToken)
-  ? manualToken
-  : window.sessionStorage.getItem(SESSION_STORAGE_KEY) ?? '';
+let sessionState: {
+  launchToken: string | null;
+  token: string;
+  exchange?: Promise<string>;
+} | undefined;
 
-function rememberSession(token: string) {
+function persistSession(token: string) {
   window.history.replaceState(null, '', window.location.pathname + window.location.search);
-  if (token) window.sessionStorage.setItem(SESSION_STORAGE_KEY, token);
+  try {
+    if (token) window.sessionStorage.setItem(SESSION_STORAGE_KEY, token);
+    else window.sessionStorage.removeItem(SESSION_STORAGE_KEY);
+  } catch {
+    // The in-memory session still works when storage is unavailable.
+  }
 }
 
-if (manualToken !== null) rememberSession(sessionToken);
-let exchange: Promise<string> | undefined;
+function getSessionState() {
+  if (sessionState) return sessionState;
+  const params = new URLSearchParams(window.location.hash.slice(1));
+  const manualToken = params.get('token');
+  let token = manualToken && /^[0-9a-f]{64}$/.test(manualToken) ? manualToken : '';
+  if (manualToken === null) {
+    try {
+      token = window.sessionStorage.getItem(SESSION_STORAGE_KEY) ?? '';
+    } catch {
+      // Launch token exchange does not need storage.
+    }
+  } else {
+    persistSession(token);
+  }
+  sessionState = { launchToken: params.get('launch'), token };
+  return sessionState;
+}
+
+function disconnected(status: number) {
+  return new ApiError(
+    'DismNext 会话已失效，请从桌面程序重新打开窗口。 / DismNext session expired. Reopen the window from the desktop app.',
+    status,
+  );
+}
 
 async function parseResponse<T>(res: Response): Promise<T> {
   const data = await res.json().catch(() => null);
@@ -253,12 +279,33 @@ async function exchangeLaunchToken(token: string): Promise<string> {
     headers: { 'X-DismNext-Token': token },
   });
   const session = await parseResponse<{ token: string }>(response);
-  rememberSession(session.token);
   return session.token;
 }
 
 async function reqJson<T>(url: string, init?: RequestInit): Promise<T> {
-  const token = launchToken ? await (exchange ??= exchangeLaunchToken(launchToken)) : sessionToken;
+  const session = getSessionState();
+  if (session.launchToken) {
+    session.exchange ??= exchangeLaunchToken(session.launchToken)
+      .then((token) => {
+        session.token = token;
+        session.launchToken = null;
+        persistSession(token);
+        return token;
+      })
+      .catch((error: unknown) => {
+        if (error instanceof ApiError && (error.status === 401 || error.status === 403)) {
+          session.launchToken = null;
+          session.token = '';
+          persistSession('');
+          throw disconnected(error.status);
+        }
+        throw error;
+      })
+      .finally(() => { session.exchange = undefined; });
+    await session.exchange;
+  }
+  const token = session.token;
+  if (!token) throw disconnected(401);
   const res = await fetch(url, {
     ...init,
     headers: {
@@ -267,11 +314,24 @@ async function reqJson<T>(url: string, init?: RequestInit): Promise<T> {
       ...(init?.headers ?? {}),
     },
   });
-  return parseResponse<T>(res);
+  try {
+    return await parseResponse<T>(res);
+  } catch (error) {
+    if (error instanceof ApiError && (error.status === 401
+      || (error.status === 403 && error.message === 'Missing or invalid DismNext session token'))) {
+      if (session.token === token) {
+        session.token = '';
+        persistSession('');
+      }
+      throw disconnected(error.status);
+    }
+    throw error;
+  }
 }
 
 export function trackDesktopWindow() {
-  if (!sessionToken && !launchToken) return;
+  const session = getSessionState();
+  if (!session.token && !session.launchToken) return;
   const id = crypto.randomUUID();
   let sequence = 0;
   const update = (open: boolean) => {
@@ -749,8 +809,8 @@ export const api = {
       method: 'POST',
     }),
   getCleanupRules: () => reqJson<CleanupRulesPayload>('/api/cleanup/rules'),
-  previewCleanup: (id: string) =>
-    reqJson<CleanupScanResult>(`/api/cleanup/preview?id=${encodeURIComponent(id)}`),
+  previewCleanup: (id: string, signal?: AbortSignal) =>
+    reqJson<CleanupScanResult>(`/api/cleanup/preview?id=${encodeURIComponent(id)}`, { signal }),
   simulateCleanup: (rule_ids: string[]) =>
     reqJson<{ report: CleanupExecutionReport }>('/api/cleanup/execute', {
       method: 'POST',

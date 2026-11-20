@@ -1,5 +1,6 @@
 use crate::evaluator::{expand_env_vars, reg_value_to_string};
 use crate::ttl_cache::TtlCache;
+use crate::win_util::{windows_dir_or_default, CREATE_NO_WINDOW};
 use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -7,7 +8,6 @@ use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 const SERVICES_KEY: &str = r"SYSTEM\CurrentControlSet\Services";
 use winreg::enums::{
     RegType, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_ALL_ACCESS, KEY_READ, KEY_WOW64_32KEY,
@@ -101,14 +101,15 @@ struct StartupSourceDef {
     hive: HKEY,
     run_subkey: &'static str,
     approved_subkey: &'static str,
-    sam: u32,
+    run_sam: u32,
+    approved_sam: u32,
 }
 
 impl StartupSourceDef {
     fn registry_path(&self) -> String {
         match self.scope {
             StartupScope::User => format!(r"HKEY_CURRENT_USER\{}", self.run_subkey),
-            StartupScope::System if self.sam == KEY_WOW64_32KEY => {
+            StartupScope::System if self.run_sam == KEY_WOW64_32KEY => {
                 let software_subkey = self.run_subkey.trim_start_matches(r"SOFTWARE\");
                 format!(r"HKEY_LOCAL_MACHINE\SOFTWARE\WOW6432Node\{software_subkey}")
             }
@@ -126,7 +127,8 @@ const SOURCES: &[StartupSourceDef] = &[
         hive: HKEY_CURRENT_USER,
         run_subkey: r"Software\Microsoft\Windows\CurrentVersion\Run",
         approved_subkey: r"Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run",
-        sam: KEY_WOW64_64KEY,
+        run_sam: KEY_WOW64_64KEY,
+        approved_sam: KEY_WOW64_64KEY,
     },
     StartupSourceDef {
         tag: "hklm_run",
@@ -136,7 +138,8 @@ const SOURCES: &[StartupSourceDef] = &[
         hive: HKEY_LOCAL_MACHINE,
         run_subkey: r"SOFTWARE\Microsoft\Windows\CurrentVersion\Run",
         approved_subkey: r"SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run",
-        sam: KEY_WOW64_64KEY,
+        run_sam: KEY_WOW64_64KEY,
+        approved_sam: KEY_WOW64_64KEY,
     },
     StartupSourceDef {
         tag: "hklm_run32",
@@ -146,7 +149,9 @@ const SOURCES: &[StartupSourceDef] = &[
         hive: HKEY_LOCAL_MACHINE,
         run_subkey: r"SOFTWARE\Microsoft\Windows\CurrentVersion\Run",
         approved_subkey: r"SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run32",
-        sam: KEY_WOW64_32KEY,
+        run_sam: KEY_WOW64_32KEY,
+        // StartupApproved\Run32 lives in the 64-bit view on 64-bit Windows.
+        approved_sam: KEY_WOW64_64KEY,
     },
     StartupSourceDef {
         tag: "user_folder",
@@ -156,7 +161,8 @@ const SOURCES: &[StartupSourceDef] = &[
         hive: HKEY_CURRENT_USER,
         run_subkey: "",
         approved_subkey: r"Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\StartupFolder",
-        sam: KEY_WOW64_64KEY,
+        run_sam: KEY_WOW64_64KEY,
+        approved_sam: KEY_WOW64_64KEY,
     },
     StartupSourceDef {
         tag: "common_folder",
@@ -166,7 +172,8 @@ const SOURCES: &[StartupSourceDef] = &[
         hive: HKEY_LOCAL_MACHINE,
         run_subkey: "",
         approved_subkey: r"SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\StartupFolder",
-        sam: KEY_WOW64_64KEY,
+        run_sam: KEY_WOW64_64KEY,
+        approved_sam: KEY_WOW64_64KEY,
     },
 ];
 
@@ -175,11 +182,11 @@ const SOURCES: &[StartupSourceDef] = &[
 pub fn list_startup_items() -> Vec<StartupItem> {
     let mut items = Vec::new();
     for src in SOURCES {
-        let approved_map = read_approved_map(src.hive, src.approved_subkey, src.sam);
+        let approved_map = read_approved_map(src.hive, src.approved_subkey, src.approved_sam);
         match src.kind {
             SourceKind::RegistryRun => {
                 let root = RegKey::predef(src.hive);
-                if let Ok(k) = root.open_subkey_with_flags(src.run_subkey, KEY_READ | src.sam) {
+                if let Ok(k) = root.open_subkey_with_flags(src.run_subkey, KEY_READ | src.run_sam) {
                     for (name, val) in k.enum_values().flatten() {
                         if name.trim().is_empty() {
                             continue;
@@ -309,10 +316,13 @@ fn inspection_command_path(command: &str) -> Option<String> {
 /// Non-destructively enables or disables a startup item by writing Windows `StartupApproved` 12-byte status.
 pub fn set_startup_enabled(id: &str, enable: bool) -> Result<StartupItem> {
     let (src, name) = startup_source(id)?;
+    if !list_startup_items().iter().any(|it| it.id == id) {
+        return Err(anyhow!("Startup item '{}' does not exist", id));
+    }
 
     let root = RegKey::predef(src.hive);
     let (approved_key, _) = root
-        .create_subkey_with_flags(src.approved_subkey, KEY_ALL_ACCESS | src.sam)
+        .create_subkey_with_flags(src.approved_subkey, KEY_ALL_ACCESS | src.approved_sam)
         .with_context(|| {
             format!(
                 "Failed to open StartupApproved key ({}); administrator rights may be required",
@@ -450,12 +460,19 @@ pub fn list_third_party_services() -> Vec<ThirdPartyServiceItem> {
         return Vec::new();
     };
 
+    let windows_dir_prefix = format!(
+        r"{}\",
+        windows_dir_or_default()
+            .to_string_lossy()
+            .to_ascii_lowercase()
+    );
     let mut out = Vec::new();
     for svc_name in root.enum_keys().flatten() {
         let Ok(sk) = root.open_subkey_with_flags(&svc_name, KEY_READ) else {
             continue;
         };
-        let Some(image_path) = third_party_service_image(&svc_name, &sk) else {
+        let Some(image_path) = third_party_service_image(&svc_name, &sk, &windows_dir_prefix)
+        else {
             continue;
         };
         let start_val: u32 = sk.get_value("Start").unwrap_or(3);
@@ -533,7 +550,7 @@ pub fn set_service_start_mode(
 
     if !crate::sysinfo::SystemInfo::collect().is_admin {
         return Err(anyhow!(
-            "Changing Windows service startup mode requires Administrator privileges. Please click '一键提权为管理员' first."
+            "Changing Windows service startup mode requires Administrator privileges."
         ));
     }
 
@@ -544,10 +561,16 @@ pub fn set_service_start_mode(
         other => return Err(anyhow!("Unsupported service start mode '{}'", other)),
     };
 
+    let windows_dir_prefix = format!(
+        r"{}\",
+        windows_dir_or_default()
+            .to_string_lossy()
+            .to_ascii_lowercase()
+    );
     let key = RegKey::predef(HKEY_LOCAL_MACHINE)
         .open_subkey_with_flags(format!(r"{SERVICES_KEY}\{trimmed}"), KEY_READ)
         .with_context(|| format!("Could not verify service '{trimmed}'"))?;
-    if third_party_service_image(trimmed, &key).is_none()
+    if third_party_service_image(trimmed, &key, &windows_dir_prefix).is_none()
         || !matches!(key.get_value::<u32, _>("Start"), Ok(2..=4))
     {
         return Err(anyhow!(
@@ -590,11 +613,32 @@ pub fn list_scheduled_tasks() -> Vec<ScheduledTaskItem> {
 /// Enables or disables a third-party scheduled task via `schtasks.exe /Change`.
 pub fn set_scheduled_task_enabled(task_path: &str, enabled: bool) -> Result<()> {
     let trimmed = task_path.trim();
-    if !trimmed.starts_with('\\')
-        || trimmed.contains("..")
-        || trimmed
-            .to_ascii_lowercase()
-            .starts_with(r"\microsoft\windows\")
+    if !trimmed.starts_with(['\\', '/']) {
+        return Err(anyhow!(
+            "Refusing to modify invalid or core Windows scheduled task: '{}'",
+            trimmed
+        ));
+    }
+    let mut normalized = String::from("\\");
+    for part in trimmed.replace('/', "\\").split('\\') {
+        if part.is_empty() {
+            continue;
+        }
+        if part == "." || part == ".." {
+            return Err(anyhow!(
+                "Refusing to modify invalid or core Windows scheduled task: '{}'",
+                trimmed
+            ));
+        }
+        if normalized.len() > 1 {
+            normalized.push('\\');
+        }
+        normalized.push_str(part);
+    }
+    let lower = normalized.to_ascii_lowercase();
+    if normalized == "\\"
+        || lower == r"\microsoft\windows"
+        || lower.starts_with(r"\microsoft\windows\")
     {
         return Err(anyhow!(
             "Refusing to modify invalid or core Windows scheduled task: '{}'",
@@ -605,7 +649,7 @@ pub fn set_scheduled_task_enabled(task_path: &str, enabled: bool) -> Result<()> 
     let flag = if enabled { "/ENABLE" } else { "/DISABLE" };
     let output = crate::system_tools::system32_command("schtasks.exe")?
         .creation_flags(CREATE_NO_WINDOW)
-        .args(["/Change", "/TN", trimmed, flag])
+        .args(["/Change", "/TN", &normalized, flag])
         .output()
         .context("Failed to execute schtasks.exe")?;
 
@@ -621,7 +665,7 @@ pub fn set_scheduled_task_enabled(task_path: &str, enabled: bool) -> Result<()> 
     Ok(())
 }
 
-fn third_party_service_image(name: &str, key: &RegKey) -> Option<String> {
+fn third_party_service_image(name: &str, key: &RegKey, windows_dir_prefix: &str) -> Option<String> {
     if !matches!(
         key.get_value::<u32, _>("Type"),
         Ok(0x10 | 0x20 | 0x110 | 0x120)
@@ -631,10 +675,11 @@ fn third_party_service_image(name: &str, key: &RegKey) -> Option<String> {
     let value = key.get_raw_value("ImagePath").ok()?;
     let raw = reg_value_to_string(&value);
     let image = raw.trim();
-    (!image.is_empty() && !is_core_windows_service(name, image)).then(|| image.to_string())
+    (!image.is_empty() && !is_core_windows_service(name, image, windows_dir_prefix))
+        .then(|| image.to_string())
 }
 
-fn is_core_windows_service(name: &str, image_path: &str) -> bool {
+fn is_core_windows_service(name: &str, image_path: &str, windows_dir_prefix: &str) -> bool {
     let lower_path = image_path
         .trim()
         .trim_start_matches('"')
@@ -647,12 +692,7 @@ fn is_core_windows_service(name: &str, image_path: &str) -> bool {
         || lower_path.starts_with(r"%systemroot%\")
         || lower_path.starts_with(r"%windir%\")
         || lower_path.starts_with(r"\systemroot\")
-        || crate::system_tools::windows_dir().is_ok_and(|path| {
-            lower_path.starts_with(&format!(
-                r"{}\",
-                path.to_string_lossy().to_ascii_lowercase()
-            ))
-        })
+        || lower_path.starts_with(windows_dir_prefix)
         || lower_path.contains("svchost.exe")
         || lower_path.contains("msmpeng.exe")
         || lower_path.contains("nissrv.exe")
