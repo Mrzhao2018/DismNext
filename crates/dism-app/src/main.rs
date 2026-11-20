@@ -47,7 +47,7 @@ use state::{AppState, CleanupScanCache};
     about = "DismNext Desktop Host Server & GUI Launcher"
 )]
 struct Args {
-    #[arg(long, default_value_t = 9527)]
+    #[arg(long, default_value_t = 9527, value_parser = clap::value_parser!(u16).range(1..))]
     port: u16,
 
     #[arg(long)]
@@ -188,7 +188,9 @@ fn main() -> Result<()> {
                     || state.scan_jobs.is_active()
                     || state.maintenance_jobs.is_active()
                     || uninstall_running(&state);
-                if desktop.idle(has_work) {
+                let native_window_open =
+                    admin_desktop.as_ref().map(|desktop| desktop.window_open());
+                if desktop.idle(has_work, native_window_open) {
                     break;
                 }
             }
@@ -489,4 +491,14 @@ mod tests {
         assert_eq!(connection.read_timeout().unwrap(), timeout);
         assert_eq!(connection.write_timeout().unwrap(), timeout);
     }
+}
+#[test]
+fn listen_port_must_be_nonzero() {
+    assert!(Args::try_parse_from(["dism-app", "--port", "0"]).is_err());
+    assert_eq!(
+        Args::try_parse_from(["dism-app", "--port", "65535"])
+            .unwrap()
+            .port,
+        65535
+    );
 }

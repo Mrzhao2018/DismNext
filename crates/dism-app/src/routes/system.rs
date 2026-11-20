@@ -64,6 +64,7 @@ pub(super) fn handle(req: &mut Request, path: &str, state: &AppState) -> Result<
                 state.catalog_path.is_none() && state.ui_dir.is_none() && !state.dev_origin,
                 "Restart DismNext directly as administrator to use an external catalog or UI"
             );
+            crate::admin_window::machine_runtime()?;
             relaunch_as_admin(&["--port".to_string(), state.port.to_string()])?;
             state.relaunching.store(true, Ordering::Release);
             Ok(serde_json::json!({ "already_admin": false, "relaunching": true }))

@@ -249,7 +249,7 @@ checksum = "a31eee39dddec8330830986fcd7625edb5a24ec90ea038215273bbc3adb08ac6"
 
 [[package]]
 name = "dism-app"
-version = "2.1.1"
+version = "2.2.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -265,7 +265,7 @@ dependencies = [
 
 [[package]]
 name = "dism-cli"
-version = "2.1.1"
+version = "2.2.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -276,7 +276,7 @@ dependencies = [
 
 [[package]]
 name = "dism-core"
-version = "2.1.1"
+version = "2.2.0"
 dependencies = [
  "anyhow",
  "blake3",

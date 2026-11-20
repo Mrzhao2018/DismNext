@@ -144,5 +144,5 @@ cargo test --workspace --locked
 
 ```powershell
 .\scripts\package_windows.ps1
-.\scripts\check_windows_package.ps1 -PackageDirectory .\target\windows-release\v2.1.1
+.\scripts\check_windows_package.ps1 -PackageDirectory .\target\windows-release\v2.2.0
 ```

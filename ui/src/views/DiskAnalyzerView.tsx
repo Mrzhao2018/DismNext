@@ -19,6 +19,7 @@ import {
   TabList,
   Text,
   makeStyles,
+  mergeClasses,
   tokens,
 } from '@fluentui/react-components';
 import {
@@ -115,6 +116,12 @@ const useStyles = makeStyles({
     gap: '8px',
     minHeight: '160px',
     overflow: 'hidden',
+  },
+  compactResults: {
+    '@media (max-height: 740px)': { flex: '1 1 0' },
+  },
+  compactTreemap: {
+    '@media (max-height: 740px)': { display: 'none' },
   },
   paneCard: {
     display: 'flex',
@@ -832,7 +839,8 @@ export const DiskAnalyzerView: React.FC<Props> = ({ visible, lang, onSystemUpdat
         <>
           <div ref={splitRef} className={styles.workspaceSplit}>
             {/* Top Split: Left TreeGrid / Largest Files + Right Extension Breakdown */}
-            <div className={styles.topSplit} style={{ height: `${topHeightPct}%` }}>
+            <div className={mergeClasses(styles.topSplit, leftTab === 'duplicates' && styles.compactResults)}
+              style={{ height: `${topHeightPct}%` }}>
               {/* Left Pane */}
               <div className={styles.paneCard}>
                 {leftTab === 'tree' ? (
@@ -1302,7 +1310,7 @@ export const DiskAnalyzerView: React.FC<Props> = ({ visible, lang, onSystemUpdat
 
             {/* Draggable Splitter */}
             <div
-              className={styles.resizer}
+              className={mergeClasses(styles.resizer, leftTab === 'duplicates' && styles.compactTreemap)}
               onMouseDown={startResize}
               title={lang === 'zh' ? '上下拖动调整分区高度' : 'Drag to resize panes'}
             >
@@ -1310,7 +1318,7 @@ export const DiskAnalyzerView: React.FC<Props> = ({ visible, lang, onSystemUpdat
             </div>
 
             {/* Bottom Pane: Full-width 3D Cushion Treemap */}
-            <div className={styles.treemapCard}>
+            <div className={mergeClasses(styles.treemapCard, leftTab === 'duplicates' && styles.compactTreemap)}>
               <div className={styles.treemapToolbar}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
                   <Button

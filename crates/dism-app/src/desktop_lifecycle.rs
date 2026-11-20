@@ -292,8 +292,11 @@ impl DesktopLifecycle {
         Ok(())
     }
 
-    pub(crate) fn idle(&self, has_work: bool) -> bool {
-        self.0.lock().unwrap().idle(Instant::now(), has_work)
+    pub(crate) fn idle(&self, has_work: bool, native_window_open: Option<bool>) -> bool {
+        self.0
+            .lock()
+            .unwrap()
+            .idle(Instant::now(), has_work, native_window_open)
     }
 }
 
@@ -327,12 +330,13 @@ impl WindowLeases {
         );
     }
 
-    fn idle(&mut self, now: Instant, has_work: bool) -> bool {
+    fn idle(&mut self, now: Instant, has_work: bool, native_window_open: Option<bool>) -> bool {
         self.prune(now);
-        if has_work
-            || self.windows.values().any(|lease| lease.open)
-            || self.launch_until.is_some_and(|until| now < until)
-        {
+        let has_window = native_window_open.unwrap_or_else(|| {
+            self.windows.values().any(|lease| lease.open)
+                || self.launch_until.is_some_and(|until| now < until)
+        });
+        if has_work || has_window {
             self.idle_since = None;
             return false;
         }
@@ -343,6 +347,27 @@ impl WindowLeases {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_window_exit_does_not_wait_for_browser_heartbeat_expiry() {
+        let now = Instant::now();
+        let mut leases = WindowLeases {
+            launch_until: Some(now + STARTUP_GRACE),
+            ..Default::default()
+        };
+        leases.update(
+            WindowUpdate {
+                id: "webview".into(),
+                open: true,
+                sequence: 1,
+            },
+            now,
+        );
+        assert!(!leases.idle(now + EXIT_GRACE, false, Some(true)));
+        assert!(!leases.idle(now + EXIT_GRACE * 2, true, Some(false)));
+        assert!(!leases.idle(now + EXIT_GRACE * 3, false, Some(false)));
+        assert!(leases.idle(now + EXIT_GRACE * 4, false, Some(false)));
+    }
 
     #[test]
     fn a_second_instance_signals_the_existing_host_once() {
@@ -364,7 +389,7 @@ mod tests {
             launch_until: Some(now + STARTUP_GRACE),
             ..WindowLeases::default()
         };
-        assert!(!leases.idle(now + EXIT_GRACE, false));
+        assert!(!leases.idle(now + EXIT_GRACE, false, None));
         for id in ["first", "second"] {
             leases.update(
                 WindowUpdate {
@@ -383,7 +408,7 @@ mod tests {
             },
             now + EXIT_GRACE,
         );
-        assert!(!leases.idle(now + EXIT_GRACE * 2, false));
+        assert!(!leases.idle(now + EXIT_GRACE * 2, false, None));
         leases.update(
             WindowUpdate {
                 id: "second".into(),
@@ -400,9 +425,9 @@ mod tests {
             },
             now + EXIT_GRACE * 2,
         );
-        assert!(!leases.idle(now + EXIT_GRACE * 3, true));
-        assert!(!leases.idle(now + EXIT_GRACE * 4, false));
-        assert!(leases.idle(now + EXIT_GRACE * 5, false));
+        assert!(!leases.idle(now + EXIT_GRACE * 3, true, None));
+        assert!(!leases.idle(now + EXIT_GRACE * 4, false, None));
+        assert!(leases.idle(now + EXIT_GRACE * 5, false, None));
     }
 
     #[test]
@@ -417,9 +442,9 @@ mod tests {
             },
             now,
         );
-        assert!(!leases.idle(now + WINDOW_TTL - Duration::from_secs(1), false));
-        assert!(!leases.idle(now + WINDOW_TTL, false));
-        assert!(leases.idle(now + WINDOW_TTL + EXIT_GRACE, false));
+        assert!(!leases.idle(now + WINDOW_TTL - Duration::from_secs(1), false, None));
+        assert!(!leases.idle(now + WINDOW_TTL, false, None));
+        assert!(leases.idle(now + WINDOW_TTL + EXIT_GRACE, false, None));
     }
 }
 #[test]

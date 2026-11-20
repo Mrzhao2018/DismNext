@@ -53,7 +53,7 @@ pub(crate) struct AdminDesktop {
 impl AdminDesktop {
     pub(crate) fn new() -> Result<Self> {
         let program_files = known_folder(&FOLDERID_ProgramFiles)?;
-        let runtime = trusted_runtime(&program_files, &known_folder(&FOLDERID_ProgramFilesX86)?)?;
+        let runtime = machine_runtime()?;
         let nonce = crate::request_security::new_session_token()?;
         let profile = program_files.join(format!("DismNext-WebView2-{nonce}"));
         check_directory(&program_files)?;
@@ -90,8 +90,10 @@ impl AdminDesktop {
                 if unsafe { GetWindowThreadProcessId(window, Some(&mut pid)) } != 0
                     && pid == std::process::id()
                 {
-                    unsafe { PostMessageW(Some(window), ACTIVATE, WPARAM(0), LPARAM(0))? };
+                    let activated =
+                        unsafe { PostMessageW(Some(window), ACTIVATE, WPARAM(0), LPARAM(0)) };
                     self.window = Some((handle, thread));
+                    activated?;
                     return Ok(());
                 }
             }
@@ -117,6 +119,12 @@ impl AdminDesktop {
         self.window = Some((handle, thread));
         Ok(())
     }
+
+    pub(crate) fn window_open(&self) -> bool {
+        self.window
+            .as_ref()
+            .is_some_and(|(_, thread)| !thread.is_finished())
+    }
 }
 
 impl Drop for AdminDesktop {
@@ -141,6 +149,13 @@ fn known_folder(id: &GUID) -> Result<PathBuf> {
     let value = PathBuf::from(OsString::from_wide(unsafe { path.as_wide() }));
     unsafe { CoTaskMemFree(Some(path.0.cast())) };
     Ok(value)
+}
+
+pub(crate) fn machine_runtime() -> Result<PathBuf> {
+    trusted_runtime(
+        &known_folder(&FOLDERID_ProgramFiles)?,
+        &known_folder(&FOLDERID_ProgramFilesX86)?,
+    )
 }
 
 fn check_directory(path: &Path) -> Result<()> {
@@ -260,12 +275,13 @@ fn window_loop(
         let _ = unsafe { DestroyWindow(window) };
     }
     result?;
+    if ready.send(Ok(window.0 as usize)).is_err() {
+        let _ = unsafe { DestroyWindow(window) };
+        return Ok(());
+    }
     if integrity >= HIGH_INTEGRITY {
         let _ = unsafe { ShowWindow(window, SW_SHOW) };
     }
-    ready
-        .send(Ok(window.0 as usize))
-        .context("Administrator host closed")?;
     let mut msg = MSG::default();
     loop {
         match unsafe { GetMessageW(&mut msg, None, 0, 0) }.0 {
@@ -455,11 +471,12 @@ unsafe extern "system" fn window_proc(
     lparam: LPARAM,
 ) -> LRESULT {
     match msg {
-        WM_SIZE => CONTROLLER.with(|slot| {
-            if let Some(controller) = slot.borrow().as_ref() {
-                resize(window, controller);
+        WM_SIZE => {
+            let controller = CONTROLLER.with(|slot| slot.borrow().clone());
+            if let Some(controller) = controller {
+                resize(window, &controller);
             }
-        }),
+        }
         WM_DESTROY => {
             CONTROLLER.with(|slot| {
                 if let Some(controller) = slot.take() {
